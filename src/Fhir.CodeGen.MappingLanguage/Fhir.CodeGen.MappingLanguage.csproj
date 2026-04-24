@@ -7,7 +7,7 @@
 
   <ItemGroup>
     <PackageReference Include="Antlr4.Runtime.Standard" Version="4.13.1" />
-    <PackageReference Include="Hl7.Fhir.R5" Version="5.13.1" />
+    <PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
     <PackageReference Include="brianpos.Fhir.Base.FhirPath.Validator" Version="5.12.2-rc2" />
   </ItemGroup>
 

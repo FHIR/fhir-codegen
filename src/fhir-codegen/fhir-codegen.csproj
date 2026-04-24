@@ -17,17 +17,17 @@
   </PropertyGroup>
 
   <ItemGroup>
-	<PackageReference Include="Hl7.Fhir.R5" Version="5.13.1" />
-	<PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.11" />
-	<PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="9.0.11" />
-	<PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.11" />
-	<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.11" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.11" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.11" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.11" />
-    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+	<PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
+	<PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.15" />
+	<PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="9.0.15" />
+	<PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.15" />
+	<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.15" />
+    <PackageReference Include="System.CommandLine" Version="2.0.7" />
     <PackageReference Include="System.CommandLine.NamingConventionBinder" Version="2.0.0-beta4.22272.1" />
-    <PackageReference Include="System.Text.Json" Version="9.0.11" />
+    <PackageReference Include="System.Text.Json" Version="9.0.15" />
   </ItemGroup>
 
   <ItemGroup>
