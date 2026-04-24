@@ -24,8 +24,9 @@ public class ConfigSql : ConfigRoot
     {
         Name = "View_Definition_Directory",
         DefaultValue = "",
-        CliOption = new System.CommandLine.Option<string>("--view-definition-directory", "Local path to a source for view definitions to load.")
+        CliOption = new System.CommandLine.Option<string>("--view-definition-directory")
         {
+            Description = "Local path to a source for view definitions to load.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -42,8 +43,9 @@ public class ConfigSql : ConfigRoot
     {
         Name = "Export_Database_Name",
         DefaultValue = "export.sqlite",
-        CliOption = new System.CommandLine.Option<string>("--export-db-name", "Name of the database to generate.")
+        CliOption = new System.CommandLine.Option<string>("--export-db-name")
         {
+            Description = "Name of the database to generate.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },

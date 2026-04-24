@@ -24,8 +24,9 @@ public class CqlOptions : ConfigGenerate
     {
         Name = "CqlSupportDir",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string?>("--cql-support-dir", "Directory containing CQL support files (R5 ConceptMaps and Parameters).")
+        CliOption = new System.CommandLine.Option<string?>("--cql-support-dir")
         {
+            Description = "Directory containing CQL support files (R5 ConceptMaps and Parameters).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },

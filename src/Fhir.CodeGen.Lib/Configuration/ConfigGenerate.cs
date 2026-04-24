@@ -27,8 +27,9 @@ public class ConfigGenerate : ConfigRoot
         Name = "IncludeExperimental",
         EnvVarName = "Include_Experimental",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>([ "--include-experimental", "--experimental" ], "If the output should include structures marked experimental.")
+        CliOption = new System.CommandLine.Option<bool>("--include-experimental", "--experimental")
         {
+            Description = "If the output should include structures marked experimental.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -46,8 +47,9 @@ public class ConfigGenerate : ConfigRoot
         Name = "FhirServerUrl",
         EnvVarName = "Fhir_Server_Url",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string>("--fhir-server-url", "FHIR Server URL to pull a CapabilityStatement (or Conformance) from. Requires application/fhir+json.")
+        CliOption = new System.CommandLine.Option<string>("--fhir-server-url")
         {
+            Description = "FHIR Server URL to pull a CapabilityStatement (or Conformance) from. Requires application/fhir+json.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -62,8 +64,9 @@ public class ConfigGenerate : ConfigRoot
         Name = "SmartConfigUrl",
         EnvVarName = "Smart_Config_Url",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string>("--smart-config-url", "URL to pull a .well-known/smart-configuration file from, if different from [base]/.well-known/smart-configuration.  Requires application/json (per spec).")
+        CliOption = new System.CommandLine.Option<string>("--smart-config-url")
         {
+            Description = "URL to pull a .well-known/smart-configuration file from, if different from [base]/.well-known/smart-configuration.  Requires application/json (per spec).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -81,8 +84,9 @@ public class ConfigGenerate : ConfigRoot
         Name = "FhirServerHeader",
         EnvVarName = "Fhir_Server_Header",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string>("--fhir-server-header", "FHIR Server headers to use when pulling a CapabilityStatement (or Conformance) from a FHIR server.  Use <key>=<value> format.")
+        CliOption = new System.CommandLine.Option<string>("--fhir-server-header")
         {
+            Description = "FHIR Server headers to use when pulling a CapabilityStatement (or Conformance) from a FHIR server.  Use <key>=<value> format.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
             Required = false,
         },
@@ -99,8 +103,9 @@ public class ConfigGenerate : ConfigRoot
         Name = "ResolveServerCanonicals",
         EnvVarName = "Resolve_Server_Canonicals",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--resolve-server-canonicals", "If canonical URLs used in server Capability Statement should be resolved.")
+        CliOption = new System.CommandLine.Option<bool>("--resolve-server-canonicals")
         {
+            Description = "If canonical URLs used in server Capability Statement should be resolved.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -117,8 +122,9 @@ public class ConfigGenerate : ConfigRoot
         Name = "ResolveExternalCanonicals",
         EnvVarName = "Resolve_External_Canonicals",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--resolve-external-canonicals", "If canonical URLs external to the server should be resolved.")
+        CliOption = new System.CommandLine.Option<bool>("--resolve-external-canonicals")
         {
+            Description = "If canonical URLs external to the server should be resolved.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },

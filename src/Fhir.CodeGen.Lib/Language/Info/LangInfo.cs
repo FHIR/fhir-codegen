@@ -48,8 +48,9 @@ public class LangInfo : ILanguage
         {
             Name = "FileFormat",
             DefaultValue = LangInfo.InfoFormat.Text,
-            CliOption = new System.CommandLine.Option<LangInfo.InfoFormat>("--format", "File format to export.")
+            CliOption = new System.CommandLine.Option<LangInfo.InfoFormat>("--format")
             {
+                Description = "File format to export.",
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
                 Required = false,
             },

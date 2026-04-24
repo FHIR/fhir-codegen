@@ -39,8 +39,9 @@ public class TypeScript : ILanguage
         {
             Name = "Namespace",
             DefaultValue = DefaultNamespace,
-            CliOption = new System.CommandLine.Option<string>("--namespace", "Base namespace for TypeScript files, default is 'fhir{VersionNumber}', use '' (empty string) for none.")
+            CliOption = new System.CommandLine.Option<string>("--namespace")
             {
+                Description = "Base namespace for TypeScript files, default is 'fhir{VersionNumber}', use '' (empty string) for none.",
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
                 Required = false,
             },
@@ -56,8 +57,9 @@ public class TypeScript : ILanguage
         {
             Name = "MinTypeScriptVersion",
             DefaultValue = DefaultMinTsVersion,
-            CliOption = new System.CommandLine.Option<string>("--min-ts-version", "Minimum TypeScript version, use '' (empty string) for none.")
+            CliOption = new System.CommandLine.Option<string>("--min-ts-version")
             {
+                Description = "Minimum TypeScript version, use '' (empty string) for none.",
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
                 Required = false,
             },
@@ -73,8 +75,9 @@ public class TypeScript : ILanguage
         {
             Name = "InlineEnums",
             DefaultValue = true,
-            CliOption = new System.CommandLine.Option<string>("--inline-enums", "If code elements with required bindings should have inlined enums.")
+            CliOption = new System.CommandLine.Option<string>("--inline-enums")
             {
+                Description = "If code elements with required bindings should have inlined enums.",
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
                 Required = false,
             },

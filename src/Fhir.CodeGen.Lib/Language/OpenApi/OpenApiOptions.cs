@@ -23,8 +23,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "OasVersion",
         DefaultValue = OaVersion.v3,
-        CliOption = new System.CommandLine.Option<OaVersion>("--oas-version", "Open API version to export as.")
+        CliOption = new System.CommandLine.Option<OaVersion>("--oas-version")
         {
+            Description = "Open API version to export as.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -40,8 +41,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "FileFormat",
         DefaultValue = OaFileFormat.JSON,
-        CliOption = new System.CommandLine.Option<OaFileFormat>("--format", "File format to export.")
+        CliOption = new System.CommandLine.Option<OaFileFormat>("--format")
         {
+            Description = "File format to export.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -56,8 +58,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "Title",
         DefaultValue = "",
-        CliOption = new System.CommandLine.Option<string>("--title", "Title to use in Info section, defaults to 'FHIR [FhirSequence].[VersionString]'.")
+        CliOption = new System.CommandLine.Option<string>("--title")
         {
+            Description = "Title to use in Info section, defaults to 'FHIR [FhirSequence].[VersionString]'.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -69,8 +72,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "BasicScopesOnly",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--basic-scopes-only", "If only basic scopes should be included.")
+        CliOption = new System.CommandLine.Option<bool>("--basic-scopes-only")
         {
+            Description = "If only basic scopes should be included.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -85,8 +89,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "DefinitionVersion",
         DefaultValue = "",
-        CliOption = new System.CommandLine.Option<string>("--definition-version", "Version number to use in the OpenAPI file, defaults to '[FHIR Version]'")
+        CliOption = new System.CommandLine.Option<string>("--definition-version")
         {
+            Description = "Version number to use in the OpenAPI file, defaults to '[FHIR Version]'",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -102,8 +107,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "ExtensionSupport",
         DefaultValue = ExtensionSupportLevel.NonPrimitive,
-        CliOption = new System.CommandLine.Option<ExtensionSupportLevel>("--extension-support", "The level of extensions to include.")
+        CliOption = new System.CommandLine.Option<ExtensionSupportLevel>("--extension-support")
         {
+            Description = "The level of extensions to include.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -119,8 +125,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SchemaLevel",
         DefaultValue = OaSchemaLevelCodes.Names,
-        CliOption = new System.CommandLine.Option<OaSchemaLevelCodes>("--schema-level", "The level of detail to include in the schema.")
+        CliOption = new System.CommandLine.Option<OaSchemaLevelCodes>("--schema-level")
         {
+            Description = "The level of detail to include in the schema.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -136,8 +143,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SchemaStyle",
         DefaultValue = OaSchemaStyleCodes.TypeReferences,
-        CliOption = new System.CommandLine.Option<OaSchemaStyleCodes>("--schema-style", "The style of schema to use.")
+        CliOption = new System.CommandLine.Option<OaSchemaStyleCodes>("--schema-style")
         {
+            Description = "The style of schema to use.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -153,8 +161,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "MaxRecursions",
         DefaultValue = 0,
-        CliOption = new System.CommandLine.Option<int>("--max-recursions", "The maximum depth to expand recursions.")
+        CliOption = new System.CommandLine.Option<int>("--max-recursions")
         {
+            Description = "The maximum depth to expand recursions.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -170,8 +179,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "FhirMimeTypes",
         DefaultValue = OaFhirMimeCodes.Capabilities,
-        CliOption = new System.CommandLine.Option<OaFhirMimeCodes>("--fhir-mime-types", "Which FHIR MIME types to support.")
+        CliOption = new System.CommandLine.Option<OaFhirMimeCodes>("--fhir-mime-types")
         {
+            Description = "Which FHIR MIME types to support.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -187,8 +197,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "PatchMimeTypes",
         DefaultValue = OaPatchMimeCodes.Capabilities,
-        CliOption = new System.CommandLine.Option<OaPatchMimeCodes>("--patch-mime-types", "Which FHIR Patch MIME types to support.")
+        CliOption = new System.CommandLine.Option<OaPatchMimeCodes>("--patch-mime-types")
         {
+            Description = "Which FHIR Patch MIME types to support.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -204,8 +215,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SearchSupport",
         DefaultValue = OaHttpMethods.Both,
-        CliOption = new System.CommandLine.Option<OaHttpMethods>("--search-support", "Which HTTP methods to support in search.")
+        CliOption = new System.CommandLine.Option<OaHttpMethods>("--search-support")
         {
+            Description = "Which HTTP methods to support in search.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -223,8 +235,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "ExportSearchParams",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--export-search-params", "If search parameters should be included in the schema.")
+        CliOption = new System.CommandLine.Option<bool>("--export-search-params")
         {
+            Description = "If search parameters should be included in the schema.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -240,8 +253,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "PostSearchParamLocation",
         DefaultValue = OaSearchPostParameterLocationCodes.Body,
-        CliOption = new System.CommandLine.Option<OaSearchPostParameterLocationCodes>("--post-search-param-location", "Where to put search parameters in POST requests.")
+        CliOption = new System.CommandLine.Option<OaSearchPostParameterLocationCodes>("--post-search-param-location")
         {
+            Description = "Where to put search parameters in POST requests.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -259,8 +273,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "ConsolidateSearchParameters",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--consolidate-search-parameters", "If search parameters should be consolidated.")
+        CliOption = new System.CommandLine.Option<bool>("--consolidate-search-parameters")
         {
+            Description = "If search parameters should be consolidated.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -276,8 +291,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "OperationSupport",
         DefaultValue = OaHttpMethods.Both,
-        CliOption = new System.CommandLine.Option<OaHttpMethods>("--operation-support", "Which HTTP methods to support in operations.")
+        CliOption = new System.CommandLine.Option<OaHttpMethods>("--operation-support")
         {
+            Description = "Which HTTP methods to support in operations.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -293,8 +309,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "UpdateCreate",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--update-create", "If update can commit to a new identity.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--update-create")
         {
+            Description = "If update can commit to a new identity.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -309,8 +326,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "ConditionalRead",
         DefaultValue = null!,
-        CliOption = new System.CommandLine.Option<CapabilityStatement.ConditionalReadStatus>("--conditional-read", "Override the capability statement conditional read support.")
+        CliOption = new System.CommandLine.Option<CapabilityStatement.ConditionalReadStatus>("--conditional-read")
         {
+            Description = "Override the capability statement conditional read support.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -326,8 +344,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionRead",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--read", "If the read interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--read")
         {
+            Description = "If the read interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -343,8 +362,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionVRead",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--vread", "If the version-read interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--vread")
         {
+            Description = "If the version-read interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -360,8 +380,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionUpdate",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--update", "If the update interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--update")
         {
+            Description = "If the update interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -377,8 +398,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionUpdateConditional",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--update-conditional", "If the conditional update interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--update-conditional")
         {
+            Description = "If the conditional update interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -394,8 +416,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionPatch",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--patch", "If the patch interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--patch")
         {
+            Description = "If the patch interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -411,8 +434,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionPatchConditional",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--patch-conditional", "If the conditional patch interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--patch-conditional")
         {
+            Description = "If the conditional patch interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -428,8 +452,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionDelete",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete", "If the delete interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete")
         {
+            Description = "If the delete interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -445,8 +470,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionDeleteConditionalSingle",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete-conditional-single", "If the conditional delete interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete-conditional-single")
         {
+            Description = "If the conditional delete interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -462,8 +488,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionDeleteConditionalMultiple",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete-conditional-multiple", "If the conditional delete interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete-conditional-multiple")
         {
+            Description = "If the conditional delete interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -479,8 +506,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionDeleteHistory",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete-history", "If the delete history interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete-history")
         {
+            Description = "If the delete history interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -497,8 +525,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionDeleteHistoryVersion",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete-history-version", "If the delete history version interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--delete-history-version")
         {
+            Description = "If the delete history version interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -515,8 +544,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionHistoryInstance",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--history-instance-read", "If history instance read is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--history-instance-read")
         {
+            Description = "If history instance read is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -532,8 +562,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionHistoryType",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--history-type", "If history for a resource type is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--history-type")
         {
+            Description = "If history for a resource type is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -548,8 +579,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionHistorySystem",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--history-system", "If history for a system is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--history-system")
         {
+            Description = "If history for a system is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -565,8 +597,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionCreate",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--create", "If the create interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--create")
         {
+            Description = "If the create interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -582,8 +615,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionCreateConditional",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--create-conditional", "If the conditional create interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--create-conditional")
         {
+            Description = "If the conditional create interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -599,8 +633,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionSearchType",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--search-type", "If the type search interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--search-type")
         {
+            Description = "If the type search interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -615,8 +650,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionSearchSystem",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--search-system", "If the system search interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--search-system")
         {
+            Description = "If the system search interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -631,8 +667,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionSearchCompartment",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--search-compartment", "If the compartment search interaction is supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--search-compartment")
         {
+            Description = "If the compartment search interaction is supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -647,8 +684,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionOperationSystem",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--operation-system", "If system-level operation interactions are supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--operation-system")
         {
+            Description = "If system-level operation interactions are supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -663,8 +701,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionOperationType",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--operation-type", "If type-level operation interactions are supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--operation-type")
         {
+            Description = "If type-level operation interactions are supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -679,8 +718,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "InteractionOperationInstance",
         DefaultValue = OaCapabilityBoolean.Capabilities,
-        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--operation-instance", "If instance-level operation interactions are supported.")
+        CliOption = new System.CommandLine.Option<OaCapabilityBoolean>("--operation-instance")
         {
+            Description = "If instance-level operation interactions are supported.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -696,8 +736,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SupportMetadata",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--metadata", "If the metadata endpoint should be included in the schema.")
+        CliOption = new System.CommandLine.Option<bool>("--metadata")
         {
+            Description = "If the metadata endpoint should be included in the schema.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -712,8 +753,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SupportBatch",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--batch", "If the batch endpoint should be included in the schema.")
+        CliOption = new System.CommandLine.Option<bool>("--batch")
         {
+            Description = "If the batch endpoint should be included in the schema.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -728,8 +770,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SupportTransaction",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--transaction", "If the transaction endpoint should be included in the schema.")
+        CliOption = new System.CommandLine.Option<bool>("--transaction")
         {
+            Description = "If the transaction endpoint should be included in the schema.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -745,8 +788,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SupportBundle",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--bundle", "If the bundle endpoint should be included in the schema.")
+        CliOption = new System.CommandLine.Option<bool>("--bundle")
         {
+            Description = "If the bundle endpoint should be included in the schema.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -764,8 +808,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "ExportReadOnly",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--read-only", "If the export should only contain HTTP GET support.")
+        CliOption = new System.CommandLine.Option<bool>("--read-only")
         {
+            Description = "If the export should only contain HTTP GET support.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -783,8 +828,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "ExportWriteOnly",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--write-only", "If the export should only contain HTTP POST, PUT, PATCH, and DELETE support.")
+        CliOption = new System.CommandLine.Option<bool>("--write-only")
         {
+            Description = "If the export should only contain HTTP POST, PUT, PATCH, and DELETE support.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -801,8 +847,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "PropertyDescriptions",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--descriptions", "If properties should include descriptions.")
+        CliOption = new System.CommandLine.Option<bool>("--descriptions")
         {
+            Description = "If properties should include descriptions.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -818,8 +865,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "DescriptionMaxLength",
         DefaultValue = 60,
-        CliOption = new System.CommandLine.Option<int>("--description-max-length", "The maximum length of a description.")
+        CliOption = new System.CommandLine.Option<int>("--description-max-length")
         {
+            Description = "The maximum length of a description.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -837,8 +885,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "PerformDescriptionValidation",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--description-validation", "If descriptions are required and should be validated.")
+        CliOption = new System.CommandLine.Option<bool>("--description-validation")
         {
+            Description = "If descriptions are required and should be validated.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -854,8 +903,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "ExpandProfiles",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--expand-profiles", "If profiles should be expanded.")
+        CliOption = new System.CommandLine.Option<bool>("--expand-profiles")
         {
+            Description = "If profiles should be expanded.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -871,8 +921,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "ExpandReferences",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--expand-references", "If references should be expanded.")
+        CliOption = new System.CommandLine.Option<bool>("--expand-references")
         {
+            Description = "If references should be expanded.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -888,8 +939,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "Minify",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--minify", "If the output should be minified.")
+        CliOption = new System.CommandLine.Option<bool>("--minify")
         {
+            Description = "If the output should be minified.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -905,8 +957,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "IdNamingConvention",
         DefaultValue = OaNamingConventionCodes.Pascal,
-        CliOption = new System.CommandLine.Option<OaNamingConventionCodes>("--id-convention", "The naming convention to use for ids.")
+        CliOption = new System.CommandLine.Option<OaNamingConventionCodes>("--id-convention")
         {
+            Description = "The naming convention to use for ids.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -922,8 +975,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "RemoveUncommonFields",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--remove-uncommon", "If the generator should remove some uncommon fields.")
+        CliOption = new System.CommandLine.Option<bool>("--remove-uncommon")
         {
+            Description = "If the generator should remove some uncommon fields.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -939,8 +993,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SingleResponses",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--single-responses", "If operations should only include a single response.")
+        CliOption = new System.CommandLine.Option<bool>("--single-responses")
         {
+            Description = "If operations should only include a single response.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -958,8 +1013,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "IncludeSummaries",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--summaries", "If responses should include summaries.")
+        CliOption = new System.CommandLine.Option<bool>("--summaries")
         {
+            Description = "If responses should include summaries.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -976,8 +1032,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "IncludeHttpHeaders",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--include-headers", "If HTTP headers should be included.")
+        CliOption = new System.CommandLine.Option<bool>("--include-headers")
         {
+            Description = "If HTTP headers should be included.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -993,8 +1050,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "MultiFile",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--multi-file", "If the output should be split into multiple files.")
+        CliOption = new System.CommandLine.Option<bool>("--multi-file")
         {
+            Description = "If the output should be split into multiple files.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -1021,8 +1079,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "HttpCommonParams",
         DefaultValue = string.Join(",", OpenApiCommon._httpCommonParameters.Keys),
-        CliOption = new System.CommandLine.Option<string>("--http-common-params", "Comma-separated list of common parameters to include in HTTP requests.")
+        CliOption = new System.CommandLine.Option<string>("--http-common-params")
         {
+            Description = "Comma-separated list of common parameters to include in HTTP requests.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -1051,8 +1110,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "HttpReadParams",
         DefaultValue = string.Join(",", OpenApiCommon._httpReadParameters.Keys),
-        CliOption = new System.CommandLine.Option<string>("--http-read-params", "Comma-separated list of common parameters to include in HTTP read requests.")
+        CliOption = new System.CommandLine.Option<string>("--http-read-params")
         {
+            Description = "Comma-separated list of common parameters to include in HTTP read requests.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -1078,8 +1138,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SearchResultParams",
         DefaultValue = string.Join(",", OpenApiCommon._searchResultParameters.Keys),
-        CliOption = new System.CommandLine.Option<string>("--search-result-params", "Comma-separated list of common parameters to include in search results.")
+        CliOption = new System.CommandLine.Option<string>("--search-result-params")
         {
+            Description = "Comma-separated list of common parameters to include in search results.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -1105,8 +1166,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "SearchCommonParams",
         DefaultValue = string.Join(",", _searchCommonParameters.Keys),
-        CliOption = new System.CommandLine.Option<string>("--search-common-params", "Comma-separated list of common parameters to include in search.")
+        CliOption = new System.CommandLine.Option<string>("--search-common-params")
         {
+            Description = "Comma-separated list of common parameters to include in search.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -1132,8 +1194,9 @@ public class OpenApiOptions : ConfigGenerate
     {
         Name = "HistoryParams",
         DefaultValue = string.Join(",", OpenApiCommon._historyParameters.Keys),
-        CliOption = new System.CommandLine.Option<string>("--history-params", "Comma-separated list of common parameters to include in history.")
+        CliOption = new System.CommandLine.Option<string>("--history-params")
         {
+            Description = "Comma-separated list of common parameters to include in history.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
