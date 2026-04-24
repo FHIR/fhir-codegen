@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text;
 using Shouldly;
 using Fhir.CodeGen.Lib.Configuration;
@@ -30,7 +30,7 @@ public class ConfigTests
         string[] args = ["--max-expansion-size", "2"];
 
         // attempt a parse
-        ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = parser.Parse(args);
 
         ConfigRoot config = new();
 
@@ -59,7 +59,7 @@ public class ConfigTests
         string[] args = ["--output-filename", "a.file"];
 
         // attempt a parse
-        ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = parser.Parse(args);
 
         ConfigRoot config = new();
 
@@ -88,7 +88,7 @@ public class ConfigTests
         string[] args = ["--use-official-registries"];
 
         // attempt a parse
-        ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = parser.Parse(args);
 
         ConfigRoot config = new();
 
@@ -117,7 +117,7 @@ public class ConfigTests
         string[] args = ["--use-official-registries", "true"];
 
         // attempt a parse
-        ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = parser.Parse(args);
 
         ConfigRoot config = new();
 
@@ -147,7 +147,7 @@ public class ConfigTests
         string[] args = ["--use-official-registries", "false"];
 
         // attempt a parse
-        ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = parser.Parse(args);
 
         ConfigRoot config = new();
 
@@ -176,7 +176,7 @@ public class ConfigTests
         string[] args = ["--additional-fhir-registry-urls", "http://a.co/", "--additional-fhir-registry-urls", "http://b.co"];
 
         // attempt a parse
-        ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = parser.Parse(args);
 
         ConfigRoot config = new();
 

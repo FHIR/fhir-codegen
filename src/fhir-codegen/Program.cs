@@ -63,7 +63,7 @@ public class Program
         Parser parser = BuildParser(envConfig);
 
         // attempt a parse
-        ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = parser.Parse(args);
 
         string command;
         string? subCommand;

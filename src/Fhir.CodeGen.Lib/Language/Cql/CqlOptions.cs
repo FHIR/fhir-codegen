@@ -1,4 +1,4 @@
-﻿// <copyright file="CqlOptions.cs" company="Microsoft Corporation">
+// <copyright file="CqlOptions.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -27,7 +27,7 @@ public class CqlOptions : ConfigGenerate
         CliOption = new System.CommandLine.Option<string?>("--cql-support-dir", "Directory containing CQL support files (R5 ConceptMaps and Parameters).")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -45,7 +45,7 @@ public class CqlOptions : ConfigGenerate
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

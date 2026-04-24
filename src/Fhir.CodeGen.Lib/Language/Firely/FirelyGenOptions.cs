@@ -1,4 +1,4 @@
-﻿// <copyright file="FirelyOptions.cs" company="Microsoft Corporation">
+// <copyright file="FirelyOptions.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -27,7 +27,7 @@ public class FirelyGenOptions : ConfigGenerate
         CliOption = new System.CommandLine.Option<CSharpFirelyCommon.GenSubset>("--subset", "Which subset of language exports to make.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -46,7 +46,7 @@ public class FirelyGenOptions : ConfigGenerate
         CliOption = new System.CommandLine.Option<bool>("--w5", "If the output should include 5W's mappings.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -63,7 +63,7 @@ public class FirelyGenOptions : ConfigGenerate
         CliOption = new System.CommandLine.Option<string>("--cql-model", "Name of the Cql model for which metadata attributes should be added to the pocos. 'Fhir401' is the only valid value at the moment.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -84,7 +84,7 @@ public class FirelyGenOptions : ConfigGenerate
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

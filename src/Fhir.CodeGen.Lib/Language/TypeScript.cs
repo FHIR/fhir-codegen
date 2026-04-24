@@ -1,4 +1,4 @@
-﻿// <copyright file="TypeScript.cs" company="Microsoft Corporation">
+// <copyright file="TypeScript.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -42,7 +42,7 @@ public class TypeScript : ILanguage
             CliOption = new System.CommandLine.Option<string>("--namespace", "Base namespace for TypeScript files, default is 'fhir{VersionNumber}', use '' (empty string) for none.")
             {
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-                IsRequired = false,
+                Required = false,
             },
         };
 
@@ -59,7 +59,7 @@ public class TypeScript : ILanguage
             CliOption = new System.CommandLine.Option<string>("--min-ts-version", "Minimum TypeScript version, use '' (empty string) for none.")
             {
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-                IsRequired = false,
+                Required = false,
             },
         };
 
@@ -76,7 +76,7 @@ public class TypeScript : ILanguage
             CliOption = new System.CommandLine.Option<string>("--inline-enums", "If code elements with required bindings should have inlined enums.")
             {
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-                IsRequired = false,
+                Required = false,
             },
         };
 
@@ -97,7 +97,7 @@ public class TypeScript : ILanguage
             return [.. base.GetOptions(), .. _options];
         }
 
-        public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+        public override void Parse(System.CommandLine.ParseResult parseResult)
         {
             // parse base properties
             base.Parse(parseResult);
