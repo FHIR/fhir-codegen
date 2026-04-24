@@ -27,8 +27,9 @@ public class RubyOptions : ConfigGenerate
     {
         Name = "Module",
         DefaultValue = DefaultModule,
-        CliOption = new System.CommandLine.Option<string>("--module", "Base module for Ruby files, default is 'FHIR'.")
+        CliOption = new System.CommandLine.Option<string>("--module")
         {
+            Description = "Base module for Ruby files, default is 'FHIR'.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },

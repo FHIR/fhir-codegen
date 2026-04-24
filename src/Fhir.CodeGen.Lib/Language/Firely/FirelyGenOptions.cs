@@ -24,8 +24,9 @@ public class FirelyGenOptions : ConfigGenerate
     {
         Name = "Subset",
         DefaultValue = CSharpFirelyCommon.GenSubset.Satellite,
-        CliOption = new System.CommandLine.Option<CSharpFirelyCommon.GenSubset>("--subset", "Which subset of language exports to make.")
+        CliOption = new System.CommandLine.Option<CSharpFirelyCommon.GenSubset>("--subset")
         {
+            Description = "Which subset of language exports to make.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -43,8 +44,9 @@ public class FirelyGenOptions : ConfigGenerate
     {
         Name = "ExportFiveWs",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--w5", "If the output should include 5W's mappings.")
+        CliOption = new System.CommandLine.Option<bool>("--w5")
         {
+            Description = "If the output should include 5W's mappings.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -60,8 +62,9 @@ public class FirelyGenOptions : ConfigGenerate
     {
         Name = "CqlModel",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string>("--cql-model", "Name of the Cql model for which metadata attributes should be added to the pocos. 'Fhir401' is the only valid value at the moment.")
+        CliOption = new System.CommandLine.Option<string>("--cql-model")
         {
+            Description = "Name of the Cql model for which metadata attributes should be added to the pocos. 'Fhir401' is the only valid value at the moment.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },

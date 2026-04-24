@@ -25,8 +25,9 @@ public class ConfigCompare : ConfigRoot
     {
         Name = "Compare_Package",
         DefaultValue = Array.Empty<string>(),
-        CliOption = new System.CommandLine.Option<string[]>(["--compare", "--compare-package", "-c"], "Comparison package to load, either as directive ([name]#[version/literal]) or URL.")
+        CliOption = new System.CommandLine.Option<string[]>("--compare", "--compare-package", "-c")
         {
+            Description = "Comparison package to load, either as directive ([name]#[version/literal]) or URL.",
             Arity = System.CommandLine.ArgumentArity.OneOrMore,
             Required = false,
         },
@@ -43,8 +44,9 @@ public class ConfigCompare : ConfigRoot
     {
         Name = "No_Output",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--no-output", "Do not output the comparison result.")
+        CliOption = new System.CommandLine.Option<bool>("--no-output")
         {
+            Description = "Do not output the comparison result.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -60,8 +62,9 @@ public class ConfigCompare : ConfigRoot
     {
         Name = "Save_Comparison_Result",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--save-comparison-result", "Save the comparison result to a file.")
+        CliOption = new System.CommandLine.Option<bool>("--save-comparison-result")
         {
+            Description = "Save the comparison result to a file.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -78,8 +81,9 @@ public class ConfigCompare : ConfigRoot
     {
         Name = "Map_Source_Path",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string>("--map-source-path", "Path to FHIR maps to load (e.g., clone of HL7/fhir-cross-version).")
+        CliOption = new System.CommandLine.Option<string>("--map-source-path")
         {
+            Description = "Path to FHIR maps to load (e.g., clone of HL7/fhir-cross-version).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -96,8 +100,9 @@ public class ConfigCompare : ConfigRoot
     {
         Name = "Map_Destination_Path",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string>("--map-destination-path", "Path to directory to save FHIR maps to (e.g., clone of HL7/fhir-cross-version).")
+        CliOption = new System.CommandLine.Option<string>("--map-destination-path")
         {
+            Description = "Path to directory to save FHIR maps to (e.g., clone of HL7/fhir-cross-version).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },
@@ -126,8 +131,9 @@ public class ConfigCompare : ConfigRoot
     {
         Name = "Map_Save_Style",
         DefaultValue = ComparisonMapSaveStyle.Official,
-        CliOption = new System.CommandLine.Option<ComparisonMapSaveStyle>("--map-save-style", "Style of saving the comparison maps.")
+        CliOption = new System.CommandLine.Option<ComparisonMapSaveStyle>("--map-save-style")
         {
+            Description = "Style of saving the comparison maps.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
             Required = false,
         },

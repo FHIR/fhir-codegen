@@ -235,8 +235,9 @@ public partial class FirelyNetIG : ILanguage
         {
             Name = "ExtensionAccessorExport",
             DefaultValue = ExtensionAccessorExportCodes.RecordAccessors,
-            CliOption = new System.CommandLine.Option<ExtensionAccessorExportCodes>("--extension-accessors", "Style to export extension accessors with.")
+            CliOption = new System.CommandLine.Option<ExtensionAccessorExportCodes>("--extension-accessors")
             {
+                Description = "Style to export extension accessors with.",
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
                 Required = false,
             },
