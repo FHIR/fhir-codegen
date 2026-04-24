@@ -24,10 +24,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Hl7.Fhir.Specification.Data.R5" Version="5.13.1" />
-    <PackageReference Include="Hl7.Fhir.STU3" Version="5.13.1" />
-    <PackageReference Include="Hl7.Fhir.R4" Version="5.13.1" />
-    <PackageReference Include="Hl7.Fhir.R4B" Version="5.13.1" />
+    <PackageReference Include="Hl7.Fhir.Specification.Data.R5" Version="5.13.3" />
+    <PackageReference Include="Hl7.Fhir.STU3" Version="5.13.3" />
+    <PackageReference Include="Hl7.Fhir.R4" Version="5.13.3" />
+    <PackageReference Include="Hl7.Fhir.R4B" Version="5.13.3" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="Shouldly" Version="4.3.0" />
     <PackageReference Include="System.Net.Http" Version="4.3.4" />

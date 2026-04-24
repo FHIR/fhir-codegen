@@ -9,10 +9,10 @@
 
 
   <ItemGroup>
-    <PackageReference Include="Hl7.Fhir.R5" Version="5.13.1" />
-    <PackageReference Include="Hl7.Fhir.R4" Version="5.13.1" />
+    <PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
+    <PackageReference Include="Hl7.Fhir.R4" Version="5.13.3" />
     <!--<PackageReference Include="Hl7.Fhir.R4B" Version="5.13.1" />-->
-    <PackageReference Include="Hl7.Fhir.STU3" Version="5.13.1" />
+    <PackageReference Include="Hl7.Fhir.STU3" Version="5.13.3" />
   </ItemGroup>
 
   <Target Name="AddPackageAliases" BeforeTargets="ResolveReferences" Outputs="%(PackageReference.Identity)">
