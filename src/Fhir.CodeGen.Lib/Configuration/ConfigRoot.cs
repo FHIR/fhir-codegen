@@ -1,4 +1,4 @@
-﻿// <copyright file="ConfigRoot.cs" company="Microsoft Corporation">
+// <copyright file="ConfigRoot.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -51,7 +51,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<string?>("--fhir-cache", "Location of the FHIR cache (none specified defaults to user .fhir directory).")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -69,7 +69,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<bool>("--use-official-registries", "Use official FHIR registries to resolve packages.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -88,7 +88,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<string[]>("--additional-fhir-registry-urls", "Additional FHIR registry URLs to use.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -107,7 +107,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<string[]>("--additional-npm-registry-urls", "Additional NPM registry URLs to use.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -131,7 +131,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<string>(["--output-path", "--output-directory", "--output-dir"], "File or directory to write output.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -150,7 +150,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<string>(["--output-filename", "--output-file"], "Filename to write output.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -174,7 +174,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<string[]>(["--package", "--load-package", "-p"], "Package to load, either as directive ([name]#[version/literal]) or URL.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -192,7 +192,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<bool>("--auto-load-expansions", "When loading core packages, load the expansions packages automatically.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -210,7 +210,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<bool>("--resolve-dependencies", "Resolve package dependencies.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -227,7 +227,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<int>("--max-expansion-size", "Maximum number of concepts to include in a value set expansion before limiting.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -268,7 +268,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<FhirArtifactClassEnum[]>("--load-structures", "Types of FHIR structures to load.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -306,7 +306,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<FhirArtifactClassEnum[]>("--export-structures", "Types of FHIR structures to export.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -326,7 +326,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<HashSet<string>>("--export-keys", "Keys of FHIR structures to export (e.g., Patient), empty means all.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -345,7 +345,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<bool>("--load-canonical-examples", "Load canonical examples from packages.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -369,7 +369,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<bool>("--offline", "Offline mode (will not download missing packages).")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -387,7 +387,7 @@ public class ConfigRoot : ICodeGenConfig
         CliOption = new System.CommandLine.Option<string>("--fhir-version", "FHIR version to use.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -419,7 +419,7 @@ public class ConfigRoot : ICodeGenConfig
     public virtual ConfigurationOption[] GetOptions() => _options;
 
     internal T GetOpt<T>(
-        System.CommandLine.Parsing.ParseResult parseResult,
+        System.CommandLine.ParseResult parseResult,
         ConfigurationOption opt,
         T defaultValue)
     {
@@ -509,7 +509,7 @@ public class ConfigRoot : ICodeGenConfig
     }
 
     internal T[] GetOptArray<T>(
-        System.CommandLine.Parsing.ParseResult parseResult,
+        System.CommandLine.ParseResult parseResult,
         ConfigurationOption opt,
         T[] defaultValue)
     {
@@ -580,7 +580,7 @@ public class ConfigRoot : ICodeGenConfig
     }
 
     internal HashSet<T> GetOptHash<T>(
-        System.CommandLine.Parsing.ParseResult parseResult,
+        System.CommandLine.ParseResult parseResult,
         System.CommandLine.Option opt,
         HashSet<T> defaultValue)
     {
@@ -636,7 +636,7 @@ public class ConfigRoot : ICodeGenConfig
     }
     /// <summary>Parses the given parse result.</summary>
     /// <param name="parseResult">The parse result.</param>
-    public virtual void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public virtual void Parse(System.CommandLine.ParseResult parseResult)
     {
         foreach (ConfigurationOption opt in _options)
         {

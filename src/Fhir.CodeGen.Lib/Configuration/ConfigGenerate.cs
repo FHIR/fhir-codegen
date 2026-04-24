@@ -1,4 +1,4 @@
-﻿// <copyright file="ConfigCli.cs" company="Microsoft Corporation">
+// <copyright file="ConfigCli.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -30,7 +30,7 @@ public class ConfigGenerate : ConfigRoot
         CliOption = new System.CommandLine.Option<bool>([ "--include-experimental", "--experimental" ], "If the output should include structures marked experimental.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -49,7 +49,7 @@ public class ConfigGenerate : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--fhir-server-url", "FHIR Server URL to pull a CapabilityStatement (or Conformance) from. Requires application/fhir+json.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -65,7 +65,7 @@ public class ConfigGenerate : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--smart-config-url", "URL to pull a .well-known/smart-configuration file from, if different from [base]/.well-known/smart-configuration.  Requires application/json (per spec).")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -84,7 +84,7 @@ public class ConfigGenerate : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--fhir-server-header", "FHIR Server headers to use when pulling a CapabilityStatement (or Conformance) from a FHIR server.  Use <key>=<value> format.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -102,7 +102,7 @@ public class ConfigGenerate : ConfigRoot
         CliOption = new System.CommandLine.Option<bool>("--resolve-server-canonicals", "If canonical URLs used in server Capability Statement should be resolved.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -120,7 +120,7 @@ public class ConfigGenerate : ConfigRoot
         CliOption = new System.CommandLine.Option<bool>("--resolve-external-canonicals", "If canonical URLs external to the server should be resolved.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -153,7 +153,7 @@ public class ConfigGenerate : ConfigRoot
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

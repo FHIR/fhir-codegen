@@ -1,4 +1,4 @@
-﻿// <copyright file="ShorthandOptions.cs" company="Microsoft Corporation">
+// <copyright file="ShorthandOptions.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -22,7 +22,7 @@ public class ShorthandOptions : ConfigGenerate
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

@@ -122,7 +122,7 @@ internal static class LaunchUtils
     /// An instance of <see cref="ICodeGenConfig"/> representing the parsed configuration.
     /// </returns>
     internal static ICodeGenConfig ParseConfig(
-        ParseResult pr,
+        System.CommandLine.ParseResult pr,
         string command,
         string? subCommand,
         ILoggerFactory? loggerFactory = null)

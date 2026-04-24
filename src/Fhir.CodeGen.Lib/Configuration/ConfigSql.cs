@@ -1,4 +1,4 @@
-﻿// <copyright file="ConfigSql.cs" company="Microsoft Corporation">
+// <copyright file="ConfigSql.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -27,7 +27,7 @@ public class ConfigSql : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--view-definition-directory", "Local path to a source for view definitions to load.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -45,7 +45,7 @@ public class ConfigSql : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--export-db-name", "Name of the database to generate.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -64,7 +64,7 @@ public class ConfigSql : ConfigRoot
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

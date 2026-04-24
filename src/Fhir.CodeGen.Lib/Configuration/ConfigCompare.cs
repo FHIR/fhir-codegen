@@ -1,4 +1,4 @@
-﻿// <copyright file="ConfigCompare.cs" company="Microsoft Corporation">
+// <copyright file="ConfigCompare.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -28,7 +28,7 @@ public class ConfigCompare : ConfigRoot
         CliOption = new System.CommandLine.Option<string[]>(["--compare", "--compare-package", "-c"], "Comparison package to load, either as directive ([name]#[version/literal]) or URL.")
         {
             Arity = System.CommandLine.ArgumentArity.OneOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -46,7 +46,7 @@ public class ConfigCompare : ConfigRoot
         CliOption = new System.CommandLine.Option<bool>("--no-output", "Do not output the comparison result.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -63,7 +63,7 @@ public class ConfigCompare : ConfigRoot
         CliOption = new System.CommandLine.Option<bool>("--save-comparison-result", "Save the comparison result to a file.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -81,7 +81,7 @@ public class ConfigCompare : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--map-source-path", "Path to FHIR maps to load (e.g., clone of HL7/fhir-cross-version).")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -99,7 +99,7 @@ public class ConfigCompare : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--map-destination-path", "Path to directory to save FHIR maps to (e.g., clone of HL7/fhir-cross-version).")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -129,7 +129,7 @@ public class ConfigCompare : ConfigRoot
         CliOption = new System.CommandLine.Option<ComparisonMapSaveStyle>("--map-save-style", "Style of saving the comparison maps.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -207,7 +207,7 @@ public class ConfigCompare : ConfigRoot
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

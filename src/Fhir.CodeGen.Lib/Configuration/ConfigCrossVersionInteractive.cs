@@ -1,4 +1,4 @@
-﻿// <copyright file="ConfigCrossVersionInteractive.cs" company="Microsoft Corporation">
+// <copyright file="ConfigCrossVersionInteractive.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -28,7 +28,7 @@ public class ConfigCrossVersionInteractive : ConfigRoot
         CliOption = new System.CommandLine.Option<string[]>("--cross-version-directory", "Local path to the 'HL7/fhir-cross-version' repository clone.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -46,7 +46,7 @@ public class ConfigCrossVersionInteractive : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--left-package-directive", "Directive for the left (source) package.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -64,7 +64,7 @@ public class ConfigCrossVersionInteractive : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--right-package-directive", "Directive for the right (target) package.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -82,7 +82,7 @@ public class ConfigCrossVersionInteractive : ConfigRoot
         CliOption = new System.CommandLine.Option<string>("--existing-comparison-path", "Path to existing comparison files.")
         {
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -102,7 +102,7 @@ public class ConfigCrossVersionInteractive : ConfigRoot
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);
