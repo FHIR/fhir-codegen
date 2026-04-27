@@ -284,6 +284,7 @@ Global
 		SolutionGuid = {17802D6E-34A0-472E-9041-76E54F463711}
 	EndGlobalSection
 	GlobalSection(SharedMSBuildProjectFiles) = preSolution
+		src\fhir-codegen-shared\fhir-codegen-shared.projitems*{02fceadc-4a76-4269-9df4-7e410063c434}*SharedItemsImports = 5
 		src\fhir-codegen-shared\fhir-codegen-shared.projitems*{63a0038d-41d5-4642-813d-74a31e63623b}*SharedItemsImports = 13
 		src\fhir-codegen-shared\fhir-codegen-shared.projitems*{cc4d5356-bd06-48a8-b329-7c372201549a}*SharedItemsImports = 5
 	EndGlobalSection

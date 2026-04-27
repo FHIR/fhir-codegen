@@ -261,13 +261,13 @@ public partial class XVerProcessor
 
                 HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null;
                 specificPairs = [
-                    (FhirReleases.FhirSequenceCodes.DSTU2, FhirReleases.FhirSequenceCodes.R4),
+                    //(FhirReleases.FhirSequenceCodes.DSTU2, FhirReleases.FhirSequenceCodes.R4),
                     //(FhirReleases.FhirSequenceCodes.DSTU2, FhirReleases.FhirSequenceCodes.STU3),
                     //(FhirReleases.FhirSequenceCodes.R4, FhirReleases.FhirSequenceCodes.R4B),
                     //(FhirReleases.FhirSequenceCodes.R4B, FhirReleases.FhirSequenceCodes.R4),
                     //(FhirReleases.FhirSequenceCodes.R5, FhirReleases.FhirSequenceCodes.R4B),
                     //(FhirReleases.FhirSequenceCodes.R4, FhirReleases.FhirSequenceCodes.R5),
-                    //(FhirReleases.FhirSequenceCodes.R5, FhirReleases.FhirSequenceCodes.R4),
+                    (FhirReleases.FhirSequenceCodes.R5, FhirReleases.FhirSequenceCodes.R4),
                 ];
 
                 //UpdateValueSetMaps();
@@ -291,7 +291,7 @@ public partial class XVerProcessor
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, specificPairs: specificPairs);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, maxStepSize: 1);
-                //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
+                GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource);
                 //GenerateOutcomes(specificPairs: specificPairs);
                 //GenerateOutcomes();
