@@ -4,7 +4,6 @@
 // </copyright>
 
 using System.CommandLine;
-using System.CommandLine.Builder;
 using System.CommandLine.Help;
 using System.CommandLine.Invocation;
 using System.CommandLine.Parsing;
@@ -238,63 +237,141 @@ internal static class LaunchUtils
         return config;
     }
 
-    internal static Parser BuildParser(IConfiguration envConfig, RootCommand? rc = null)
+    /// <summary>
+    /// Builds the CLI surface for the application: returns the configured
+    /// <see cref="RootCommand"/> together with the per-parser and per-invocation
+    /// configurations expected by System.CommandLine 2.0 GA.
+    /// </summary>
+    /// <param name="envConfig">The environment configuration.</param>
+    /// <param name="rc">Optional pre-built root command (used by tests).</param>
+    /// <returns>Tuple of root, parser configuration, invocation configuration.</returns>
+    internal static (RootCommand Root, ParserConfiguration ParserConfig, InvocationConfiguration InvocationConfig) BuildCli(
+        IConfiguration envConfig,
+        RootCommand? rc = null)
     {
         RootCommand command = rc ?? BuildCommand(envConfig);
 
-        Parser parser = new CommandLineBuilder(command)
-            .UseExceptionHandler((ex, ctx) =>
+        // Replace the default help action with one that prepends per-enum option detail.
+        CustomizeRootHelp(command);
+
+        ParserConfiguration parserConfig = new();
+        InvocationConfiguration invocationConfig = new()
+        {
+            // We catch and report exceptions ourselves in Program.Main to match the
+            // beta4 UX (single-line "Error: ..." with exit code 1).
+            EnableDefaultExceptionHandler = false,
+        };
+
+        return (command, parserConfig, invocationConfig);
+    }
+
+    /// <summary>
+    /// Replaces the help action on the root command's <see cref="HelpOption"/> with an
+    /// <see cref="EnumAwareHelpAction"/> that prints enum option detail before the
+    /// standard help layout. <see cref="HelpOption"/> is recursive by default in
+    /// System.CommandLine 2.0 GA, so customizing the root suffices for subcommands.
+    /// </summary>
+    /// <param name="root">The root command to customize.</param>
+    private static void CustomizeRootHelp(RootCommand root)
+    {
+        HelpOption? helpOpt = root.Options.OfType<HelpOption>().FirstOrDefault();
+        if (helpOpt != null)
+        {
+            helpOpt.Action = new EnumAwareHelpAction(_optsWithEnums);
+        }
+    }
+
+    /// <summary>
+    /// Custom help action that prints a description block for every enum-typed option
+    /// (mirroring the beta4 <c>UseHelp</c> + <c>HelpBuilder.CustomizeSymbol</c> flow)
+    /// before delegating to the stock <see cref="HelpAction"/> for the standard layout.
+    /// <see cref="HelpBuilder"/> is internal in System.CommandLine 2.0 GA, so we cannot
+    /// per-symbol customize the column rendering directly; emitting the enum block as
+    /// preamble preserves the information content with a minor cosmetic shift.
+    /// </summary>
+    internal sealed class EnumAwareHelpAction : SynchronousCommandLineAction
+    {
+        private readonly List<Option> _enumOptions;
+        private readonly HelpAction _inner = new();
+
+        public EnumAwareHelpAction(List<Option> enumOptions)
+        {
+            _enumOptions = enumOptions;
+        }
+
+        public override int Invoke(ParseResult parseResult)
+        {
+            // Restrict the enum block to options actually present on the command being
+            // helped (or any of its ancestors, since recursive options propagate).
+            HashSet<Option> visible = CollectVisibleOptions(parseResult.CommandResult.Command);
+
+            foreach (Option option in _enumOptions)
             {
-                Console.WriteLine($"Error: {ex.Message}");
-                ctx.ExitCode = 1;
-            })
-            .UseDefaults()
-            .UseHelp(ctx =>
-            {
-                foreach (Option option in _optsWithEnums)
+                if (!visible.Contains(option))
                 {
-                    StringBuilder sb = new();
-                    if (option.Aliases.Count != 0)
-                    {
-                        sb.AppendLine(string.Join(", ", option.Aliases));
-                    }
-                    else
-                    {
-                        sb.AppendLine(option.Name);
-                    }
-
-                    Type et = option.ValueType;
-
-                    if (option.ValueType.IsGenericType)
-                    {
-                        et = option.ValueType.GenericTypeArguments.First();
-                    }
-
-                    if (option.ValueType.IsArray)
-                    {
-                        et = option.ValueType.GetElementType()!;
-                    }
-
-                    foreach (MemberInfo mem in et.GetMembers(BindingFlags.Public | BindingFlags.Static).Where(m => m.DeclaringType == et).OrderBy(m => m.Name))
-                    {
-                        IEnumerable<DescriptionAttribute> attributes = mem.GetCustomAttributes<DescriptionAttribute>(false);
-
-                        sb.AppendLine($"  opt: {mem.Name}");
-                        if (attributes.Any())
-                        {
-                            sb.AppendLine($"       {attributes.First().Description}");
-                        }
-                    }
-
-                    ctx.HelpBuilder.CustomizeSymbol(
-                        option,
-                        firstColumnText: (ctx) => sb.ToString());
-                    //secondColumnText: (ctx) => option.Description);
+                    continue;
                 }
-            })
-            .Build();
 
-        return parser;
+                Console.Out.WriteLine(BuildEnumColumn(option));
+            }
+
+            return _inner.Invoke(parseResult);
+        }
+
+        private static HashSet<Option> CollectVisibleOptions(Command cmd)
+        {
+            HashSet<Option> result = [];
+            Command? cursor = cmd;
+            while (cursor != null)
+            {
+                foreach (Option opt in cursor.Options)
+                {
+                    result.Add(opt);
+                }
+
+                cursor = cursor.Parents.OfType<Command>().FirstOrDefault();
+            }
+
+            return result;
+        }
+
+        private static string BuildEnumColumn(Option option)
+        {
+            StringBuilder sb = new();
+            if (option.Aliases.Count != 0)
+            {
+                sb.AppendLine(string.Join(", ", option.Aliases));
+            }
+            else
+            {
+                sb.AppendLine(option.Name);
+            }
+
+            Type et = option.ValueType;
+
+            if (option.ValueType.IsGenericType)
+            {
+                et = option.ValueType.GenericTypeArguments.First();
+            }
+
+            if (option.ValueType.IsArray)
+            {
+                et = option.ValueType.GetElementType()!;
+            }
+
+            foreach (MemberInfo mem in et.GetMembers(BindingFlags.Public | BindingFlags.Static).Where(m => m.DeclaringType == et).OrderBy(m => m.Name))
+            {
+                IEnumerable<DescriptionAttribute> attributes = mem.GetCustomAttributes<DescriptionAttribute>(false);
+
+                sb.AppendLine($"  opt: {mem.Name}");
+                if (attributes.Any())
+                {
+                    sb.AppendLine($"       {attributes.First().Description}");
+                }
+            }
+
+            return sb.ToString();
+        }
     }
 
 
@@ -309,7 +386,8 @@ internal static class LaunchUtils
         foreach (Option option in BuildCliOptions(typeof(ConfigRoot), envConfig: envConfig))
         {
             // note that 'global' here is just recursive DOWNWARD
-            rootCommand.AddGlobalOption(option);
+            option.Recursive = true;
+            rootCommand.Options.Add(option);
             TrackIfEnum(option);
         }
 
@@ -328,7 +406,8 @@ internal static class LaunchUtils
             foreach (Option option in BuildCliOptions(rec.ConfigurationType, rec.ExcludedConfigurationType, envConfig))
             {
                 // note that 'global' here is just recursive DOWNWARD
-                cmd.AddGlobalOption(option);
+                option.Recursive = true;
+                cmd.Options.Add(option);
                 TrackIfEnum(option);
             }
 
@@ -340,22 +419,22 @@ internal static class LaunchUtils
                     Command languageCommand = new(language.Name, $"{rec.Literal} {language.Name}");
                     if (language.Name.Any(char.IsUpper))
                     {
-                        languageCommand.AddAlias(language.Name.ToLowerInvariant());
+                        languageCommand.Aliases.Add(language.Name.ToLowerInvariant());
                     }
 
                     foreach (Option option in BuildCliOptions(LanguageManager.ConfigTypeForLanguage(language.Name), envConfig: envConfig))
                     {
-                        languageCommand.AddOption(option);
+                        languageCommand.Options.Add(option);
                         TrackIfEnum(option);
                     }
 
                     foreach (Option option in BuildCliOptions(rec.ConfigurationType, rec.ExcludedConfigurationType, envConfig))
                     {
-                        languageCommand.AddOption(option);
+                        languageCommand.Options.Add(option);
                         TrackIfEnum(option);
                     }
 
-                    cmd.AddCommand(languageCommand);
+                    cmd.Subcommands.Add(languageCommand);
                 }
             }
 
@@ -365,14 +444,14 @@ internal static class LaunchUtils
                 Command subCommand = new(literal, description);
                 if (literal.Any(char.IsUpper))
                 {
-                    subCommand.AddAlias(literal.ToLowerInvariant());
+                    subCommand.Aliases.Add(literal.ToLowerInvariant());
                 }
 
-                cmd.AddCommand(subCommand);
+                cmd.Subcommands.Add(subCommand);
             }
 
             // add this command to our root command
-            rootCommand.AddCommand(cmd);
+            rootCommand.Subcommands.Add(cmd);
         }
 
         //// create our generate command
@@ -554,17 +633,13 @@ internal static class LaunchUtils
 
         foreach (ConfigurationOption opt in config.GetOptions())
         {
-            // need to configure default values
-            if ((envConfig != null) &&
-                (!string.IsNullOrEmpty(opt.EnvVarName)))
-            {
-                opt.CliOption.SetDefaultValueFactory(() => envConfig.GetSection(opt.EnvVarName).GetChildren().Select(c => c.Value));
-            }
-            else
-            {
-                opt.CliOption.SetDefaultValue(opt.DefaultValue);
-            }
-
+            // Defaults are no longer surfaced through Option<T>.DefaultValueFactory
+            // (System.CommandLine 2.0 GA + D1(b)). Runtime resolution is centralized
+            // in ConfigRoot.GetOpt/GetOptArray, which honors:
+            //   parsed CLI value > Environment.GetEnvironmentVariable(opt.EnvVarName)
+            //   > opt.DefaultValue.
+            // The only observable change is that --help no longer prints "[default: ...]"
+            // for these options.
             yield return opt.CliOption;
         }
     }
