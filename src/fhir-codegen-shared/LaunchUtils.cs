@@ -606,29 +606,64 @@ internal static class LaunchUtils
     }
 
 
+    /// <summary>
+    /// Returns the <see cref="Option"/> instances defined by <paramref name="forType"/>'s
+    /// <see cref="ICodeGenConfig.GetOptions"/>, optionally filtered to exclude any option
+    /// whose CLI name or alias is also exposed by <paramref name="excludeFromType"/>.
+    /// </summary>
+    /// <remarks>
+    /// Each <see cref="ICodeGenConfig"/> layer's <c>GetOptions()</c> walks
+    /// <c>base.GetOptions()</c> and concatenates its own options, so passing
+    /// <paramref name="excludeFromType"/> = <c>typeof(ConfigGenerate)</c> when
+    /// <paramref name="forType"/> is a language config (e.g. <c>TypeScriptOptions</c>)
+    /// transitively excludes <see cref="ConfigRoot"/> options as well, leaving only
+    /// the language-local options. Exclusion is by CLI alias <em>string</em> (not
+    /// <see cref="Option"/> reference), so it remains correct even if a future
+    /// option is constructed dynamically per call rather than via a shared static
+    /// instance. The <paramref name="envConfig"/> parameter is intentionally
+    /// unused: env-default resolution now lives in <c>ConfigRoot.GetOpt</c>.
+    /// </remarks>
+    /// <param name="forType">The <see cref="ICodeGenConfig"/> type whose options to enumerate.</param>
+    /// <param name="excludeFromType">Optional config type whose options should be filtered out.</param>
+    /// <param name="envConfig">Unused. Retained because <c>Program.cs</c> still passes it.</param>
     internal static IEnumerable<Option> BuildCliOptions(
         Type forType,
         Type? excludeFromType = null,
         IConfiguration? envConfig = null)
     {
-        HashSet<string> inheritedPropNames = [];
+        _ = envConfig;
+
+        HashSet<string> excludedAliases = new(StringComparer.Ordinal);
 
         if (excludeFromType != null)
         {
-            PropertyInfo[] exProps = excludeFromType.GetProperties();
-            foreach (PropertyInfo exProp in exProps)
+            if (excludeFromType.IsAbstract)
             {
-                inheritedPropNames.Add(exProp.Name);
+                throw new Exception($"excludeFromType cannot be abstract! {excludeFromType.Name}");
+            }
+
+            object? excludeInstance = Activator.CreateInstance(excludeFromType);
+            if (excludeInstance is not ICodeGenConfig excludeConfig)
+            {
+                throw new Exception($"excludeFromType must implement ICodeGenConfig: {excludeFromType.Name}");
+            }
+
+            foreach (ConfigurationOption exOpt in excludeConfig.GetOptions())
+            {
+                excludedAliases.Add(exOpt.CliOption.Name);
+                foreach (string alias in exOpt.CliOption.Aliases)
+                {
+                    excludedAliases.Add(alias);
+                }
             }
         }
 
-        object? configDefault = null;
         if (forType.IsAbstract)
         {
             throw new Exception($"Config type cannot be abstract! {forType.Name}");
         }
 
-        configDefault = Activator.CreateInstance(forType);
+        object? configDefault = Activator.CreateInstance(forType);
 
         if (configDefault is not ICodeGenConfig config)
         {
@@ -637,6 +672,29 @@ internal static class LaunchUtils
 
         foreach (ConfigurationOption opt in config.GetOptions())
         {
+            if (excludedAliases.Count != 0)
+            {
+                if (excludedAliases.Contains(opt.CliOption.Name))
+                {
+                    continue;
+                }
+
+                bool aliasExcluded = false;
+                foreach (string alias in opt.CliOption.Aliases)
+                {
+                    if (excludedAliases.Contains(alias))
+                    {
+                        aliasExcluded = true;
+                        break;
+                    }
+                }
+
+                if (aliasExcluded)
+                {
+                    continue;
+                }
+            }
+
             // Defaults are no longer surfaced through Option<T>.DefaultValueFactory
             // (System.CommandLine 2.0 GA + D1(b)). Runtime resolution is centralized
             // in ConfigRoot.GetOpt/GetOptArray, which honors:
