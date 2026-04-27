@@ -86,3 +86,5 @@ Different FHIR major versions ship as separate `Hl7.Fhir.*` assemblies whose typ
 ## Commits
 
 Use **conventional commits** (`feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`…). Run `dotnet test` (with the `RequiresExternalRepo!=true` filter) before pushing.
+
+**Never commit anything under `/scratch`.** That directory is for ephemeral working files (plans, bug reports, analyses produced by the `dev-*` skills, ad-hoc notes) and is gitignored at the repo root. Do not `git add -f` scratch contents, do not relocate scratch artifacts into tracked paths to sneak them in, and do not remove `/scratch` from `.gitignore`.
