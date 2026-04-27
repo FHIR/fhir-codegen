@@ -880,19 +880,39 @@ overlap. The fixture lives in
    inside `GetOpt`). The five existing tests look CLI-only and should
    keep passing without change.
 
-**Verification (buildable + functional):**
+**Status:** Complete
 
-- `dotnet build src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj -c Release`
-  succeeds.
-- `dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --configuration Release --framework net9.0 --filter "FullyQualifiedName~ConfigPrecedenceTests"`
-  → all matrix tests pass.
-- **Negative-control verification:** temporarily swap the source order
-  in `Program.Main` (env first, json last) and re-run cell 5
-  (env + appsettings) — it must fail with "expected env value, got
-  appsettings value". Restore the original order before committing.
-  (Sanity drill; not a long-running gate.)
+**Deviation:** Heavily rescoped from the plan's 50-fact matrix. Under
+**D1(b)** only three of the four planned sources are reachable
+(`default`, `env`, `cli`); `appsettings.json` would require D1(a) and
+is intentionally not exercised. The new
+`src/Fhir.CodeGen.Lib.Tests/ConfigPrecedenceTests.cs` covers three
+representative options (`MaxExpansionSize` int, `OutputFilename`
+string, `UseOfficialRegistries` bool) across the four reachable cells
+(default-only, env-only, cli-only, env+cli → cli wins) for a total of
+11 facts. The `EnvVarScope` helper and `[CollectionDefinition(
+"EnvVarSerial", DisableParallelization = true)]` are inlined into the
+fixture.
 
-**Status:** Pending
+**Deviation:** Implementation work uncovered that the previously
+unreachable env-var fallback at `ConfigRoot.cs:519` and `:583` was
+*never* surfacing env values under D1(b) — the `Implicit` early
+return short-circuited before the fallback. Refactored
+`ConfigRoot.GetOpt`/`GetOptArray` to consult
+`Environment.GetEnvironmentVariable` on the implicit/no-arg branch via
+new `GetEnvValueOrDefault`/`GetEnvValueArrayOrDefault` helpers (with
+defensive `Convert.ChangeType` + `Enum.Parse` and try/catch fallback
+to the static default). Without this fix, env-var configuration would
+have silently broken under D1(b).
+
+**Deviation:** Step 6 (CLI smoke test of `Program.Main`'s
+`IConfiguration` source order) skipped — under D1(b) the
+`IConfiguration` is built but unused for option defaults, so testing
+the order would not reflect any observable contract.
+
+**Deviation:** "Negative-control verification" (swap json/env order
+and assert cell 5 fails) skipped because cell 5 (env + appsettings
+overlap) is not exercised under D1(b).
 
 ---
 
@@ -1082,3 +1102,4 @@ behavioral risks called out in [Risks](#risks--mitigations).
 - Phase 4 — Complete: rewrote LaunchUtils.cs to S.CL 2.0 GA pipeline (BuildCli tuple, EnumAwareHelpAction, Recursive=true + Options/Subcommands/Aliases.Add). HelpBuilder-internal deviation noted.
 - Phase 5 — Complete: Program.cs migrated to GA invocation model with InvokeWithHandler wrapper; SymbolResult.Symbol replaced with CommandResult cast; NamingConventionBinder package + .csproj.orig removed. Env-var fallback in ConfigRoot intentionally retained (D1(b) deviation).
 - Phase 6 — Complete: ConfigTests.cs migrated to ParserConfiguration + Recursive=true + Options.Add; also fixed ExportKeys Option ctor missed by Phase 2 regex. 6/6 tests pass.
+- Phase 6.5 — Complete: added ConfigPrecedenceTests.cs (11 facts × 3 options × 4 reachable cells under D1(b)); refactored ConfigRoot.GetOpt/GetOptArray to consult env var on implicit branch (the previous fallback was unreachable). 17/17 config tests pass.

@@ -442,7 +442,7 @@ public class ConfigRoot : ICodeGenConfig
         System.CommandLine.Parsing.OptionResult? optResult = parseResult.GetResult(opt.CliOption);
         if (optResult is null || optResult.Implicit)
         {
-            return defaultValue;
+            return GetEnvValueOrDefault(opt.EnvVarName, defaultValue);
         }
 
         object? parsed = optResult.GetValueOrDefault<object>();
@@ -516,13 +516,42 @@ public class ConfigRoot : ICodeGenConfig
                 break;
         }
 
-        string? envValue = Environment.GetEnvironmentVariable(opt.EnvVarName);
-        if (envValue != null)
+        return defaultValue;
+    }
+
+    /// <summary>
+    /// Resolves an environment variable into <typeparamref name="T"/>, falling back to
+    /// <paramref name="defaultValue"/> when the variable is unset, empty, or unconvertible.
+    /// Centralizes the env-var path used by <see cref="GetOpt{T}"/> on the implicit/no-arg
+    /// branch under the System.CommandLine 2.0 GA + D1(b) shape, where Option&lt;T&gt; defaults
+    /// are no longer seeded with env-config values.
+    /// </summary>
+    private static T GetEnvValueOrDefault<T>(string envVarName, T defaultValue)
+    {
+        if (string.IsNullOrEmpty(envVarName))
         {
-            return (T)Convert.ChangeType(envValue, typeof(T));
+            return defaultValue;
         }
 
-        return defaultValue;
+        string? envValue = Environment.GetEnvironmentVariable(envVarName);
+        if (string.IsNullOrEmpty(envValue))
+        {
+            return defaultValue;
+        }
+
+        try
+        {
+            if (typeof(T).IsEnum)
+            {
+                return (T)Enum.Parse(typeof(T), envValue, ignoreCase: true);
+            }
+
+            return (T)Convert.ChangeType(envValue, typeof(T));
+        }
+        catch
+        {
+            return defaultValue;
+        }
     }
 
     internal T[] GetOptArray<T>(
@@ -533,7 +562,7 @@ public class ConfigRoot : ICodeGenConfig
         System.CommandLine.Parsing.OptionResult? optResult = parseResult.GetResult(opt.CliOption);
         if (optResult is null || optResult.Implicit)
         {
-            return defaultValue;
+            return GetEnvValueArrayOrDefault(opt.EnvVarName, defaultValue);
         }
 
         object? parsed = optResult.GetValueOrDefault<object>();
@@ -580,21 +609,54 @@ public class ConfigRoot : ICodeGenConfig
             }
         }
 
-        string? envValue = Environment.GetEnvironmentVariable(opt.EnvVarName);
-        if (envValue != null)
+        return defaultValue;
+    }
+
+    /// <summary>
+    /// Resolves a comma-separated environment variable into <typeparamref name="T"/>[],
+    /// falling back to <paramref name="defaultValue"/> when the variable is unset, empty,
+    /// or contains any unconvertible token.
+    /// </summary>
+    private static T[] GetEnvValueArrayOrDefault<T>(string envVarName, T[] defaultValue)
+    {
+        if (string.IsNullOrEmpty(envVarName))
         {
-            List<T> values = [];
-
-            string[] envValues = envValue.Split(',');
-            foreach (string ev in envValues)
-            {
-                values.Add((T)Convert.ChangeType(envValue, typeof(T)));
-            }
-
-            return [.. values];
+            return defaultValue;
         }
 
-        return defaultValue;
+        string? envValue = Environment.GetEnvironmentVariable(envVarName);
+        if (string.IsNullOrEmpty(envValue))
+        {
+            return defaultValue;
+        }
+
+        string[] tokens = envValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Length == 0)
+        {
+            return defaultValue;
+        }
+
+        List<T> values = [];
+        try
+        {
+            foreach (string token in tokens)
+            {
+                if (typeof(T).IsEnum)
+                {
+                    values.Add((T)Enum.Parse(typeof(T), token, ignoreCase: true));
+                }
+                else
+                {
+                    values.Add((T)Convert.ChangeType(token, typeof(T)));
+                }
+            }
+        }
+        catch
+        {
+            return defaultValue;
+        }
+
+        return [.. values];
     }
 
     internal HashSet<T> GetOptHash<T>(
