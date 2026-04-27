@@ -296,7 +296,11 @@ internal static class LaunchUtils
 
         public EnumAwareHelpAction(List<Option> enumOptions)
         {
-            _enumOptions = enumOptions;
+            // Same Option<T> instance is added to multiple commands by BuildCommand
+            // (root + language subcommands), so it shows up multiple times in
+            // _optsWithEnums. Deduplicate by reference here so the help block
+            // doesn't repeat.
+            _enumOptions = [.. enumOptions.Distinct()];
         }
 
         public override int Invoke(ParseResult parseResult)

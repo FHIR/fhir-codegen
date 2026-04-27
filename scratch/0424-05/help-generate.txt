@@ -1,0 +1,77 @@
+Using launch settings from src\fhir-codegen\Properties\launchSettings.json...
+--load-structures
+  opt: CapabilityStatement
+  opt: CodeSystem
+  opt: Compartment
+  opt: ComplexType
+  opt: ConceptMap
+  opt: Extension
+  opt: ImplementationGuide
+  opt: Interface
+  opt: LogicalModel
+  opt: NamingSystem
+  opt: Operation
+  opt: PrimitiveType
+  opt: Profile
+  opt: Resource
+  opt: SearchParameter
+  opt: StructureMap
+  opt: Unknown
+  opt: ValueSet
+
+Description:
+  Generate output from a FHIR package.
+
+Usage:
+  fhir-codegen generate [command] [options]
+
+Options:
+  --fhir-cache <fhir-cache>                                        Location of the FHIR cache (none specified defaults to user .fhir directory).
+  --use-official-registries                                        Use official FHIR registries to resolve packages.
+  --additional-fhir-registry-urls <additional-fhir-registry-urls>  Additional FHIR registry URLs to use.
+  --additional-npm-registry-urls <additional-npm-registry-urls>    Additional NPM registry URLs to use.
+  --output-dir, --output-directory, --output-path <output-path>    File or directory to write output.
+  --output-file, --output-filename <output-filename>               Filename to write output.
+  -p, --load-package, --package <package>                          Package to load, either as directive ([name]#[version/literal]) or URL.
+  --auto-load-expansions                                           When loading core packages, load the expansions packages automatically.
+  --max-expansion-size <max-expansion-size>                        Maximum number of concepts to include in a value set expansion before limiting.
+  --resolve-dependencies                                           Resolve package dependencies.
+  --load-structures <load-structures>                              Types of FHIR structures to load.
+  --export-keys <export-keys>                                      Keys of FHIR structures to export (e.g., Patient), empty means all.
+  --load-canonical-examples                                        Load canonical examples from packages.
+  --offline                                                        Offline mode (will not download missing packages).
+  --fhir-version <fhir-version>                                    FHIR version to use.
+  --experimental, --include-experimental                           If the output should include structures marked experimental.
+  --fhir-server-url <fhir-server-url>                              FHIR Server URL to pull a CapabilityStatement (or Conformance) from. Requires application/fhir+json.
+  --smart-config-url <smart-config-url>                            URL to pull a .well-known/smart-configuration file from, if different from [base]/.well-known/smart-configuration.  Requires application/json (per spec).
+  --fhir-server-header <fhir-server-header>                        FHIR Server headers to use when pulling a CapabilityStatement (or Conformance) from a FHIR server.  Use <key>=<value> format.
+  --resolve-server-canonicals                                      If canonical URLs used in server Capability Statement should be resolved.
+  --resolve-external-canonicals                                    If canonical URLs external to the server should be resolved.
+  -?, -h, --help                                                   Show help and usage information
+  --fhir-cache <fhir-cache>                                        Location of the FHIR cache (none specified defaults to user .fhir directory).
+  --use-official-registries                                        Use official FHIR registries to resolve packages.
+  --additional-fhir-registry-urls <additional-fhir-registry-urls>  Additional FHIR registry URLs to use.
+  --additional-npm-registry-urls <additional-npm-registry-urls>    Additional NPM registry URLs to use.
+  --output-dir, --output-directory, --output-path <output-path>    File or directory to write output.
+  --output-file, --output-filename <output-filename>               Filename to write output.
+  -p, --load-package, --package <package>                          Package to load, either as directive ([name]#[version/literal]) or URL.
+  --auto-load-expansions                                           When loading core packages, load the expansions packages automatically.
+  --max-expansion-size <max-expansion-size>                        Maximum number of concepts to include in a value set expansion before limiting.
+  --resolve-dependencies                                           Resolve package dependencies.
+  --load-structures <load-structures>                              Types of FHIR structures to load.
+  --export-keys <export-keys>                                      Keys of FHIR structures to export (e.g., Patient), empty means all.
+  --load-canonical-examples                                        Load canonical examples from packages.
+  --offline                                                        Offline mode (will not download missing packages).
+  --fhir-version <fhir-version>                                    FHIR version to use.
+
+Commands:
+  TypeScript, typescript        generate TypeScript
+  SQLite, sqlite                generate SQLite
+  ShorthandIg, shorthandig      generate ShorthandIg
+  Ruby, ruby                    generate Ruby
+  OpenApi, openapi              generate OpenApi
+  Info, info                    generate Info
+  CSharpFirely2, csharpfirely2  generate CSharpFirely2
+  FirelyNetIg, firelynetig      generate FirelyNetIg
+  CQL, cql                      generate CQL
+
