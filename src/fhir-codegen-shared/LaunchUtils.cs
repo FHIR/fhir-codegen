@@ -435,12 +435,6 @@ internal static class LaunchUtils
                         TrackIfEnum(option);
                     }
 
-                    foreach (Option option in BuildCliOptions(rec.ConfigurationType, rec.ExcludedConfigurationType, envConfig))
-                    {
-                        languageCommand.Options.Add(option);
-                        TrackIfEnum(option);
-                    }
-
                     cmd.Subcommands.Add(languageCommand);
                 }
             }
