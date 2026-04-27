@@ -957,7 +957,27 @@ behavioral risks called out in [Risks](#risks--mitigations).
 - Smoke run produces a non-empty `r4.smoke.ts` (or the `~/.fhir`
   precondition is documented as not met and the smoke is deferred).
 
-**Status:** Pending
+**Status:** Complete
+
+**Result:** Filtered test suite (`RequiresExternalRepo!=true`):
+**218 passed, 0 failed** (45 + 169 + 4). Help characterization captured
+to `scratch/0424-05/help-{root,generate,generate-openapi}.txt`. Each
+of `--help`, `generate --help`, `generate OpenApi --help` renders
+correctly, with the enum block (`opt: <Name>` lines) printed exactly
+once per enum option (after a fix to deduplicate `_optsWithEnums` by
+reference inside `EnumAwareHelpAction`'s ctor — the same Option
+instance is added to root + every language subcommand). The
+`Program.Main` branches all behave as before:
+- `<no args>` → root help
+- `--help` / `-h` / `-?` / `help` → contextual help
+- `generate` (no language) → caught by `subCommand == null` → help
+- `generate TypeScript` (language, no packages) → "Error: generate
+  command requires at least one package to process." + help
+
+CLI smoke (`generate TypeScript -p hl7.fhir.r4.core ...`) was not
+executed because `~/.fhir/packages/hl7.fhir.r4.core` is not pre-seeded
+in this environment; the help characterization above provides
+sufficient end-to-end signal for the parser-pipeline migration.
 
 ## Tests
 
@@ -1103,3 +1123,4 @@ behavioral risks called out in [Risks](#risks--mitigations).
 - Phase 5 — Complete: Program.cs migrated to GA invocation model with InvokeWithHandler wrapper; SymbolResult.Symbol replaced with CommandResult cast; NamingConventionBinder package + .csproj.orig removed. Env-var fallback in ConfigRoot intentionally retained (D1(b) deviation).
 - Phase 6 — Complete: ConfigTests.cs migrated to ParserConfiguration + Recursive=true + Options.Add; also fixed ExportKeys Option ctor missed by Phase 2 regex. 6/6 tests pass.
 - Phase 6.5 — Complete: added ConfigPrecedenceTests.cs (11 facts × 3 options × 4 reachable cells under D1(b)); refactored ConfigRoot.GetOpt/GetOptArray to consult env var on implicit branch (the previous fallback was unreachable). 17/17 config tests pass.
+- Phase 7 — Complete: filtered test suite 218 passed / 0 failed; help characterization captured for root, generate, generate OpenApi; Program.Main branches verified (no-args, --help, generate-no-lang, generate-no-packages); fixed EnumAwareHelpAction ctor to dedupe _optsWithEnums by reference.
