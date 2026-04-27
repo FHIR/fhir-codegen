@@ -4,9 +4,6 @@
 // </copyright>
 
 using System.CommandLine;
-using System.CommandLine.Help;
-using System.CommandLine.Invocation;
-using System.CommandLine.Parsing;
 using System.Reflection;
 using System.Text;
 using Fhir.CodeGen.Lib.Configuration;
@@ -33,7 +30,8 @@ internal static class LaunchUtils
 {
     internal static Dictionary<string, LanguageOptionInfo> _configMapsByLang = [];
 
-    private static List<Option> _optsWithEnums = [];
+    private static readonly HashSet<Option> _enumDescriptionsAugmented = new(ReferenceEqualityComparer.Instance);
+    private static readonly object _enumDescriptionsAugmentedLock = new();
 
     internal record class LanguageOptionInfo
     {
@@ -251,9 +249,6 @@ internal static class LaunchUtils
     {
         RootCommand command = rc ?? BuildCommand(envConfig);
 
-        // Replace the default help action with one that prepends per-enum option detail.
-        CustomizeRootHelp(command);
-
         ParserConfiguration parserConfig = new();
         InvocationConfiguration invocationConfig = new()
         {
@@ -264,120 +259,6 @@ internal static class LaunchUtils
 
         return (command, parserConfig, invocationConfig);
     }
-
-    /// <summary>
-    /// Replaces the help action on the root command's <see cref="HelpOption"/> with an
-    /// <see cref="EnumAwareHelpAction"/> that prints enum option detail before the
-    /// standard help layout. <see cref="HelpOption"/> is recursive by default in
-    /// System.CommandLine 2.0 GA, so customizing the root suffices for subcommands.
-    /// </summary>
-    /// <param name="root">The root command to customize.</param>
-    private static void CustomizeRootHelp(RootCommand root)
-    {
-        HelpOption? helpOpt = root.Options.OfType<HelpOption>().FirstOrDefault();
-        if (helpOpt != null)
-        {
-            helpOpt.Action = new EnumAwareHelpAction(_optsWithEnums);
-        }
-    }
-
-    /// <summary>
-    /// Custom help action that prints a description block for every enum-typed option
-    /// (mirroring the beta4 <c>UseHelp</c> + <c>HelpBuilder.CustomizeSymbol</c> flow)
-    /// before delegating to the stock <see cref="HelpAction"/> for the standard layout.
-    /// <see cref="HelpBuilder"/> is internal in System.CommandLine 2.0 GA, so we cannot
-    /// per-symbol customize the column rendering directly; emitting the enum block as
-    /// preamble preserves the information content with a minor cosmetic shift.
-    /// </summary>
-    internal sealed class EnumAwareHelpAction : SynchronousCommandLineAction
-    {
-        private readonly List<Option> _enumOptions;
-        private readonly HelpAction _inner = new();
-
-        public EnumAwareHelpAction(List<Option> enumOptions)
-        {
-            // Same Option<T> instance is added to multiple commands by BuildCommand
-            // (root + language subcommands), so it shows up multiple times in
-            // _optsWithEnums. Deduplicate by reference here so the help block
-            // doesn't repeat.
-            _enumOptions = [.. enumOptions.Distinct()];
-        }
-
-        public override int Invoke(ParseResult parseResult)
-        {
-            // Restrict the enum block to options actually present on the command being
-            // helped (or any of its ancestors, since recursive options propagate).
-            HashSet<Option> visible = CollectVisibleOptions(parseResult.CommandResult.Command);
-
-            foreach (Option option in _enumOptions)
-            {
-                if (!visible.Contains(option))
-                {
-                    continue;
-                }
-
-                Console.Out.WriteLine(BuildEnumColumn(option));
-            }
-
-            return _inner.Invoke(parseResult);
-        }
-
-        private static HashSet<Option> CollectVisibleOptions(Command cmd)
-        {
-            HashSet<Option> result = [];
-            Command? cursor = cmd;
-            while (cursor != null)
-            {
-                foreach (Option opt in cursor.Options)
-                {
-                    result.Add(opt);
-                }
-
-                cursor = cursor.Parents.OfType<Command>().FirstOrDefault();
-            }
-
-            return result;
-        }
-
-        private static string BuildEnumColumn(Option option)
-        {
-            StringBuilder sb = new();
-            if (option.Aliases.Count != 0)
-            {
-                sb.AppendLine(string.Join(", ", option.Aliases));
-            }
-            else
-            {
-                sb.AppendLine(option.Name);
-            }
-
-            Type et = option.ValueType;
-
-            if (option.ValueType.IsGenericType)
-            {
-                et = option.ValueType.GenericTypeArguments.First();
-            }
-
-            if (option.ValueType.IsArray)
-            {
-                et = option.ValueType.GetElementType()!;
-            }
-
-            foreach (MemberInfo mem in et.GetMembers(BindingFlags.Public | BindingFlags.Static).Where(m => m.DeclaringType == et).OrderBy(m => m.Name))
-            {
-                IEnumerable<DescriptionAttribute> attributes = mem.GetCustomAttributes<DescriptionAttribute>(false);
-
-                sb.AppendLine($"  opt: {mem.Name}");
-                if (attributes.Any())
-                {
-                    sb.AppendLine($"       {attributes.First().Description}");
-                }
-            }
-
-            return sb.ToString();
-        }
-    }
-
 
     /// <summary>Builds command parser.</summary>
     /// <param name="envConfig">  The environment configuration.</param>
@@ -573,33 +454,100 @@ internal static class LaunchUtils
         return rootCommand;
     }
 
+    /// <summary>
+    /// If <paramref name="option"/> is an enum (or <see cref="Nullable{T}"/> /
+    /// collection of enum), append its allowed values, and any
+    /// <see cref="DescriptionAttribute"/>-annotated per-value descriptions, to
+    /// <see cref="Option.Description"/>.
+    /// </summary>
+    /// <remarks>
+    /// Idempotent: the same <see cref="Option"/> instance is mutated at most once
+    /// even though <see cref="BuildCommand"/> may call <c>TrackIfEnum</c> on it
+    /// from multiple call sites (root, generate, language subcommands all share
+    /// the same static <see cref="Option{T}"/> instances). The standard
+    /// <c>HelpAction</c> then renders the inlined values as part of the option's
+    /// description column without any custom help action.
+    /// </remarks>
+    /// <param name="option">The option whose description may be augmented.</param>
     internal static void TrackIfEnum(Option option)
     {
-        if (option.ValueType.IsEnum)
+        Type? enumType = ResolveEnumType(option.ValueType);
+        if (enumType == null)
         {
-            _optsWithEnums.Add(option);
             return;
         }
 
-        if (option.ValueType.IsGenericType)
+        lock (_enumDescriptionsAugmentedLock)
         {
-            if (option.ValueType.GenericTypeArguments.First().IsEnum)
+            if (!_enumDescriptionsAugmented.Add(option))
             {
-                _optsWithEnums.Add(option);
+                return;
             }
 
-            return;
-        }
-
-        if (option.ValueType.IsArray)
-        {
-            if (option.ValueType.GetElementType()!.IsEnum)
+            string augmentation = BuildEnumDescription(enumType);
+            if (string.IsNullOrEmpty(augmentation))
             {
-                _optsWithEnums.Add(option);
+                return;
             }
 
-            return;
+            option.Description = string.IsNullOrEmpty(option.Description)
+                ? augmentation
+                : option.Description + "\n" + augmentation;
         }
+    }
+
+    private static Type? ResolveEnumType(Type valueType)
+    {
+        if (valueType.IsEnum)
+        {
+            return valueType;
+        }
+
+        if (valueType.IsArray)
+        {
+            Type? elem = valueType.GetElementType();
+            return (elem != null && elem.IsEnum) ? elem : null;
+        }
+
+        if (valueType.IsGenericType)
+        {
+            Type first = valueType.GenericTypeArguments[0];
+            return first.IsEnum ? first : null;
+        }
+
+        return null;
+    }
+
+    private static string BuildEnumDescription(Type enumType)
+    {
+        List<MemberInfo> members = [.. enumType
+            .GetMembers(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.DeclaringType == enumType)
+            .OrderBy(m => m.Name)];
+
+        if (members.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        StringBuilder sb = new();
+        sb.Append("Allowed values: ");
+        sb.Append(string.Join(", ", members.Select(m => m.Name)));
+
+        foreach (MemberInfo mem in members)
+        {
+            DescriptionAttribute? desc = mem.GetCustomAttributes<DescriptionAttribute>(false).FirstOrDefault();
+            if (desc != null && !string.IsNullOrEmpty(desc.Description))
+            {
+                sb.Append('\n');
+                sb.Append("  ");
+                sb.Append(mem.Name);
+                sb.Append(": ");
+                sb.Append(desc.Description);
+            }
+        }
+
+        return sb.ToString();
     }
 
 
