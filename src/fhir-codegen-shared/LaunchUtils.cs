@@ -398,7 +398,10 @@ internal static class LaunchUtils
                         languageCommand.Aliases.Add(language.Name.ToLowerInvariant());
                     }
 
-                    foreach (Option option in BuildCliOptions(LanguageManager.ConfigTypeForLanguage(language.Name), envConfig: envConfig))
+                    foreach (Option option in BuildCliOptions(
+                        LanguageManager.ConfigTypeForLanguage(language.Name),
+                        excludeFromType: typeof(ConfigGenerate),
+                        envConfig: envConfig))
                     {
                         languageCommand.Options.Add(option);
                         TrackIfEnum(option);
