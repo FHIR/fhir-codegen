@@ -335,8 +335,9 @@ public class ConfigRoot : ICodeGenConfig
         Name = "ExportKeys",
         EnvVarName = "Export_Keys",
         DefaultValue = new HashSet<string>(),
-        CliOption = new System.CommandLine.Option<HashSet<string>>("--export-keys", "Keys of FHIR structures to export (e.g., Patient), empty means all.")
+        CliOption = new System.CommandLine.Option<HashSet<string>>("--export-keys")
         {
+            Description = "Keys of FHIR structures to export (e.g., Patient), empty means all.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
             Required = false,
         },

@@ -5,7 +5,6 @@ using Fhir.CodeGen.Lib.Configuration;
 using Fhir.CodeGen.Lib.Tests.Extensions;
 using Xunit.Abstractions;
 using System.CommandLine;
-using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 
 namespace Fhir.CodeGen.Lib.Tests;
@@ -22,15 +21,16 @@ public class ConfigTests
         foreach (ConfigurationOption co in configurationOptions)
         {
             // note that 'global' here is just recursive DOWNWARD
-            rootCommand.AddGlobalOption(co.CliOption);
+            co.CliOption.Recursive = true;
+            rootCommand.Options.Add(co.CliOption);
         }
 
-        Parser parser = new CommandLineBuilder(rootCommand).UseDefaults().Build();
+        ParserConfiguration parserConfig = new();
 
         string[] args = ["--max-expansion-size", "2"];
 
         // attempt a parse
-        System.CommandLine.ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = rootCommand.Parse(args, parserConfig);
 
         ConfigRoot config = new();
 
@@ -51,15 +51,16 @@ public class ConfigTests
         foreach (ConfigurationOption co in configurationOptions)
         {
             // note that 'global' here is just recursive DOWNWARD
-            rootCommand.AddGlobalOption(co.CliOption);
+            co.CliOption.Recursive = true;
+            rootCommand.Options.Add(co.CliOption);
         }
 
-        Parser parser = new CommandLineBuilder(rootCommand).UseDefaults().Build();
+        ParserConfiguration parserConfig = new();
 
         string[] args = ["--output-filename", "a.file"];
 
         // attempt a parse
-        System.CommandLine.ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = rootCommand.Parse(args, parserConfig);
 
         ConfigRoot config = new();
 
@@ -80,15 +81,16 @@ public class ConfigTests
         foreach (ConfigurationOption co in configurationOptions)
         {
             // note that 'global' here is just recursive DOWNWARD
-            rootCommand.AddGlobalOption(co.CliOption);
+            co.CliOption.Recursive = true;
+            rootCommand.Options.Add(co.CliOption);
         }
 
-        Parser parser = new CommandLineBuilder(rootCommand).UseDefaults().Build();
+        ParserConfiguration parserConfig = new();
 
         string[] args = ["--use-official-registries"];
 
         // attempt a parse
-        System.CommandLine.ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = rootCommand.Parse(args, parserConfig);
 
         ConfigRoot config = new();
 
@@ -109,15 +111,16 @@ public class ConfigTests
         foreach (ConfigurationOption co in configurationOptions)
         {
             // note that 'global' here is just recursive DOWNWARD
-            rootCommand.AddGlobalOption(co.CliOption);
+            co.CliOption.Recursive = true;
+            rootCommand.Options.Add(co.CliOption);
         }
 
-        Parser parser = new CommandLineBuilder(rootCommand).UseDefaults().Build();
+        ParserConfiguration parserConfig = new();
 
         string[] args = ["--use-official-registries", "true"];
 
         // attempt a parse
-        System.CommandLine.ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = rootCommand.Parse(args, parserConfig);
 
         ConfigRoot config = new();
 
@@ -139,15 +142,16 @@ public class ConfigTests
         foreach (ConfigurationOption co in configurationOptions)
         {
             // note that 'global' here is just recursive DOWNWARD
-            rootCommand.AddGlobalOption(co.CliOption);
+            co.CliOption.Recursive = true;
+            rootCommand.Options.Add(co.CliOption);
         }
 
-        Parser parser = new CommandLineBuilder(rootCommand).UseDefaults().Build();
+        ParserConfiguration parserConfig = new();
 
         string[] args = ["--use-official-registries", "false"];
 
         // attempt a parse
-        System.CommandLine.ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = rootCommand.Parse(args, parserConfig);
 
         ConfigRoot config = new();
 
@@ -168,15 +172,16 @@ public class ConfigTests
         foreach (ConfigurationOption co in configurationOptions)
         {
             // note that 'global' here is just recursive DOWNWARD
-            rootCommand.AddGlobalOption(co.CliOption);
+            co.CliOption.Recursive = true;
+            rootCommand.Options.Add(co.CliOption);
         }
 
-        Parser parser = new CommandLineBuilder(rootCommand).UseDefaults().Build();
+        ParserConfiguration parserConfig = new();
 
         string[] args = ["--additional-fhir-registry-urls", "http://a.co/", "--additional-fhir-registry-urls", "http://b.co"];
 
         // attempt a parse
-        System.CommandLine.ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = rootCommand.Parse(args, parserConfig);
 
         ConfigRoot config = new();
 
