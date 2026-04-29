@@ -291,7 +291,7 @@ public partial class XVerProcessor
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, specificPairs: specificPairs);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, maxStepSize: 1);
-                GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
+                //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource);
                 //GenerateOutcomes(specificPairs: specificPairs);
                 //GenerateOutcomes();
