@@ -291,7 +291,7 @@ public partial class XVerProcessor
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, specificPairs: specificPairs);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, maxStepSize: 1);
-                GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
+                //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource);
                 //GenerateOutcomes(specificPairs: specificPairs);
                 //GenerateOutcomes();
@@ -300,10 +300,10 @@ public partial class XVerProcessor
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, includeIgScripts: false);
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, maxStepSize: 1, includeIgScripts: false, specificPairs: specificPairs);
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, includeIgScripts: false, specificPairs: specificPairs);
-            //ExportOutcomes(includeIgScripts: false, specificPairs: specificPairs);
+            ExportOutcomes(includeIgScripts: false, specificPairs: specificPairs);
                 //ExportOutcomes(includeIgScripts: true, specificPairs: specificPairs);
                 //ExportOutcomes(includeIgScripts: false);
-                ExportOutcomes();
+                //ExportOutcomes();
 
                 break;
 

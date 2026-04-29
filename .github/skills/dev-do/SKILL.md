@@ -1,6 +1,6 @@
 ---
 name: dev-do
-description: "Executes an implementation plan produced by `dev-plan` in the role of a staff-level Engineer. USE FOR: actually doing the work — writing/modifying code, running builds and tests, committing locally as phases complete, and keeping `plan.md` updated with current status. Accepts either a full path to the plan file or a short slot number that expands to `scratch/[MMDD]-[##]/plan.md`. Optional `max_subagents` (default 3) caps parallel sub-agent fan-out. Optional `checkpoint_every` (default 0 = never) yields back to the user after every N completed phases; the default is to run the entire plan in a single invocation without re-prompting. May commit locally with concise conventional-commit messages, but **must not push and must not open a PR**. The `plan.md` file may be edited but never deleted."
+description: "Executes an implementation plan produced by `dev-plan` in the role of a staff-level Engineer. USE FOR: actually doing the work — writing/modifying code, running builds and tests, committing locally as phases complete, and keeping `plan.md` updated with current status. Accepts either a full path to the plan file or a short slot number that expands to `scratch/[MMDD]-[##]/plan.md`. Optional `max_subagents` (default 3) caps parallel sub-agent fan-out. Optional `checkpoint_every` (default 0 = never) yields back to the user after every N completed phases; the default is to run the entire plan in a single invocation without re-prompting. May commit locally with concise conventional-commit messages, but **must not push and must not open a PR**. The `plan.md` file may be edited but never deleted nor committed."
 ---
 
 # Dev Do Skill
@@ -65,9 +65,9 @@ invocation. The default contract is:
 
 - Run **all** remaining `Pending` phases back-to-back.
 - A successful verification + commit is **not** a yield point.
-  Updating `plan.md` and committing is a normal step inside the loop;
-  immediately mark the next `Pending` phase `In-progress` and keep
-  going.
+  Updating `plan.md` and committing code is a normal step inside 
+  the loop; immediately mark the next `Pending` phase `In-progress` 
+  and keep going.
 - Yield to the user **only** for the reasons enumerated in
   "Yield Conditions" below.
 
@@ -144,14 +144,11 @@ sibling source request (`featurerequest.md` / `bugreport.md`).
       `Complete` and append a `## Progress Log` entry (with the
       pending commit SHA placeholder; you'll fill it in after the
       commit, or amend immediately after).
-   5. Stage **both** the code changes and the `plan.md` update and
-      commit them together as a single phase commit with a concise
+   5. Stage the code changes (not the `plan.md`) update and
+      commit as a single phase commit with a concise
       conventional-commit message (`<type>(<scope>): <subject>`,
       e.g., `fix(github-source): handle empty FSH alias map`). Include
-      the standard co-author trailer required by this repo. Folding
-      the plan update into the phase commit is the default; a
-      separate `chore(plan):` commit is allowed only when the code
-      and plan changes are genuinely independent.
+      the standard co-author trailer required by this repo.
    6. **Continue immediately to the next `Pending` phase. Do not
       yield.** Successful verification + commit is *not* a stopping
       point. The only legal reasons to break out of this loop are the
