@@ -1,8 +1,7 @@
 
-### 1.0.1
+### CURRENT
 
-* DSTU2
-  * Fixed incorrect mapping of QuestionnaireResponseGroup to QuestionnaireGroup
+* Migrated from Microsoft/fhir-codegen to FHIR/fhir-codegen.
 
 ---
 
