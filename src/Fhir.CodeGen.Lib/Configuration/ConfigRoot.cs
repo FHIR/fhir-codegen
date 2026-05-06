@@ -634,6 +634,13 @@ public class ConfigRoot : ICodeGenConfig
 
         return values;
     }
+    /// <summary>Returns the current user's profile directory.</summary>
+    /// <remarks>Virtual so tests can inject a temporary directory.</remarks>
+    protected virtual string GetUserProfileDirectory()
+    {
+        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    }
+
     /// <summary>Parses the given parse result.</summary>
     /// <param name="parseResult">The parse result.</param>
     public virtual void Parse(System.CommandLine.Parsing.ParseResult parseResult)
@@ -653,11 +660,24 @@ public class ConfigRoot : ICodeGenConfig
 
                         if (string.IsNullOrEmpty(dir))
                         {
-                            dir = FileSystemUtils.FindRelativeDir(string.Empty, "~/.fhir/packages");
+                            // Default to the user's FHIR cache. Do NOT require it to exist;
+                            // DiskCacheClient creates it on first use, and commands like
+                            // `docs cli` never read it at all.
+                            dir = Path.Combine(GetUserProfileDirectory(), ".fhir", "packages");
                         }
                         else if (!Path.IsPathRooted(dir))
                         {
-                            dir = FileSystemUtils.FindRelativeDir(string.Empty, dir!);
+                            string suppliedDir = dir;
+                            string foundDir = FileSystemUtils.FindRelativeDir(string.Empty, suppliedDir, throwIfNotFound: false);
+                            if (string.IsNullOrEmpty(foundDir))
+                            {
+                                Console.WriteLine($"Warning: --fhir-cache value '{suppliedDir}' did not resolve; using as-is.");
+                                dir = suppliedDir;
+                            }
+                            else
+                            {
+                                dir = foundDir;
+                            }
                         }
 
                         FhirCacheDirectory = string.IsNullOrEmpty(dir) ? null : dir;
