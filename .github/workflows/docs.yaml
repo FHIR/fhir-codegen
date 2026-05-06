@@ -2,55 +2,74 @@ name: Docs
 
 on:
   push:
-    branches:
-    - main-disabled
+    branches: [main]
     paths:
-    - src/**
-    - docfx/**
-    - .github/workflows/docs.yml
+      - 'src/**'
+      - 'docs/**'
+      - 'docfx/**'
+      - '.github/workflows/docs.yaml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'docs/**'
+      - 'docfx/**'
+      - '.github/workflows/docs.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 env:
-  DOTNET_VERSION: '9'           # The .NET SDK version to use
+  DOTNET_VERSION: '9'
 
 jobs:
-  generate-docs:
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v3
-    - name: Setup .NET Core
-      uses: actions/setup-dotnet@v3
-      with:
-        dotnet-version: ${{ env.DOTNET_VERSION }}
-
-    - name: Setup DocFX
-      uses: crazy-max/ghaction-chocolatey@v1
-      with:
-        args: install docfx
-
-    - name: DocFX Build
-      run: docfx ./docfx/docfx.json
-      continue-on-error: false
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v1
-      with:
-        name: site
-        path: docfx/_site
-          
-  deploy:
-    concurrency: ci-${{ github.ref }}
-    needs: [generate-docs]
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Download Artifact
-        uses: actions/download-artifact@v1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
         with:
-          name: site
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Deploy
-        uses: JamesIves/github-pages-deploy-action@v4
+      - name: Install DocFX
+        run: dotnet tool install -g docfx
+
+      - name: Restore + build solution (needed for metadata + CLI emitter)
+        run: dotnet build fhir-codegen.sln -c Release
+
+      - name: Generate CLI Markdown into docs content path
+        run: |
+          dotnet run --no-build --configuration Release \
+            --project src/fhir-codegen/fhir-codegen.csproj -- \
+            docs cli --output docs/articles/cli.md
+
+      - name: Build site
+        run: docfx ./docfx/docfx.json --warningsAsErrors
+
+      - name: Configure Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
         with:
-          folder: 'site'
+          path: docfx/_site
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
