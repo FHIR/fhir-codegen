@@ -19,7 +19,7 @@ namespace Fhir.CodeGen.Packages.Models;
 /// Note that the registries use different casing conventions for property names and include different properties.
 /// </remarks>
 /// <example>
-/// Source: http://packages.fhir.org/catalog?op=find&name=hl7.fhir.uv.subscriptions&pkgcanonical=&canonical=&fhirversion
+/// Source: http://packages.fhir.org/catalog?op=find&amp;name=hl7.fhir.uv.subscriptions&amp;pkgcanonical=&amp;canonical=&amp;fhirversion
 /// <code>
 /// [
 ///     {
@@ -40,7 +40,7 @@ namespace Fhir.CodeGen.Packages.Models;
 /// ]
 /// </code>
 ///
-/// Source: http://packages2.fhir.org/catalog?op=find&name=hl7.fhir.uv.subscriptions&pkgcanonical=&canonical=&fhirversion=
+/// Source: http://packages2.fhir.org/catalog?op=find&amp;name=hl7.fhir.uv.subscriptions&amp;pkgcanonical=&amp;canonical=&amp;fhirversion=
 /// <code>
 /// [
 ///     {

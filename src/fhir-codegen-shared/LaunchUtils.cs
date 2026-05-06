@@ -52,7 +52,7 @@ internal static class LaunchUtils
         public required Option CommandOpt { get; set; }
     }
 
-    private record class LaunchCommandRecord
+    internal record class LaunchCommandRecord
     {
         public required string Literal { get; init; }
         public required string Description { get; init; }
@@ -108,7 +108,27 @@ internal static class LaunchUtils
             ConfigurationType = typeof(ConfigSql),
             Disabled = true,
         },
+        new()
+        {
+            Literal = "docs",
+            Description = "Documentation tooling.",
+            ConfigurationType = typeof(ConfigDocs),
+            SubCommands = [
+                ("cli", "Generate Markdown describing the CLI surface."),
+            ],
+        },
     ];
+
+    /// <summary>
+    /// Gets the enabled top-level commands in the order the parser exposes them.
+    /// </summary>
+    /// <remarks>
+    /// Matches the filter and ordering at <see cref="BuildCommand(IConfiguration)"/>
+    /// (drops <see cref="LaunchCommandRecord.Disabled"/> entries, sorts by
+    /// <see cref="LaunchCommandRecord.Literal"/>).
+    /// </remarks>
+    internal static IEnumerable<LaunchCommandRecord> EnabledCommands =>
+        _commands.Where(c => !c.Disabled).OrderBy(c => c.Literal, StringComparer.Ordinal);
 
     /// <summary>Parses the configuration based on the provided command and parse result.</summary>
     /// <exception cref="Exception">Thrown when the language type cannot be found, the configuration
@@ -187,6 +207,14 @@ internal static class LaunchUtils
 
             case "sql":
                 config = new ConfigSql()
+                {
+                    LaunchCommand = command,
+                    LogFactory = loggerFactory ?? LoggerFactory.Create(builder => builder.AddConsole()),
+                };
+                break;
+
+            case "docs":
+                config = new ConfigDocs()
                 {
                     LaunchCommand = command,
                     LogFactory = loggerFactory ?? LoggerFactory.Create(builder => builder.AddConsole()),

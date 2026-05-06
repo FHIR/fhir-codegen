@@ -86,7 +86,7 @@ public record class PackageManifest
     ///     e.g., `(ISC OR GPL-3.0)`
     ///     See: https://spdx.dev/specifications/
     /// If the license is not listed in the SPDX license list, it can be a link to a license file
-    ///     i.e., `SEE LICENSE IN <filename>`
+    ///     i.e., `SEE LICENSE IN &lt;filename&gt;`
     /// If the package is not licensed, use `UNLICENSED`.
     /// </remarks>
     [JsonPropertyName("license")]

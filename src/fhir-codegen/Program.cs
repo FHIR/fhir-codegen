@@ -111,8 +111,56 @@ public class Program
             //"interactive" => await DoInteractive(pr, command, subCommand);
             //"web" => await DoWeb(pr, command, subCommand);
             "sql" => await DoSql(pr, command, subCommand),
+            "docs" => await DoDocs(pr, command, subCommand),
             _ => await parser.InvokeAsync(args),
         };
+    }
+
+    /// <summary>Executes the <c>docs</c> command.</summary>
+    /// <param name="pr">The parse result.</param>
+    /// <param name="command">The top-level command name (always <c>docs</c>).</param>
+    /// <param name="subCommand">The sub-command name (e.g. <c>cli</c>).</param>
+    /// <returns>The exit code (0 on success).</returns>
+    public static async Task<int> DoDocs(ParseResult pr, string command, string? subCommand)
+    {
+        try
+        {
+            if (subCommand == null)
+            {
+                Console.WriteLine("Error: docs command requires a sub-command (e.g. 'cli').");
+                return 1;
+            }
+
+            ICodeGenConfig config = ParseConfig(pr, command, subCommand);
+
+            if (config is not ConfigDocs docsConfig)
+            {
+                throw new Exception("Config type must inherit from ConfigDocs");
+            }
+
+            switch (subCommand)
+            {
+                case "cli":
+                    {
+                        string outputPath = Path.GetFullPath(docsConfig.OutputPath);
+                        int code = await fhir_codegen_shared.CliDocEmitter.WriteToFileAsync(outputPath);
+                        if (code == 0)
+                        {
+                            Console.WriteLine($"Wrote CLI documentation to: {outputPath}");
+                        }
+                        return code;
+                    }
+
+                default:
+                    Console.WriteLine($"Error: unknown docs sub-command '{subCommand}'.");
+                    return 1;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"DoDocs <<< caught: {ex.Message}");
+            return 1;
+        }
     }
 
     public static async Task<int> DoGenerate(ParseResult pr, string command, string? subCommand)

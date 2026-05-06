@@ -9,6 +9,7 @@
     <Import_RootNamespace>fhir_codegen_shared</Import_RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)CliDocEmitter.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)LaunchUtils.cs" />
   </ItemGroup>
 </Project>
