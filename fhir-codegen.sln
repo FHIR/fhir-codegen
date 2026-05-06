@@ -52,8 +52,9 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fhir.CodeGen.SQLiteGenerato
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "docs", "docs", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
 	ProjectSection(SolutionItems) = preProject
-		docs\sanitization.md = docs\sanitization.md
-		docs\xver.md = docs\xver.md
+		docs\README.md = docs\README.md
+		docs\index.md = docs\index.md
+		docs\toc.yml = docs\toc.yml
 	EndProjectSection
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = ".claude", ".claude", "{6601332F-A738-4E4E-9ACC-D6A52E4FF6FA}"
