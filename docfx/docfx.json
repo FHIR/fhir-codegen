@@ -35,13 +35,6 @@
           "**/toc.yml"
         ],
         "src": "../docs"
-      },
-      {
-        "files": [
-          "*.md"
-        ],
-        "src": "cli-generated",
-        "dest": "articles"
       }
     ],
     "resource": [
