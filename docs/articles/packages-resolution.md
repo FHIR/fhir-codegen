@@ -918,7 +918,7 @@ version = {tools version number}
 ...
 ```
 
-### <a id="iniVerionInfo"></a>INI - version.info
+### <a id="iniVersionInfo"></a>INI - version.info
 
 Source: FHIR Core build - `https://build.fhir.org/version.info`
 

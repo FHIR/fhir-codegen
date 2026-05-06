@@ -3,7 +3,16 @@
     {
       "src": [
         {
-          "files": ["**.csproj"],
+          "files": [
+            "Fhir.CodeGen.Common/Fhir.CodeGen.Common.csproj",
+            "Fhir.CodeGen.Packages/Fhir.CodeGen.Packages.csproj",
+            "Fhir.CodeGen.CrossVersionLoader/Fhir.CodeGen.CrossVersionLoader.csproj",
+            "Fhir.CodeGen.MappingLanguage/Fhir.CodeGen.MappingLanguage.csproj",
+            "Fhir.CodeGen.LangSQLite/Fhir.CodeGen.LangSQLite.csproj",
+            "Fhir.CodeGen.Lib/Fhir.CodeGen.Lib.csproj",
+            "Fhir.CodeGen.Comparison/Fhir.CodeGen.Comparison.csproj",
+            "Fhir.CodeGen.CrossVersionExporter/Fhir.CodeGen.CrossVersionExporter.csproj"
+          ],
           "src": "../src"
         }
       ],
@@ -22,11 +31,17 @@
       },
       {
         "files": [
-          "articles/**.md",
-          "articles/**/toc.yml",
-          "toc.yml",
+          "**/*.md",
+          "**/toc.yml"
+        ],
+        "src": "../docs"
+      },
+      {
+        "files": [
           "*.md"
-        ]
+        ],
+        "src": "cli-generated",
+        "dest": "articles"
       }
     ],
     "resource": [
@@ -36,18 +51,17 @@
         ]
       }
     ],
-    "overwrite": [
-      {
-        "files": [
-          "apidoc/**.md"
-        ],
-        "exclude": [
-          "obj/**",
-          "_site/**"
-        ]
-      }
-    ],
     "dest": "_site",
+    "globalMetadata": {
+      "_appTitle": "fhir-codegen",
+      "_appFooter": "fhir-codegen",
+      "_enableSearch": true,
+      "_disableContribution": false,
+      "_gitContribute": {
+        "repo": "https://github.com/FHIR/fhir-codegen",
+        "branch": "main"
+      }
+    },
     "globalMetadataFiles": [],
     "fileMetadataFiles": [],
     "template": [

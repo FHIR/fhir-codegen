@@ -59,9 +59,9 @@ discovers it via reflection, and the CLI surfaces it as a
    The `[ConfigOption]` attribute is consumed by helper code that
    binds parsed arguments back onto the strongly-typed properties of
    the options class. The `ConfigurationOption` static is what
-   [`LaunchUtils.BuildCliOptions`](xref:fhir_codegen_shared.LaunchUtils)
-   walks to build the actual `System.CommandLine.Option<T>` tree
-   handed to the parser.
+   `LaunchUtils.BuildCliOptions` (in the `fhir-codegen-shared` shared
+   project) walks to build the actual `System.CommandLine.Option<T>`
+   tree handed to the parser.
 
    The two-surface pattern is **deliberate** today, but it is also a
    known drift risk: if you add a new flag and forget to define its

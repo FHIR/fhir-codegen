@@ -54,8 +54,9 @@ are excluded from the API reference on this site.
   `FhirSanitizationUtils` reference for code-generator authors.
 - [FHIR Package Resolution](articles/packages-resolution.md) — how
   package directives are parsed and resolved across registries.
-- [API Reference](api/index.md) — XMLDoc-driven API for the
-  `Fhir.CodeGen.*` library set.
+- [API Reference](xref:Fhir.CodeGen.Lib.Loader.PackageLoader) —
+  XMLDoc-driven API for the `Fhir.CodeGen.*` library set; browse via
+  the **API Documentation** tab.
 
 ## Source
 
