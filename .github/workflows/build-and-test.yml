@@ -19,7 +19,7 @@ jobs:
     # Try to use a cached set of packages for Unit Testing
     - name: Check for a FHIR package cache
       id: cache-fhir-packages-test
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.fhir
         key: cache-unit-test-fhir-packages-20250219
@@ -47,7 +47,7 @@ jobs:
 
     # If there is no cache, save the downloaded packages
     - name: Cache FHIR packages
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v5
       if: ${{ steps.cache-fhir-packages-test.outputs.cache-hit != 'true' }}
       continue-on-error: true
       with:
@@ -65,12 +65,12 @@ jobs:
         os: [ubuntu-latest, windows-latest, macOS-latest]
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     # Try to use a cached set of packages for Unit Testing
     - name: Restore FHIR package cache
       id: cache-fhir-packages
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.fhir
         key: cache-unit-test-fhir-packages-20250219
