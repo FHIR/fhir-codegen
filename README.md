@@ -1,5 +1,7 @@
 # fhir-codegen
 
+[![Docs](https://github.com/FHIR/fhir-codegen/actions/workflows/docs.yaml/badge.svg)](https://github.com/FHIR/fhir-codegen/actions/workflows/docs.yaml)
+
 A .Net application, library, and related utilities to work with FHIR specifications.
 
 ## FHIR Foundation Project Statement
