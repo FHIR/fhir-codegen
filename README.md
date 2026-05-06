@@ -22,9 +22,16 @@ To ensure a welcoming environment, we follow the [HL7 Code of Conduct](https://w
 
 # Documentation
 
-Apologies - the documentation for this project is currently quite stale and was causing more issues than solving.
+Documentation is published at **<https://fhir.github.io/fhir-codegen/>**
+and includes an introduction to the project, a guide to the supported
+output languages, the cross-version mapping pipeline, the auto-generated
+command-line reference, and the XMLDoc-driven API reference for the
+`Fhir.CodeGen.*` library set.
 
-Documentation updates are in progress, and will be updated Soon(TM).
+The site is rebuilt from `main` on every push by
+[`.github/workflows/docs.yaml`](.github/workflows/docs.yaml). Local docs
+authoring lives under [`docs/`](docs/); the build configuration lives
+under [`docfx/`](docfx/).
 
 
 # Trademarks
