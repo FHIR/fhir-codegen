@@ -14,7 +14,8 @@
 		<Company>Microsoft Corporation</Company>
         <Copyright>Copyright 2019-2026</Copyright>
 		<RepositoryType>git</RepositoryType>
-		<RepositoryUrl>https://github.com/Microsoft/fhir-codegen</RepositoryUrl>
+		<RepositoryUrl>https://github.com/FHIR/fhir-codegen</RepositoryUrl>
+		<PackageProjectUrl>https://fhir.github.io/fhir-codegen/</PackageProjectUrl>
 		<NeutralLanguage>en</NeutralLanguage>
 	</PropertyGroup>
 

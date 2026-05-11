@@ -378,7 +378,7 @@ public class ShorthandIG : ILanguage
 
     private void WriteHeader(ExportStreamWriter writer, string? name = null, string? description = null)
     {
-        string generationNote = $"Generated {DateTime.Now.ToString("yyyy-mm-dd HH:mm")} by fhir-codegen: https://github.com/microsoft/fhir-codegen";
+        string generationNote = $"Generated {DateTime.Now.ToString("yyyy-mm-dd HH:mm")} by fhir-codegen: https://github.com/FHIR/fhir-codegen";
 
         if (!string.IsNullOrEmpty(name))
         {

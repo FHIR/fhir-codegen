@@ -1520,7 +1520,7 @@ public partial class PackageLoader : IDisposable
 
 
     /// <summary>
-    /// Releases the unmanaged resources used by the <see cref="FhirCache"/>
+    /// Releases the unmanaged resources used by the <see cref="PackageLoader"/>
     /// and optionally releases the managed resources.
     /// </summary>
     /// <param name="disposing">True to release both managed and unmanaged resources; false to

@@ -1,0 +1,4 @@
+- name: Articles
+  href: articles/
+- name: Specifications
+  href: specs/

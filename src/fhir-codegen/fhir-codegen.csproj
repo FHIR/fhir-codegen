@@ -30,6 +30,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="fhir-codegen.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Fhir.CodeGen.Common\Fhir.CodeGen.Common.csproj" />
     <ProjectReference Include="..\Fhir.CodeGen.Lib\Fhir.CodeGen.Lib.csproj" />
     <ProjectReference Include="..\Fhir.CodeGen.Comparison\Fhir.CodeGen.Comparison.csproj" />

@@ -247,7 +247,7 @@ internal class CrossVersionResolver : IAsyncResourceResolver
             // http://hl7.org/fhir/StructureDefinition/Account|3.0
             // http://hl7.org/fhir/StructureDefinition/Account|3.0.1
             // http://hl7.org/fhir/StructureDefinition/Account|4.0.1
-            // i.e. https://github.com/microsoft/fhir-codegen/blob/dev/src/Microsoft.Health.Fhir.SpecManager/Manager/FhirPackageCommon.cs#L513
+            // i.e. https://github.com/FHIR/fhir-codegen/blob/dev/src/Microsoft.Health.Fhir.SpecManager/Manager/FhirPackageCommon.cs#L513
 
 
             // TODO: @brianpos - I would recommend using the functions in FhirReleases that I keep up to date with builds and versions
