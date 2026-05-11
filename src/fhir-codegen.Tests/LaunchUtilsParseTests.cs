@@ -77,4 +77,26 @@ public class LaunchUtilsParseTests
         cg.FhirCacheDirectory.ShouldBe("C:/tmp/cache");
         cg.Packages.ShouldContain("hl7.fhir.r4.core#4.0.1");
     }
+
+    [Fact]
+    public void ParseConfig_DocsCli_PopulatesOutputPath()
+    {
+        (RootCommand _, ParseResult pr) = Parse(
+            "docs", "cli",
+            "--output", "tmp/cli.md");
+
+        ICodeGenConfig config = LaunchUtils.ParseConfig(pr, "docs", "cli");
+        ConfigDocs docs = config.ShouldBeOfType<ConfigDocs>();
+        docs.OutputPath.ShouldBe("tmp/cli.md");
+    }
+
+    [Fact]
+    public void ParseConfig_DocsCli_DefaultsOutputPathWhenOmitted()
+    {
+        (RootCommand _, ParseResult pr) = Parse("docs", "cli");
+
+        ICodeGenConfig config = LaunchUtils.ParseConfig(pr, "docs", "cli");
+        ConfigDocs docs = config.ShouldBeOfType<ConfigDocs>();
+        docs.OutputPath.ShouldBe(ConfigDocs.DefaultOutputPath);
+    }
 }
