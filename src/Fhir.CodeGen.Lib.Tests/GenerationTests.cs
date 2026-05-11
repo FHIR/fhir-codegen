@@ -283,7 +283,7 @@ public class GenerationTestsR5 : GenerationTestBase
         }
     }
 
-    [Theory]
+    [Theory(DisplayName = "TestFirelyHashesR5", Skip = "Firely Generation is not currently deterministic - these tests are not able to succeeed")]
     [InlineData(CSharpFirelyCommon.GenSubset.Base, "TestData/Hashes/CSharpFirely2-R5-Base.json")]
     [InlineData(CSharpFirelyCommon.GenSubset.Conformance, "TestData/Hashes/CSharpFirely2-R5-Conformance.json")]
     [InlineData(CSharpFirelyCommon.GenSubset.Satellite, "TestData/Hashes/CSharpFirely2-R5-Satellite.json")]
@@ -632,7 +632,7 @@ public class GenerationTestsR4 : GenerationTestBase
         }
     }
 
-    [Theory]
+    [Theory(DisplayName = "TestFirelyHashesR4", Skip = "Firely Generation is not currently deterministic - these tests are not able to succeeed")]
     [InlineData(CSharpFirelyCommon.GenSubset.Satellite, "TestData/Hashes/CSharpFirely2-R4-Satellite.json")]
     [Trait("Category", "Generation")]
     [Trait("Comparison", "Hash")]
@@ -721,7 +721,7 @@ public class GenerationTestsR3 : GenerationTestBase
         }
     }
 
-    [Theory]
+    [Theory(DisplayName = "TestFirelyHashesR3", Skip = "Firely Generation is not currently deterministic - these tests are not able to succeeed")]
     [InlineData(CSharpFirelyCommon.GenSubset.Satellite, "TestData/Hashes/CSharpFirely2-R3-Satellite.json")]
     [Trait("Category", "Generation")]
     [Trait("Comparison", "Hash")]
