@@ -12,8 +12,36 @@ using Xunit;
 
 namespace fhir_codegen.Tests;
 
-public class LaunchUtilsParseTests
+public class LaunchUtilsParseTests : IDisposable
 {
+    private readonly string _tempCacheDir;
+
+    public LaunchUtilsParseTests()
+    {
+        _tempCacheDir = Path.Combine(
+            Path.GetTempPath(),
+            "fhir-codegen-tests",
+            "launch-utils-parse-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_tempCacheDir);
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            if (Directory.Exists(_tempCacheDir))
+            {
+                Directory.Delete(_tempCacheDir, recursive: true);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup; do not mask the test outcome.
+        }
+
+        GC.SuppressFinalize(this);
+    }
+
     private static IConfiguration BuildEnvConfig() => new ConfigurationBuilder().Build();
 
     private static (RootCommand Root, ParseResult Result) Parse(params string[] args)
@@ -37,12 +65,12 @@ public class LaunchUtilsParseTests
     {
         ConfigGenerate config = ParseGenerate(
             "TypeScript",
-            "--fhir-cache", "C:/tmp/cache",
+            "--fhir-cache", _tempCacheDir,
             "-p", "hl7.fhir.r4.core#4.0.1",
             "--include-experimental",
             "--namespace", "MyNs");
 
-        config.FhirCacheDirectory.ShouldBe("C:/tmp/cache");
+        config.FhirCacheDirectory.ShouldBe(_tempCacheDir);
         config.IncludeExperimental.ShouldBeTrue();
         config.Packages.ShouldContain("hl7.fhir.r4.core#4.0.1");
 
@@ -57,10 +85,10 @@ public class LaunchUtilsParseTests
     {
         ConfigGenerate config = ParseGenerate(
             "TypeScript",
-            "--fhir-cache", "C:/tmp/cache",
+            "--fhir-cache", _tempCacheDir,
             "-p", "hl7.fhir.r4.core#4.0.1");
 
-        config.FhirCacheDirectory.ShouldBe("C:/tmp/cache");
+        config.FhirCacheDirectory.ShouldBe(_tempCacheDir);
         config.Packages.ShouldContain("hl7.fhir.r4.core#4.0.1");
     }
 
@@ -68,13 +96,13 @@ public class LaunchUtilsParseTests
     public void ParseConfig_GenerateTypeScript_AcceptsRootOptionBeforeGenerate()
     {
         (RootCommand _, ParseResult pr) = Parse(
-            "--fhir-cache", "C:/tmp/cache",
+            "--fhir-cache", _tempCacheDir,
             "generate", "TypeScript",
             "-p", "hl7.fhir.r4.core#4.0.1");
 
         ICodeGenConfig config = LaunchUtils.ParseConfig(pr, "generate", "TypeScript");
         ConfigGenerate cg = (ConfigGenerate)config;
-        cg.FhirCacheDirectory.ShouldBe("C:/tmp/cache");
+        cg.FhirCacheDirectory.ShouldBe(_tempCacheDir);
         cg.Packages.ShouldContain("hl7.fhir.r4.core#4.0.1");
     }
 
