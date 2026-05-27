@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.CommandLine;
@@ -2302,7 +2302,7 @@ public partial class XVerProcessor
             Page = [],
         };
 
-        foreach (XVerIgFileRecord fileRec in indexInfo.StructureLookupFiles)
+        foreach (XVerIgFileRecord fileRec in indexInfo.ResourceLookupFiles)
         {
             lookupPage.Page.Add(new()
             {
@@ -2684,7 +2684,7 @@ public partial class XVerProcessor
 
         pageBuilder.AppendLine("""  { "nameUrl" : "lookup.html", "title" : "Artifact Lookup", "generation" : "markdown" , "page" : [ """);
         List<string> lookupPages = [];
-        foreach (XVerIgFileRecord fileRec in indexInfo.StructureLookupFiles)
+        foreach (XVerIgFileRecord fileRec in indexInfo.ResourceLookupFiles)
         {
             lookupPages.Add($$$"""    { "nameUrl" : "{{{fileRec.FileNameWithoutExtension}}}.html", "title" : "Lookup for {{{fileRec.Name}}}", "generation" : "markdown" }""");
         }
@@ -2807,7 +2807,7 @@ public partial class XVerProcessor
         pageBuilder.AppendLine("""  { "nameUrl" : "index.html", "title" : "Home", "generation" : "markdown" , "page" : [ """);
 
         //pageBuilder.AppendLine("""  { "sourceUrl" : "lookup.md", "name" : "lookup.html", "title" : "Artifact Lookup", "generation" : "markdown" , "page" : [ """);
-        //foreach (XVerIgFileRecord fileRec in indexInfo.StructureLookupFiles)
+        //foreach (XVerIgFileRecord fileRec in indexInfo.ResourceLookupFiles)
         //{
         //    pageBuilder.AppendLine($$$"""    { "sourceUrl" : "{{{fileRec.FileName}}}", "name" : "{{{fileRec.FileNameWithoutExtension}}}.html", "title" : "Lookup for {{{fileRec.Name}}}", "generation" : "markdown" }""");
         //}

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.CommandLine;
@@ -1697,7 +1697,7 @@ public partial class XVerProcessor
                     // create a filename for this structure's md file
                     string mdFilename = $"Lookup-{sourcePackage.ShortName}-{sourceStructureName}-{targetPackage.ShortName}.md";
 
-                    indexInfo.StructureLookupFiles.Add(new()
+                    indexInfo.ResourceLookupFiles.Add(new()
                     {
                         FileName = mdFilename,
                         FileNameWithoutExtension = mdFilename[..^3],
@@ -1793,7 +1793,7 @@ public partial class XVerProcessor
             // iterate across each of our targets
             foreach (XverPackageIndexInfo indexInfo in indexInfos)
             {
-                if (indexInfo.StructureLookupFiles.Count == 0)
+                if (indexInfo.ResourceLookupFiles.Count == 0)
                 {
                     continue; // no files for this package, skip it
                 }
@@ -1812,7 +1812,7 @@ public partial class XVerProcessor
                 indexWriter.WriteLine($"| {sourceVersion} Structure | Lookup File |");
                 indexWriter.WriteLine("| --------- | ----------- |");
 
-                foreach (XVerIgFileRecord fileRec in indexInfo.StructureLookupFiles)
+                foreach (XVerIgFileRecord fileRec in indexInfo.ResourceLookupFiles)
                 {
                     indexWriter.WriteLine($"| {fileRec.Name} | [{fileRec.FileNameWithoutExtension}]({fileRec.FileNameWithoutExtension}.html) |");
                 }
