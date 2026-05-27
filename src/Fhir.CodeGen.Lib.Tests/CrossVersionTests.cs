@@ -679,6 +679,89 @@ public class CrossVersionTests
     //    }
     //}
 
+    [Theory(DisplayName = "XVerEmitsComplexTypeArtifacts", Skip = "Tests require external repo - run manually if desired")]
+    [Trait("Category", "XVer")]
+    [Trait("RequiresExternalRepo", "true")]
+    [Trait("ExternalRepo", "HL7/fhir-cross-version")]
+    [InlineData("R4", "R5")]
+    public void XVerEmitsComplexTypeArtifacts(string srcShort, string tgtShort)
+    {
+        // This test pins the "widen xver export beyond Resources" fix from
+        // scratch/0527-01/. It is gated behind RequiresExternalRepo=true so
+        // CI (filter "RequiresExternalRepo!=true") skips it; run locally
+        // against a pre-populated ~/.fhir cache after invoking the xver
+        // pipeline (e.g.
+        //   dotnet run --project src/fhir-codegen/fhir-codegen.csproj --
+        //     xver --output-path .\out\xver
+        // ).
+        //
+        // Sentinel complex / metadata types: at least one Profile and one
+        // Extension StructureDefinition should be generated per type, plus
+        // a top-level type-map ConceptMap, and the Type Lookup page tree.
+        string[] sentinelTypes =
+        [
+            "Dosage", "Address", "HumanName", "Identifier",
+            "CodeableReference", "ContactDetail", "Expression", "RelatedArtifact",
+        ];
+
+        string outRoot = Path.Combine(FindRelativeDir("out"), "xver");
+        Directory.Exists(outRoot).ShouldBeTrue($"Expected xver output at {outRoot}; run the xver CLI first.");
+
+        // Each emitted IG sits under out/xver/<package>/, with input/resources
+        // and input/pagecontent subdirectories.
+        string[] pkgDirs = Directory.GetDirectories(outRoot,
+            $"hl7.fhir.uv.xver-{srcShort.ToLowerInvariant()}.{tgtShort.ToLowerInvariant()}*",
+            SearchOption.TopDirectoryOnly);
+        pkgDirs.Length.ShouldBeGreaterThan(0, $"No xver package directory found for {srcShort}->{tgtShort}");
+
+        foreach (string pkgDir in pkgDirs)
+        {
+            string resourcesDir = Path.Combine(pkgDir, "input", "resources");
+            string pageContentDir = Path.Combine(pkgDir, "input", "pagecontent");
+
+            Directory.Exists(resourcesDir).ShouldBeTrue($"Missing resources dir under {pkgDir}");
+            Directory.Exists(pageContentDir).ShouldBeTrue($"Missing pagecontent dir under {pkgDir}");
+
+            string[] allResourceFiles = Directory.GetFiles(resourcesDir, "*.json", SearchOption.TopDirectoryOnly);
+
+            // Sentinel complex types must each produce at least one profile + one extension.
+            foreach (string sentinel in sentinelTypes)
+            {
+                allResourceFiles.Any(f => Path.GetFileName(f).Contains(sentinel, StringComparison.OrdinalIgnoreCase) &&
+                                          Path.GetFileName(f).StartsWith("StructureDefinition-", StringComparison.OrdinalIgnoreCase))
+                    .ShouldBeTrue($"Expected at least one StructureDefinition profile for complex type {sentinel} under {resourcesDir}");
+
+                allResourceFiles.Any(f => Path.GetFileName(f).Contains(sentinel, StringComparison.OrdinalIgnoreCase) &&
+                                          Path.GetFileName(f).Contains("extension", StringComparison.OrdinalIgnoreCase))
+                    .ShouldBeTrue($"Expected at least one extension StructureDefinition for complex type {sentinel} under {resourcesDir}");
+            }
+
+            // Type-map ConceptMap must be present.
+            allResourceFiles.Any(f => Path.GetFileName(f).Contains("type-map-to", StringComparison.OrdinalIgnoreCase))
+                .ShouldBeTrue($"Expected a *-type-map-to-* ConceptMap under {resourcesDir}");
+
+            // Type lookup page index.
+            File.Exists(Path.Combine(pageContentDir, "lookup-sd-types.md"))
+                .ShouldBeTrue($"Expected lookup-sd-types.md under {pageContentDir}");
+
+            // Resource lookup page index, with the renamed title.
+            string lookupSdPath = Path.Combine(pageContentDir, "lookup-sd.md");
+            File.Exists(lookupSdPath).ShouldBeTrue($"Expected lookup-sd.md under {pageContentDir}");
+
+            // Exclusion guard: no artifacts for the abstract bases.
+            string[] excludedRoots = ["Base", "Element", "BackboneElement", "BackboneType"];
+            foreach (string excluded in excludedRoots)
+            {
+                allResourceFiles.Any(f =>
+                {
+                    string name = Path.GetFileName(f);
+                    return name.StartsWith($"StructureDefinition-{excluded}", StringComparison.OrdinalIgnoreCase) ||
+                           name.StartsWith($"StructureDefinition-extension-{excluded}", StringComparison.OrdinalIgnoreCase);
+                }).ShouldBeFalse($"Expected no artifacts for abstract base type {excluded} under {resourcesDir}");
+            }
+        }
+    }
+
 }
 
 public class TestWriter : TextWriter
