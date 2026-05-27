@@ -40,6 +40,34 @@ public abstract class FileSystemUtils
             return dirName;
         }
 
+        if (dirName.StartsWith('~'))
+        {
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (string.IsNullOrEmpty(profile))
+            {
+                profile = Path.GetDirectoryName(AppContext.BaseDirectory) ?? ".";
+            }
+
+            string relative = dirName.Length >= 2 && (dirName[1] == '/' || dirName[1] == '\\')
+                ? dirName.Substring(2)
+                : dirName.Substring(1);
+
+            string expanded = string.IsNullOrEmpty(relative)
+                ? profile
+                : Path.GetFullPath(Path.Combine(profile, relative));
+
+            if (Directory.Exists(expanded))
+            {
+                return expanded;
+            }
+
+            if (throwIfNotFound)
+            {
+                throw new DirectoryNotFoundException($"Could not find directory {dirName}!");
+            }
+
+            return string.Empty;
+        }
 
         string currentDir = startDir switch
         {
@@ -51,16 +79,6 @@ public abstract class FileSystemUtils
             "~/" => Path.GetDirectoryName(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)) ?? string.Empty,
             _ => startDir,
         };
-
-        if (dirName.StartsWith('~'))
-        {
-            currentDir = Path.GetDirectoryName(Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) ?? Path.GetDirectoryName(AppContext.BaseDirectory) ?? ".",
-                dirName[2..]))
-                ?? currentDir;
-
-            dirName = dirName[2..];
-        }
 
         if (currentDir.StartsWith('~'))
         {

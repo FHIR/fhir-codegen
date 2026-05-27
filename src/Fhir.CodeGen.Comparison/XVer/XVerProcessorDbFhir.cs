@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
@@ -151,7 +151,7 @@ public partial class XVerProcessor
         public List<XVerIgFileRecord> CodeSystemFiles { get; set; } = [];
         public List<XVerIgFileRecord> ValueSetFiles { get; set; } = [];
 
-        public List<XVerIgFileRecord> StructureLookupFiles { get; set; } = [];
+        public List<XVerIgFileRecord> ResourceLookupFiles { get; set; } = [];
         public List<XVerIgFileRecord> ValueSetLookupFiles { get; set; } = [];
 
         public XVerIgFileRecord? IgIndexFile { get; set; } = null;

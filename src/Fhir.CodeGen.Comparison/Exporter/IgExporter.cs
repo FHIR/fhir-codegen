@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
@@ -48,7 +48,8 @@ public class IgExporter
         public XVerIgFileRecord? IgIndexFile { get; set; } = null;
 
         public string? PageContentDir { get; set; } = null;
-        public List<XVerIgFileRecord> SdPageContentFiles { get; set; } = [];
+        public List<XVerIgFileRecord> ResourceLookupFiles { get; set; } = [];
+        public List<XVerIgFileRecord> TypeLookupFiles { get; set; } = [];
         public List<XVerIgFileRecord> VsPageContentFiles { get; set; } = [];
         public List<XVerIgFileRecord> XVerSourcePageContentFiles { get; set; } = [];
 
@@ -68,6 +69,7 @@ public class IgExporter
 
         public string? ResourceMapDir { get; set; } = null;
         public List<XVerIgFileRecord> ResourceMapFiles { get; set; } = [];
+        public List<XVerIgFileRecord> TypeMapFiles { get; set; } = [];
         public string? ElementMapDir { get; set; } = null;
         public List<XVerIgFileRecord> ElementMapFiles { get; set; } = [];
 
@@ -117,6 +119,7 @@ public class IgExporter
             files.AddRange(ExtensionFiles.Select(f => f.AsPackageFile()));
             files.AddRange(ProfileFiles.Select(f => f.AsPackageFile()));
             files.AddRange(ResourceMapFiles.Select(f => f.AsPackageFile()));
+            files.AddRange(TypeMapFiles.Select(f => f.AsPackageFile()));
             files.AddRange(ElementMapFiles.Select(f => f.AsPackageFile()));
 
             return new PackageContents()
@@ -793,7 +796,10 @@ public class IgExporter
                 <a href="index.html">Home</a>
               </li>
               <li>
-                <a href="lookup-sd.html">Structure Lookup</a>
+                <a href="lookup-sd.html">Resource Lookup</a>
+              </li>
+              <li>
+                <a href="lookup-sd-types.html">Type Lookup</a>
               </li>
               <li>
                 <a href="lookup-vs.html">ValueSet Lookup</a>
@@ -847,6 +853,7 @@ public class IgExporter
         HashSet<string> skipPages = [
             "index",
             "lookup-sd",
+            "lookup-sd-types",
             "lookup-vs",
             "downloads",
             "changelog",
@@ -987,6 +994,7 @@ public class IgExporter
         HashSet<string> skipPages = [
             "index",
             "lookup-sd",
+            "lookup-sd-types",
             "lookup-vs",
             "downloads",
             "changelog",
@@ -1238,6 +1246,24 @@ public class IgExporter
                 """);
         }
 
+        // process type concept maps
+        foreach (XVerIgFileRecord fileRec in igTr.TypeMapFiles)
+        {
+            resourceDefinitions.Add($$$"""
+                    {
+                        "extension" : [{
+                            "url" : "http://hl7.org/fhir/tools/StructureDefinition/resource-information",
+                            "valueString" : "ConceptMap"
+                        }],
+                        "reference" : {
+                            "reference" : "ConceptMap/{{{fileRec.Id}}}"
+                        },
+                        "name" : "{{{fileRec.Name}}}",
+                        "description" : "{{{FhirSanitizationUtils.SanitizeForJsonValue(fileRec.Description)}}}"
+                    }
+                """);
+        }
+
         // process element concept maps
         foreach (XVerIgFileRecord fileRec in igTr.ElementMapFiles)
         {
@@ -1259,6 +1285,7 @@ public class IgExporter
         HashSet<string> skipPages = [
             "index",
             "lookup-sd",
+            "lookup-sd-types",
             "lookup-vs",
             "downloads",
             "changelog",
@@ -1269,29 +1296,54 @@ public class IgExporter
         pageBuilder.AppendLine("""  { "nameUrl" : "index.html", "title" : "Home", "generation" : "markdown" , "page" : [ """);
         //pageBuilder.AppendLine("""  { "nameUrl" : "faqs.html", "title" : "FAQs", "generation" : "markdown" },""");
 
-        if (igTr.SdPageContentFiles.Count == 1)
+        if (igTr.ResourceLookupFiles.Count == 1)
         {
-            XVerIgFileRecord sdp = igTr.SdPageContentFiles[0];
+            XVerIgFileRecord sdp = igTr.ResourceLookupFiles[0];
             pageBuilder.AppendLine(
                 $$$"""  { "nameUrl" : "{{{sdp.FileNameWithoutExtension}}}.html", "title" : "{{{sdp.Description}}}", "generation" : "markdown" }, """);
         }
-        else if (igTr.SdPageContentFiles.Count > 1)
+        else if (igTr.ResourceLookupFiles.Count > 1)
         {
-            XVerIgFileRecord sdp = igTr.SdPageContentFiles[0];
+            XVerIgFileRecord sdp = igTr.ResourceLookupFiles[0];
             pageBuilder.AppendLine(
                 $$$"""  { "nameUrl" : "{{{sdp.FileNameWithoutExtension}}}.html", "title" : "{{{sdp.Description}}}", "generation" : "markdown" , "page" : [ """);
 
-            foreach (XVerIgFileRecord fileRec in igTr.SdPageContentFiles[1..^1])
+            foreach (XVerIgFileRecord fileRec in igTr.ResourceLookupFiles[1..^1])
             {
                 pageBuilder.AppendLine(
                     $$$"""    { "nameUrl" : "{{{fileRec.FileNameWithoutExtension}}}.html", "title" : "Lookup for {{{fileRec.Name}}}", "generation" : "markdown" },""");
             }
 
-            XVerIgFileRecord last = igTr.SdPageContentFiles[^1];
+            XVerIgFileRecord last = igTr.ResourceLookupFiles[^1];
             pageBuilder.AppendLine(
                 $$$"""    { "nameUrl" : "{{{last.FileNameWithoutExtension}}}.html", "title" : "Lookup for {{{last.Name}}}", "generation" : "markdown" }""");
 
             pageBuilder.AppendLine("""]},""");  // close lookup
+        }
+
+        if (igTr.TypeLookupFiles.Count == 1)
+        {
+            XVerIgFileRecord tlp = igTr.TypeLookupFiles[0];
+            pageBuilder.AppendLine(
+                $$$"""  { "nameUrl" : "{{{tlp.FileNameWithoutExtension}}}.html", "title" : "{{{tlp.Description}}}", "generation" : "markdown" }, """);
+        }
+        else if (igTr.TypeLookupFiles.Count > 1)
+        {
+            XVerIgFileRecord tlp = igTr.TypeLookupFiles[0];
+            pageBuilder.AppendLine(
+                $$$"""  { "nameUrl" : "{{{tlp.FileNameWithoutExtension}}}.html", "title" : "{{{tlp.Description}}}", "generation" : "markdown" , "page" : [ """);
+
+            foreach (XVerIgFileRecord fileRec in igTr.TypeLookupFiles[1..^1])
+            {
+                pageBuilder.AppendLine(
+                    $$$"""    { "nameUrl" : "{{{fileRec.FileNameWithoutExtension}}}.html", "title" : "Lookup for {{{fileRec.Name}}}", "generation" : "markdown" },""");
+            }
+
+            XVerIgFileRecord last = igTr.TypeLookupFiles[^1];
+            pageBuilder.AppendLine(
+                $$$"""    { "nameUrl" : "{{{last.FileNameWithoutExtension}}}.html", "title" : "Lookup for {{{last.Name}}}", "generation" : "markdown" }""");
+
+            pageBuilder.AppendLine("""]},""");  // close type lookup
         }
 
         if (igTr.VsPageContentFiles.Count == 1)
@@ -1405,7 +1457,7 @@ public class IgExporter
             .Select(d => d.AsIgDependsOn(igTr.PackagePair.TargetFhirSequence))
             .ToList();
 
-        if (igTr.SdPageContentFiles.Count < 1)
+        if (igTr.ResourceLookupFiles.Count < 1)
         {
             throw new Exception($"No StructureDefinition page content files found for IG '{igTr.PackageId}'");
         }
@@ -1413,12 +1465,13 @@ public class IgExporter
         HashSet<string> skipPages = [
             "index",
             "lookup-sd",
+            "lookup-sd-types",
             "lookup-vs",
             "downloads",
             "changelog",
         ];
 
-        XVerIgFileRecord sdLookupFileRec = igTr.SdPageContentFiles[0];
+        XVerIgFileRecord sdLookupFileRec = igTr.ResourceLookupFiles[0];
 
         ImplementationGuide.PageComponent sdLookupPage = new()
         {
@@ -1429,7 +1482,7 @@ public class IgExporter
             Page = [],
         };
 
-        foreach (XVerIgFileRecord fileRec in igTr.SdPageContentFiles)
+        foreach (XVerIgFileRecord fileRec in igTr.ResourceLookupFiles)
         {
             if (skipPages.Contains(fileRec.FileNameWithoutExtension))
             {
@@ -1443,6 +1496,37 @@ public class IgExporter
                 Title = $"Lookup for {fileRec.Name}",
                 Generation = ImplementationGuide.GuidePageGeneration.Markdown,
             });
+        }
+
+        // build the optional type lookup page tree (may be empty if no complex-type outcomes)
+        ImplementationGuide.PageComponent? typeLookupPage = null;
+        if (igTr.TypeLookupFiles.Count > 0)
+        {
+            XVerIgFileRecord typeLookupIndexFileRec = igTr.TypeLookupFiles[0];
+            typeLookupPage = new()
+            {
+                Source = new FhirUrl(typeLookupIndexFileRec.FileName),
+                Name = typeLookupIndexFileRec.FileNameWithoutExtension + ".html",
+                Title = typeLookupIndexFileRec.Description,
+                Generation = ImplementationGuide.GuidePageGeneration.Markdown,
+                Page = [],
+            };
+
+            foreach (XVerIgFileRecord fileRec in igTr.TypeLookupFiles)
+            {
+                if (skipPages.Contains(fileRec.FileNameWithoutExtension))
+                {
+                    continue;
+                }
+
+                typeLookupPage.Page.Add(new()
+                {
+                    Source = new FhirUrl(fileRec.FileName),
+                    Name = $"{fileRec.FileNameWithoutExtension}.html",
+                    Title = $"Lookup for {fileRec.Name}",
+                    Generation = ImplementationGuide.GuidePageGeneration.Markdown,
+                });
+            }
         }
 
         if (igTr.VsPageContentFiles.Count < 1)
@@ -1483,33 +1567,46 @@ public class IgExporter
             Name = "index.html",
             Title = "Home",
             Generation = ImplementationGuide.GuidePageGeneration.Markdown,
-            Page = [
-                //new()
-                //{
-                //    Source = new FhirUrl("faqs.md"),
-                //    Name = "faqs.html",
-                //    Title = "FAQs",
-                //    Generation = ImplementationGuide.GuidePageGeneration.Markdown,
+            Page = typeLookupPage is null
+                ? [
+                    sdLookupPage,
+                    vsLookupPage,
+                    new()
+                    {
+                        Source = new FhirUrl("downloads.md"),
+                        Name = "downloads.html",
+                        Title = "Downloads",
+                        Generation = ImplementationGuide.GuidePageGeneration.Markdown,
 
-                //},
-                sdLookupPage,
-                vsLookupPage,
-                new()
-                {
-                    Source = new FhirUrl("downloads.md"),
-                    Name = "downloads.html",
-                    Title = "Downloads",
-                    Generation = ImplementationGuide.GuidePageGeneration.Markdown,
+                    },
+                    new()
+                    {
+                        Source = new FhirUrl("changelog.md"),
+                        Name = "changelog.html",
+                        Title = "Change Log",
+                        Generation = ImplementationGuide.GuidePageGeneration.Markdown,
+                    }
+                ]
+                : [
+                    sdLookupPage,
+                    typeLookupPage,
+                    vsLookupPage,
+                    new()
+                    {
+                        Source = new FhirUrl("downloads.md"),
+                        Name = "downloads.html",
+                        Title = "Downloads",
+                        Generation = ImplementationGuide.GuidePageGeneration.Markdown,
 
-                },
-                new()
-                {
-                    Source = new FhirUrl("changelog.md"),
-                    Name = "changelog.html",
-                    Title = "Change Log",
-                    Generation = ImplementationGuide.GuidePageGeneration.Markdown,
-                }
-            ],
+                    },
+                    new()
+                    {
+                        Source = new FhirUrl("changelog.md"),
+                        Name = "changelog.html",
+                        Title = "Change Log",
+                        Generation = ImplementationGuide.GuidePageGeneration.Markdown,
+                    }
+                ],
         };
 
         List<ImplementationGuide.ParameterComponent> igParams = _xverIgParameters
@@ -1684,6 +1781,24 @@ public class IgExporter
 
         // add our resource concept maps
         foreach (XVerIgFileRecord fileRec in igTr.ResourceMapFiles)
+        {
+            ig.Definition.Resource.Add(new()
+            {
+                Reference = new ResourceReference($"ConceptMap/{fileRec.Id}"),
+                Name = fileRec.Name,
+                Description = FhirSanitizationUtils.SanitizeForJsonValue(fileRec.Description),
+                Extension = [
+                    new()
+                    {
+                        Url = "http://hl7.org/fhir/tools/StructureDefinition/resource-information",
+                        Value = new FhirString("ConceptMap"),
+                    },
+                ],
+            });
+        }
+
+        // add our type concept maps
+        foreach (XVerIgFileRecord fileRec in igTr.TypeMapFiles)
         {
             ig.Definition.Resource.Add(new()
             {
