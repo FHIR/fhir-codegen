@@ -58,15 +58,36 @@ public class StructurePageExporter
         // iterate over the XVer IGs
         foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
         {
-            // export package structure index page
-            exportStructureIndexPage(igTr);
+            // export resource lookup index + per-resource pages
+            exportLookupIndexPage(
+                igTr,
+                FhirArtifactClassEnum.Resource,
+                "lookup-sd.md",
+                "Resource Lookup",
+                igTr.ResourceLookupFiles);
+            exportLookupPages(
+                igTr,
+                FhirArtifactClassEnum.Resource,
+                igTr.ResourceLookupFiles);
 
-            // export individual structure lookup pages
-            exportStructureLookupPages(igTr);
+            // export type lookup index + per-type pages
+            exportLookupIndexPage(
+                igTr,
+                FhirArtifactClassEnum.ComplexType,
+                "lookup-sd-types.md",
+                "Type Lookup",
+                igTr.TypeLookupFiles);
+            exportLookupPages(
+                igTr,
+                FhirArtifactClassEnum.ComplexType,
+                igTr.TypeLookupFiles);
         }
     }
 
-    private void exportStructureLookupPages(XVerIgExportTrackingRecord igTr)
+    private void exportLookupPages(
+        XVerIgExportTrackingRecord igTr,
+        FhirArtifactClassEnum sourceArtifactClass,
+        List<XVerIgFileRecord> trackerList)
     {
         if (igTr.PageContentDir is null)
         {
@@ -79,7 +100,7 @@ public class StructurePageExporter
             Directory.CreateDirectory(dir);
         }
 
-        _logger.LogInformation($"Writing structure lookup pages for `{igTr.PackageId}`...");
+        _logger.LogInformation($"Writing structure lookup pages for `{igTr.PackageId}` ({sourceArtifactClass})...");
 
         List<XVerIgFileRecord> exported = [];
 
@@ -96,7 +117,7 @@ public class StructurePageExporter
         // iterate over the outcomes to create lookup pages
         foreach (DbStructureOutcome sdOutcome in sdOutcomes)
         {
-            if ((sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.Resource) ||
+            if ((sdOutcome.SourceArtifactClass != sourceArtifactClass) ||
                 StructureExportExclusions.Contains(sdOutcome.SourceId) ||
                 StructureExportExclusions.Contains(sdOutcome.SourceName))
             {
@@ -204,8 +225,8 @@ public class StructurePageExporter
             });
         }
 
-        _logger.LogInformation($"Wrote {exported.Count} structure lookup pages for `{igTr.PackageId}`");
-        igTr.ResourceLookupFiles.AddRange(exported);
+        _logger.LogInformation($"Wrote {exported.Count} structure lookup pages for `{igTr.PackageId}` ({sourceArtifactClass})");
+        trackerList.AddRange(exported);
     }
 
     private void writeElementTable(
@@ -558,7 +579,12 @@ public class StructurePageExporter
         targetStructureCount = targetStructureKeys.Count;
     }
 
-    private void exportStructureIndexPage(XVerIgExportTrackingRecord igTr)
+    private void exportLookupIndexPage(
+        XVerIgExportTrackingRecord igTr,
+        FhirArtifactClassEnum sourceArtifactClass,
+        string indexFileName,
+        string indexTitle,
+        List<XVerIgFileRecord> trackerList)
     {
         if (igTr.PageContentDir is null)
         {
@@ -571,7 +597,7 @@ public class StructurePageExporter
             Directory.CreateDirectory(dir);
         }
 
-        _logger.LogInformation($"Writing structure index page for `{igTr.PackageId}`...");
+        _logger.LogInformation($"Writing structure index page for `{igTr.PackageId}` ({sourceArtifactClass})...");
 
         List<XVerIgFileRecord> exported = [];
 
@@ -579,7 +605,7 @@ public class StructurePageExporter
         string targetBaseUrl = igTr.PackagePair.TargetFhirSequence.ToWebUrlRoot();
 
         // create the lookup file
-        string filename = Path.Combine(dir, "lookup-sd.md");
+        string filename = Path.Combine(dir, indexFileName);
         using ExportStreamWriter mdWriter = createMarkdownWriter(filename);
 
         mdWriter.WriteLine($"### FHIR {igTr.PackageId} Cross-Version Artifact Lookup");
@@ -617,7 +643,7 @@ public class StructurePageExporter
         // iterate over the outcomes
         foreach (DbStructureOutcome sdOutcome in sdOutcomes)
         {
-            if ((sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.Resource) ||
+            if ((sdOutcome.SourceArtifactClass != sourceArtifactClass) ||
                 StructureExportExclusions.Contains(sdOutcome.SourceId) ||
                 StructureExportExclusions.Contains(sdOutcome.SourceName))
             {
@@ -656,15 +682,15 @@ public class StructurePageExporter
             FileName = fn,
             FileNameWithoutExtension = fn[..^3],
             IsPageContentFile = true,
-            Name = "Structure Lookup",
+            Name = indexTitle,
             Id = null,
             Url = null,
             ResourceType = null,
             Version = null,
-            Description = "Structure Lookup",
+            Description = indexTitle,
         });
 
-        _logger.LogInformation($"Wrote {exported.Count} structure index pages for `{igTr.PackageId}`");
-        igTr.ResourceLookupFiles.AddRange(exported);
+        _logger.LogInformation($"Wrote {exported.Count} structure index pages for `{igTr.PackageId}` ({sourceArtifactClass})");
+        trackerList.AddRange(exported);
     }
 }
