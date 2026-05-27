@@ -275,15 +275,26 @@ public class StructureFhirExporter
 
         List<XVerIgFileRecord> exported = [];
 
-        // get the source resources
-        List<DbStructureDefinition> sourceSds = DbStructureDefinition.SelectList(
-            _db,
-            FhirPackageKey: igTr.PackagePair.SourcePackageKey,
-            ArtifactClass: FhirArtifactClassEnum.Resource);
+        // get the source structures (Resources + ComplexTypes)
+        List<DbStructureDefinition> sourceSds = [];
+        foreach (FhirArtifactClassEnum artifactClass in _xverSourceArtifactClasses)
+        {
+            sourceSds.AddRange(DbStructureDefinition.SelectList(
+                _db,
+                FhirPackageKey: igTr.PackagePair.SourcePackageKey,
+                ArtifactClass: artifactClass));
+        }
 
         // iterate over our source structures
         foreach (DbStructureDefinition sourceSd in sourceSds)
         {
+            // skip abstract bases that don't need element-level maps
+            if (StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Id) ||
+                StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Name))
+            {
+                continue;
+            }
+
             // get the structure outcomes for this structure
             List<DbStructureOutcome> sdOutcomes = DbStructureOutcome.SelectList(
                 _db,
