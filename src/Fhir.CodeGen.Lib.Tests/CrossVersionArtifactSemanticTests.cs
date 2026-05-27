@@ -61,6 +61,45 @@ public class CrossVersionArtifactSemanticTests
             .ShouldContain("Basic");
     }
 
+    [Fact]
+    public void XVerComplexTypeProfilesUseComplexTypeKind()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(fixture.AddressProfilePath));
+
+        document.RootElement.GetProperty("kind").GetString().ShouldBe("complex-type");
+        document.RootElement.GetProperty("type").GetString().ShouldBe("Address");
+        document.RootElement.GetProperty("baseDefinition").GetString().ShouldEndWith("/Address");
+    }
+
+    [Fact]
+    public void XVerUnmappedComplexTypeProfileDoesNotUseBasic()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+        string profileJson = File.ReadAllText(fixture.UnmappedTypeProfilePath);
+        using JsonDocument document = JsonDocument.Parse(profileJson);
+
+        document.RootElement.GetProperty("kind").GetString().ShouldBe("complex-type");
+        document.RootElement.GetProperty("type").GetString().ShouldBe("Element");
+        document.RootElement.GetProperty("baseDefinition").GetString().ShouldEndWith("/Element");
+        profileJson.ShouldNotContain("StructureDefinition/Basic");
+        profileJson.ShouldNotContain("\"type\": \"Basic\"");
+    }
+
+    [Fact]
+    public void XVerUnmappedComplexTypeElementMapDoesNotTargetBasic()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+
+        if (!File.Exists(fixture.UnmappedTypeElementMapPath))
+        {
+            return;
+        }
+
+        string elementMapJson = File.ReadAllText(fixture.UnmappedTypeElementMapPath);
+        elementMapJson.ShouldNotContain("Basic");
+    }
+
     private static List<string> GetConceptMapSourceCodes(string path)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
@@ -114,6 +153,12 @@ public class CrossVersionArtifactSemanticTests
         public string ResourceConceptMapPath => Path.Combine(ResourceDirectory, $"{SourceShortName}-resource-map-to-{TargetShortName}.json");
 
         public string TypeConceptMapPath => Path.Combine(ResourceDirectory, $"{SourceShortName}-type-map-to-{TargetShortName}.json");
+
+        public string AddressProfilePath => Path.Combine(ResourceDirectory, "StructureDefinition-r4-address-to-r5-address.json");
+
+        public string UnmappedTypeProfilePath => Path.Combine(ResourceDirectory, "StructureDefinition-r4-unmappedtype-to-r5-nomap.json");
+
+        public string UnmappedTypeElementMapPath => Path.Combine(ResourceDirectory, $"{SourceShortName}-UnmappedType-elements-for-{TargetShortName}-NoMap.json");
 
         public static SemanticFixture Create()
         {
