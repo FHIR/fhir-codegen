@@ -69,6 +69,7 @@ public class IgExporter
 
         public string? ResourceMapDir { get; set; } = null;
         public List<XVerIgFileRecord> ResourceMapFiles { get; set; } = [];
+        public List<XVerIgFileRecord> TypeMapFiles { get; set; } = [];
         public string? ElementMapDir { get; set; } = null;
         public List<XVerIgFileRecord> ElementMapFiles { get; set; } = [];
 
@@ -118,6 +119,7 @@ public class IgExporter
             files.AddRange(ExtensionFiles.Select(f => f.AsPackageFile()));
             files.AddRange(ProfileFiles.Select(f => f.AsPackageFile()));
             files.AddRange(ResourceMapFiles.Select(f => f.AsPackageFile()));
+            files.AddRange(TypeMapFiles.Select(f => f.AsPackageFile()));
             files.AddRange(ElementMapFiles.Select(f => f.AsPackageFile()));
 
             return new PackageContents()
@@ -1239,6 +1241,24 @@ public class IgExporter
                 """);
         }
 
+        // process type concept maps
+        foreach (XVerIgFileRecord fileRec in igTr.TypeMapFiles)
+        {
+            resourceDefinitions.Add($$$"""
+                    {
+                        "extension" : [{
+                            "url" : "http://hl7.org/fhir/tools/StructureDefinition/resource-information",
+                            "valueString" : "ConceptMap"
+                        }],
+                        "reference" : {
+                            "reference" : "ConceptMap/{{{fileRec.Id}}}"
+                        },
+                        "name" : "{{{fileRec.Name}}}",
+                        "description" : "{{{FhirSanitizationUtils.SanitizeForJsonValue(fileRec.Description)}}}"
+                    }
+                """);
+        }
+
         // process element concept maps
         foreach (XVerIgFileRecord fileRec in igTr.ElementMapFiles)
         {
@@ -1685,6 +1705,24 @@ public class IgExporter
 
         // add our resource concept maps
         foreach (XVerIgFileRecord fileRec in igTr.ResourceMapFiles)
+        {
+            ig.Definition.Resource.Add(new()
+            {
+                Reference = new ResourceReference($"ConceptMap/{fileRec.Id}"),
+                Name = fileRec.Name,
+                Description = FhirSanitizationUtils.SanitizeForJsonValue(fileRec.Description),
+                Extension = [
+                    new()
+                    {
+                        Url = "http://hl7.org/fhir/tools/StructureDefinition/resource-information",
+                        Value = new FhirString("ConceptMap"),
+                    },
+                ],
+            });
+        }
+
+        // add our type concept maps
+        foreach (XVerIgFileRecord fileRec in igTr.TypeMapFiles)
         {
             ig.Definition.Resource.Add(new()
             {

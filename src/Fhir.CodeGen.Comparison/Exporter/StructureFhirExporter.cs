@@ -238,10 +238,11 @@ public class StructureFhirExporter
             // export profiles
             exportProfiles(igTr);
 
-            // TODO: decide if we are exporting type maps 
-
             // export resource maps
             exportResourceMaps(igTr);
+
+            // export type maps
+            exportTypeMaps(igTr);
 
             // export element maps
             exportElementMaps(igTr);
@@ -793,6 +794,190 @@ public class StructureFhirExporter
         };
 
         return vsCm;
+    }
+
+    private ConceptMap createTypeConceptMap(
+        XVerIgExportTrackingRecord igTr)
+    {
+        string id = $"{igTr.PackagePair.SourcePackageShortName}-type-map-to-{igTr.PackagePair.TargetPackageShortName}";
+        string name =
+            $"{igTr.PackagePair.SourcePackageShortName.ToPascalCase()}" +
+            $"TypeMapTo" +
+            $"{igTr.PackagePair.TargetPackageShortName.ToPascalCase()}";
+
+        (_, name) = igTr.GetName(name, id);
+
+        ConceptMap vsCm = new()
+        {
+            Id = id,
+            Url = $"{XVerProcessor._canonicalRootCrossVersion}ConceptMap/{id}",
+            Name = name,
+            Version = _exporter._crossDefinitionVersion,
+            DateElement = new FhirDateTime(DateTimeOffset.Now),
+            Title = $"Cross-version ConceptMap for FHIR {igTr.PackagePair.SourceFhirSequence} types in FHIR {igTr.PackagePair.TargetFhirSequence}",
+            Description = $"This ConceptMap represents the cross-version mapping of complex types from FHIR {igTr.PackagePair.SourceFhirSequence} for use in FHIR {igTr.PackagePair.TargetFhirSequence}.",
+            Status = PublicationStatus.Active,
+            Experimental = false,
+            SourceScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/ValueSet/data-types"),
+            TargetScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/ValueSet/data-types"),
+            Group = [
+                new()
+                {
+                    Source = $"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/data-types",
+                    Target = $"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/data-types",
+                    Element = [],
+                }
+            ],
+        };
+
+        return vsCm;
+    }
+
+    private void exportTypeMaps(XVerIgExportTrackingRecord igTr)
+    {
+        CrossVersionExporter.ConceptMapToR3? exporterR3 = (_exporter._versionSpecificExport == XVerExporter.VersionSpecificExportCodes.TargetVersion) &&
+            (igTr.PackagePair.TargetFhirSequence < FhirReleases.FhirSequenceCodes.R4)
+            ? new()
+            : null;
+
+        CrossVersionExporter.ConceptMapToR4? exporterR4 = (_exporter._versionSpecificExport == XVerExporter.VersionSpecificExportCodes.TargetVersion) &&
+            (igTr.PackagePair.TargetFhirSequence < FhirReleases.FhirSequenceCodes.R5)
+            ? new()
+            : null;
+
+        if (igTr.ResourceMapDir is null)
+        {
+            throw new Exception("ResourceMapDir is null");
+        }
+
+        string dir = igTr.ResourceMapDir;
+        if (!Directory.Exists(dir))
+        {
+            Directory.CreateDirectory(dir);
+        }
+
+        _logger.LogInformation($"Writing type maps for `{igTr.PackageId}`...");
+
+        List<XVerIgFileRecord> exported = [];
+
+        ConceptMap cm = createTypeConceptMap(igTr);
+
+        // get the structure outcomes for this pair, filtered to ComplexType sources
+        List<DbStructureOutcome> sdOutcomes = DbStructureOutcome.SelectList(
+            _db,
+            SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
+            TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
+            orderByProperties: [nameof(DbStructureOutcome.SourceName), nameof(DbStructureOutcome.TargetName)]);
+
+        string? lastSourceId = null;
+
+        ConceptMap.SourceElementComponent? currentSourceElement = null;
+
+        // iterate over the outcomes
+        foreach (DbStructureOutcome sdOutcome in sdOutcomes)
+        {
+            if ((sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.ComplexType) ||
+                StructurePageExporter.StructureExportExclusions.Contains(sdOutcome.SourceId) ||
+                StructurePageExporter.StructureExportExclusions.Contains(sdOutcome.SourceName))
+            {
+                continue;
+            }
+
+            // check if we need a new source element
+            if ((currentSourceElement is null) ||
+                (lastSourceId != sdOutcome.SourceId))
+            {
+                // create a new source element
+                currentSourceElement = new()
+                {
+                    Code = sdOutcome.SourceId,
+                    Display = sdOutcome.SourceName,
+                    Target = [],
+                };
+                cm.Group[0].Element.Add(currentSourceElement);
+                lastSourceId = sdOutcome.SourceId;
+            }
+
+            CMR relationship;
+            if (sdOutcome.IsIdentical || sdOutcome.IsEquivalent)
+            {
+                relationship = CMR.Equivalent;
+            }
+            else if (sdOutcome.IsBroaderThanTarget)
+            {
+                relationship = CMR.SourceIsBroaderThanTarget;
+            }
+            else if (sdOutcome.IsNarrowerThanTarget)
+            {
+                relationship = CMR.SourceIsNarrowerThanTarget;
+            }
+            else
+            {
+                relationship = CMR.RelatedTo;
+            }
+
+            // create our target element
+            ConceptMap.TargetElementComponent targetElement = new()
+            {
+                Code = sdOutcome.TargetId ?? "Basic",
+                Display = sdOutcome.TargetName ?? "Basic",
+                Relationship = relationship,
+                Comment = sdOutcome.Comments,
+            };
+
+            currentSourceElement.Target.Add(targetElement);
+        }
+
+        // if there are no mapped types, skip writing the file
+        if (cm.Group[0].Element.Count == 0)
+        {
+            _logger.LogInformation($"No complex-type outcomes for `{igTr.PackageId}`; skipping type map");
+            igTr.TypeMapFiles = exported;
+            return;
+        }
+
+        // write the type map to a file
+        string filename;
+        if (cm.Id.StartsWith("ConceptMap", StringComparison.OrdinalIgnoreCase))
+        {
+            filename = cm.Id;
+        }
+        else if (cm.Id.StartsWith("Map", StringComparison.OrdinalIgnoreCase))
+        {
+            filename = "Concept" + cm.Id;
+        }
+        else
+        {
+            filename = cm.Id;
+        }
+        string path = Path.Combine(dir, filename + ".json");
+        if (exporterR3 is not null)
+        {
+            File.WriteAllText(path, exporterR3.ToJson(cm, new SerializerSettings() { Pretty = true }));
+        }
+        else if (exporterR4 is not null)
+        {
+            File.WriteAllText(path, exporterR4.ToJson(cm, new SerializerSettings() { Pretty = true }));
+        }
+        else
+        {
+            File.WriteAllText(path, cm.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
+        }
+        exported.Add(new()
+        {
+            FileName = filename + ".json",
+            FileNameWithoutExtension = filename,
+            IsPageContentFile = false,
+            Name = cm.Name,
+            Id = cm.Id,
+            Url = cm.Url,
+            ResourceType = Hl7.Fhir.Model.FHIRAllTypes.ConceptMap.GetLiteral(),
+            Version = cm.Version,
+            Description = cm.Description ?? cm.Title ?? $"ConceptMap: {cm.Url}",
+        });
+
+        _logger.LogInformation($"Wrote {exported.Count} type maps for `{igTr.PackageId}`");
+        igTr.TypeMapFiles = exported;
     }
 
 
