@@ -99,6 +99,13 @@ public class StructureFhirExporter
     private static readonly FhirArtifactClassEnum[] _xverSourceArtifactClasses =
         [FhirArtifactClassEnum.Resource, FhirArtifactClassEnum.ComplexType];
 
+    private static bool shouldExportStructureOutcome(
+        DbStructureOutcome sdOutcome,
+        FhirArtifactClassEnum sourceArtifactClass) =>
+        (sdOutcome.SourceArtifactClass == sourceArtifactClass) &&
+        !StructurePageExporter.StructureExportExclusions.Contains(sdOutcome.SourceId) &&
+        !StructurePageExporter.StructureExportExclusions.Contains(sdOutcome.SourceName);
+
     public StructureFhirExporter(
         XVerExporter exporter,
         IDbConnection db,
@@ -670,6 +677,11 @@ public class StructureFhirExporter
         // iterate over the outcomes
         foreach (DbStructureOutcome sdOutcome in sdOutcomes)
         {
+            if (!shouldExportStructureOutcome(sdOutcome, FhirArtifactClassEnum.Resource))
+            {
+                continue;
+            }
+
             // check if we need a new source element
             if ((currentSourceElement is null) ||
                 (lastSourceId != sdOutcome.SourceId))
@@ -876,9 +888,7 @@ public class StructureFhirExporter
         // iterate over the outcomes
         foreach (DbStructureOutcome sdOutcome in sdOutcomes)
         {
-            if ((sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.ComplexType) ||
-                StructurePageExporter.StructureExportExclusions.Contains(sdOutcome.SourceId) ||
-                StructurePageExporter.StructureExportExclusions.Contains(sdOutcome.SourceName))
+            if (!shouldExportStructureOutcome(sdOutcome, FhirArtifactClassEnum.ComplexType))
             {
                 continue;
             }
@@ -896,6 +906,11 @@ public class StructureFhirExporter
                 };
                 cm.Group[0].Element.Add(currentSourceElement);
                 lastSourceId = sdOutcome.SourceId;
+            }
+
+            if (sdOutcome.TargetId is null)
+            {
+                continue;
             }
 
             CMR relationship;
@@ -919,8 +934,8 @@ public class StructureFhirExporter
             // create our target element
             ConceptMap.TargetElementComponent targetElement = new()
             {
-                Code = sdOutcome.TargetId ?? "Basic",
-                Display = sdOutcome.TargetName ?? "Basic",
+                Code = sdOutcome.TargetId,
+                Display = sdOutcome.TargetName ?? sdOutcome.TargetId,
                 Relationship = relationship,
                 Comment = sdOutcome.Comments,
             };
