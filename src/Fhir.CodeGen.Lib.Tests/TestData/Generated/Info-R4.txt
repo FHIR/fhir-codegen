@@ -568,10 +568,19 @@ Complex Types: 41
     - id[0..1]: id *simple*
     - extension[0..*]: Extension
     - code[1..1]: uri binding name: FHIRDefinedTypeExt
-      Extensions: 1
+      Extensions: 4
       +http://hl7.org/fhir/StructureDefinition/structuredefinition-fhir-type [0..1]
         - url[1..1]: fixed to http://hl7.org/fhir/StructureDefinition/structuredefinition-fhir-type
         - value[x][1..1]: url
+      +http://hl7.org/fhir/StructureDefinition/structuredefinition-json-type [0..1]
+        - url[1..1]: fixed to http://hl7.org/fhir/StructureDefinition/structuredefinition-json-type
+        - value[x][0..1]: string
+      +http://hl7.org/fhir/StructureDefinition/structuredefinition-rdf-type [0..1]
+        - url[1..1]: fixed to http://hl7.org/fhir/StructureDefinition/structuredefinition-rdf-type
+        - value[x][0..1]: string
+      +http://hl7.org/fhir/StructureDefinition/structuredefinition-xml-type [0..1]
+        - url[1..1]: fixed to http://hl7.org/fhir/StructureDefinition/structuredefinition-xml-type
+        - value[x][0..1]: string
     - profile[0..*]: canonical(ImplementationGuide|StructureDefinition)
       Extensions: 1
       +http://hl7.org/fhir/StructureDefinition/elementdefinition-profile-element [0..1]
@@ -17269,10 +17278,19 @@ Profiles: 48
     - id[0..1]: id *simple*
     - extension[0..*]: Extension
     - code[1..1]: uri binding name: FHIRDefinedTypeExt
-      Extensions: 1
+      Extensions: 4
       +http://hl7.org/fhir/StructureDefinition/structuredefinition-fhir-type [0..1]
         - url[1..1]: fixed to http://hl7.org/fhir/StructureDefinition/structuredefinition-fhir-type
         - value[x][1..1]: url
+      +http://hl7.org/fhir/StructureDefinition/structuredefinition-json-type [0..1]
+        - url[1..1]: fixed to http://hl7.org/fhir/StructureDefinition/structuredefinition-json-type
+        - value[x][0..1]: string
+      +http://hl7.org/fhir/StructureDefinition/structuredefinition-rdf-type [0..1]
+        - url[1..1]: fixed to http://hl7.org/fhir/StructureDefinition/structuredefinition-rdf-type
+        - value[x][0..1]: string
+      +http://hl7.org/fhir/StructureDefinition/structuredefinition-xml-type [0..1]
+        - url[1..1]: fixed to http://hl7.org/fhir/StructureDefinition/structuredefinition-xml-type
+        - value[x][0..1]: string
     - profile[0..0]: canonical(ImplementationGuide|StructureDefinition)
       Extensions: 1
       +http://hl7.org/fhir/StructureDefinition/elementdefinition-profile-element [0..1]

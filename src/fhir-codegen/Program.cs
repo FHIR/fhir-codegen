@@ -196,7 +196,7 @@ public class Program
         }
     }
 
-    public static async Task<int> DoGenerate(ParseResult pr, string command, string? subCommand)
+    public static async Task<int> DoGenerate(System.CommandLine.ParseResult pr, string command, string? subCommand)
     {
         try
         {
@@ -279,7 +279,7 @@ public class Program
         return 0;
     }
 
-    public static async Task<int> DoCompare(ParseResult pr, string command, string? subCommand)
+    public static async Task<int> DoCompare(System.CommandLine.ParseResult pr, string command, string? subCommand)
     {
         try
         {
@@ -342,7 +342,7 @@ public class Program
         return 0;
     }
 
-    public static Task<int> DoXVer(ParseResult pr, string command, string? subCommand)
+    public static Task<int> DoXVer(System.CommandLine.ParseResult pr, string command, string? subCommand)
     {
         try
         {
@@ -371,7 +371,7 @@ public class Program
     }
 
 
-    public static async Task<int> DoSql(ParseResult pr, string command, string? subCommand)
+    public static async Task<int> DoSql(System.CommandLine.ParseResult pr, string command, string? subCommand)
     {
         try
         {

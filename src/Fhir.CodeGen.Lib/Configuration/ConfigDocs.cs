@@ -28,10 +28,11 @@ public class ConfigDocs : ConfigRoot
         Name = "Docs_Output",
         EnvVarName = "Docs_Output",
         DefaultValue = DefaultOutputPath,
-        CliOption = new System.CommandLine.Option<string>("--output", "Path to write the generated documentation file.")
+        CliOption = new System.CommandLine.Option<string>("--output")
         {
+            Description = "Path to write the generated documentation file.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -49,7 +50,7 @@ public class ConfigDocs : ConfigRoot
 
     /// <summary>Parses the given parse result into this configuration instance.</summary>
     /// <param name="parseResult">The parse result.</param>
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         base.Parse(parseResult);
 
