@@ -61,7 +61,6 @@ public class StructureOutcomeGenerator
         _edOutcomeTargetCache = new();
     }
 
-
     public void CreateOutcomesForStructures(
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
