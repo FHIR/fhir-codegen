@@ -205,7 +205,7 @@ public class StructurePageExporter
         }
 
         _logger.LogInformation($"Wrote {exported.Count} structure lookup pages for `{igTr.PackageId}`");
-        igTr.SdPageContentFiles.AddRange(exported);
+        igTr.ResourceLookupFiles.AddRange(exported);
     }
 
     private void writeElementTable(
@@ -665,6 +665,6 @@ public class StructurePageExporter
         });
 
         _logger.LogInformation($"Wrote {exported.Count} structure index pages for `{igTr.PackageId}`");
-        igTr.SdPageContentFiles.AddRange(exported);
+        igTr.ResourceLookupFiles.AddRange(exported);
     }
 }
