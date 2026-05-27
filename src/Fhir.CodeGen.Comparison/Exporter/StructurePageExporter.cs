@@ -35,7 +35,7 @@ public class StructurePageExporter
     private ILoggerFactory _loggerFactory;
     private ILogger _logger;
 
-    private static readonly HashSet<string> _exportExclusions = [
+    internal static readonly HashSet<string> StructureExportExclusions = [
         "Base",
         "BackboneType",
         "BackboneElement",
@@ -97,8 +97,8 @@ public class StructurePageExporter
         foreach (DbStructureOutcome sdOutcome in sdOutcomes)
         {
             if ((sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.Resource) ||
-                _exportExclusions.Contains(sdOutcome.SourceId) ||
-                _exportExclusions.Contains(sdOutcome.SourceName))
+                StructureExportExclusions.Contains(sdOutcome.SourceId) ||
+                StructureExportExclusions.Contains(sdOutcome.SourceName))
             {
                 continue;
             }
@@ -618,8 +618,8 @@ public class StructurePageExporter
         foreach (DbStructureOutcome sdOutcome in sdOutcomes)
         {
             if ((sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.Resource) ||
-                _exportExclusions.Contains(sdOutcome.SourceId) ||
-                _exportExclusions.Contains(sdOutcome.SourceName))
+                StructureExportExclusions.Contains(sdOutcome.SourceId) ||
+                StructureExportExclusions.Contains(sdOutcome.SourceName))
             {
                 continue;
             }

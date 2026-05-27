@@ -96,12 +96,8 @@ public class StructureFhirExporter
         (FhirReleases.FhirSequenceCodes source, FhirReleases.FhirSequenceCodes target),
         PackagePairStructureMappingTracker> _resourceReferenceLookup = [];
 
-    private static readonly HashSet<string> _exportExclusions = [
-        "Base",
-        "BackboneType",
-        "BackboneElement",
-        "Element",
-        ];
+    private static readonly FhirArtifactClassEnum[] _xverSourceArtifactClasses =
+        [FhirArtifactClassEnum.Resource, FhirArtifactClassEnum.ComplexType];
 
     public StructureFhirExporter(
         XVerExporter exporter,
@@ -811,15 +807,26 @@ public class StructureFhirExporter
 
         List<XVerIgFileRecord> exported = [];
 
-        // get the structures defined in the source package
-        List<DbStructureDefinition> sourceStructures = DbStructureDefinition.SelectList(
-            _db,
-            FhirPackageKey: igTr.PackagePair.SourcePackageKey,
-            ArtifactClass: FhirArtifactClassEnum.Resource);
+        // get the structures defined in the source package (Resources + ComplexTypes)
+        List<DbStructureDefinition> sourceStructures = [];
+        foreach (FhirArtifactClassEnum artifactClass in _xverSourceArtifactClasses)
+        {
+            sourceStructures.AddRange(DbStructureDefinition.SelectList(
+                _db,
+                FhirPackageKey: igTr.PackagePair.SourcePackageKey,
+                ArtifactClass: artifactClass));
+        }
 
         // iterate over all structures - each will get a profile
         foreach (DbStructureDefinition sourceSd in sourceStructures)
         {
+            // skip abstract bases that don't get profiled
+            if (StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Id) ||
+                StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Name))
+            {
+                continue;
+            }
+
             // get the structure outcomes for this source structure
             List<DbStructureOutcome> sdOutcomes = DbStructureOutcome.SelectList(
                 _db,
@@ -1750,8 +1757,8 @@ public class StructureFhirExporter
                 continue;
             }
 
-            if (_exportExclusions.Contains(edOutcome.SourceId) ||
-                _exportExclusions.Contains(sourceSd.Name))
+            if (StructurePageExporter.StructureExportExclusions.Contains(edOutcome.SourceId) ||
+                StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Name))
             {
                 continue;
             }
