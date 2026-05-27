@@ -84,6 +84,29 @@ public class StructurePageExporter
         }
     }
 
+    private static string getLookupId(DbStructureOutcome sdOutcome)
+    {
+        string id = sdOutcome.GenShortId!;
+        id = id.StartsWith("profile-", StringComparison.OrdinalIgnoreCase)
+            ? id["profile-".Length..]
+            : id.StartsWith("profile", StringComparison.OrdinalIgnoreCase)
+            ? id["profile".Length..]
+            : id.StartsWith("prfl-", StringComparison.OrdinalIgnoreCase)
+            ? id["prfl-".Length..]
+            : id.StartsWith("prfl", StringComparison.OrdinalIgnoreCase)
+            ? id["prfl".Length..]
+            : id;
+
+        return id;
+    }
+
+    private static bool hasDirectTarget(
+        DbStructureOutcome sdOutcome,
+        FhirArtifactClassEnum sourceArtifactClass) =>
+        (sdOutcome.TargetId is not null) &&
+        ((sourceArtifactClass != FhirArtifactClassEnum.ComplexType) ||
+            (sdOutcome.TargetArtifactClass == FhirArtifactClassEnum.ComplexType));
+
     private void exportLookupPages(
         XVerIgExportTrackingRecord igTr,
         FhirArtifactClassEnum sourceArtifactClass,
@@ -124,24 +147,20 @@ public class StructurePageExporter
                 continue;
             }
 
-            string id = sdOutcome.GenShortId!;
-            id = id.StartsWith("profile-", StringComparison.OrdinalIgnoreCase)
-                ? id["profile-".Length..]
-                : id.StartsWith("profile", StringComparison.OrdinalIgnoreCase)
-                ? id["profile".Length..]
-                : id.StartsWith("prfl-", StringComparison.OrdinalIgnoreCase)
-                ? id["prfl-".Length..]
-                : id.StartsWith("prfl", StringComparison.OrdinalIgnoreCase)
-                ? id["prfl".Length..]
-                : id;
+            string id = getLookupId(sdOutcome);
+            bool isResourceLookup = sourceArtifactClass == FhirArtifactClassEnum.Resource;
+            string sourceArtifactLabel = isResourceLookup ? "resource" : "complex type";
+            string targetArtifactLabel = isResourceLookup ? "resource" : "complex type";
+            bool hasDirectTargetStructure = hasDirectTarget(sdOutcome, sourceArtifactClass);
+            string targetId = hasDirectTargetStructure
+                ? sdOutcome.TargetId!
+                : isResourceLookup
+                ? "Basic"
+                : "no direct target type";
 
             // create the lookup file
             string filename = Path.Combine(dir, $"lookup-sd-{id}.md");
             using ExportStreamWriter mdWriter = createMarkdownWriter(filename);
-
-            string targetId = sdOutcome.TargetId ?? "Basic";
-            //string elementCmId = $"ConceptMap-{igTr.PackagePair.SourcePackageShortName}-{sdOutcome.SourceId}-elements-for-{igTr.PackagePair.TargetPackageShortName}-{targetId}";
-            //string elementCmId = $"conceptmap-{igTr.PackagePair.SourcePackageShortName}-{sdOutcome.SourceId}-elements-for-{igTr.PackagePair.TargetPackageShortName}-{targetId}";
 
             // write a header
             mdWriter.WriteLine(
@@ -149,19 +168,51 @@ public class StructurePageExporter
                 $" [{sdOutcome.SourceName}]({sourceBaseUrl}{sdOutcome.SourceName}.html)" +
                 $" for use in [FHIR {igTr.PackagePair.TargetFhirSequence}]({targetBaseUrl})");
             mdWriter.WriteLine();
-            mdWriter.WriteLine(
-                $"The FHIR {igTr.PackagePair.SourceFhirSequence} resource is represented in" +
-                $" FHIR {igTr.PackagePair.TargetFhirSequence} via the {targetId} resource.");
+
+            if (isResourceLookup)
+            {
+                mdWriter.WriteLine(
+                   $"The FHIR {igTr.PackagePair.SourceFhirSequence} resource is represented in" +
+                   $" FHIR {igTr.PackagePair.TargetFhirSequence} via the {targetId} resource.");
+            }
+            else if (hasDirectTargetStructure)
+            {
+                mdWriter.WriteLine(
+                   $"The FHIR {igTr.PackagePair.SourceFhirSequence} complex type is represented in" +
+                   $" FHIR {igTr.PackagePair.TargetFhirSequence} via the {targetId} complex type.");
+            }
+            else
+            {
+                mdWriter.WriteLine(
+                   $"The FHIR {igTr.PackagePair.SourceFhirSequence} complex type has no direct target type" +
+                   $" in FHIR {igTr.PackagePair.TargetFhirSequence}; use the generated profile and extension representation instead.");
+            }
             mdWriter.WriteLine();
 
-            mdWriter.WriteLine(
-                $"Note that there is a profile defined to simplify use of this cross-version resource representation:" +
-                $"[Profile: {id}]({sdOutcome.GenFileName}.html)");
+            if (sdOutcome.GenFileName is not null)
+            {
+                mdWriter.WriteLine(
+                   $"Note that there is a profile defined to simplify use of this cross-version {sourceArtifactLabel} representation:" +
+                   $"[Profile: {id}]({sdOutcome.GenFileName}.html)");
+            }
+            else
+            {
+                mdWriter.WriteLine($"No profile generated for this cross-version {sourceArtifactLabel} representation.");
+            }
             mdWriter.WriteLine();
 
-            mdWriter.WriteLine(
-                $"A computable version of the following element information is available in:" +
-                $" [{sdOutcome.ElementConceptMapName}]({sdOutcome.ElementConceptMapFileName!}.html)");
+            bool hasElementConceptMap = (sdOutcome.ElementConceptMapFileName is not null) &&
+                igTr.ElementMapFiles.Any(file => file.FileNameWithoutExtension == sdOutcome.ElementConceptMapFileName);
+            if (hasElementConceptMap)
+            {
+                mdWriter.WriteLine(
+                   $"A computable version of the following element information is available in:" +
+                   $" [{sdOutcome.ElementConceptMapName}]({sdOutcome.ElementConceptMapFileName}.html)");
+            }
+            else
+            {
+                mdWriter.WriteLine($"No element-level ConceptMap was generated for this {sourceArtifactLabel}.");
+            }
             mdWriter.WriteLine();
             mdWriter.WriteLine($"| Source Element (FHIR {igTr.PackagePair.SourceFhirSequence}) | Target(s) | Comments |");
             mdWriter.WriteLine("| -------------- | ---- | -------- |");
@@ -190,7 +241,7 @@ public class StructurePageExporter
                 mdWriter.WriteLine();
                 mdWriter.WriteLine(
                     $"Note that the FHIR {igTr.PackagePair.SourceFhirSequence} {sdOutcome.SourceId}" +
-                    $" maps to multiple resources in FHIR {igTr.PackagePair.TargetFhirSequence}." +
+                    $" maps to multiple {targetArtifactLabel}s in FHIR {igTr.PackagePair.TargetFhirSequence}." +
                     $" The following table contains the the combined lookup information for reference.");
                 mdWriter.WriteLine();
                 mdWriter.WriteLine($"| Source Element (FHIR {igTr.PackagePair.SourceFhirSequence}) | Target(s) | Comments |");
@@ -608,26 +659,36 @@ public class StructurePageExporter
         string filename = Path.Combine(dir, indexFileName);
         using ExportStreamWriter mdWriter = createMarkdownWriter(filename);
 
+        bool isResourceLookup = sourceArtifactClass == FhirArtifactClassEnum.Resource;
+        string sourceArtifactLabel = isResourceLookup ? "resource" : "complex type";
+        string sourceArtifactPlural = isResourceLookup ? "resources" : "complex types";
+        string sourceColumnLabel = isResourceLookup ? "Resource" : "Type";
+        string targetColumnLabel = isResourceLookup ? "Resource" : "Type";
+        List<XVerIgFileRecord> conceptMapFiles = isResourceLookup
+            ? igTr.ResourceMapFiles
+            : igTr.TypeMapFiles;
+
         mdWriter.WriteLine($"### FHIR {igTr.PackageId} Cross-Version Artifact Lookup");
         mdWriter.WriteLine();
-        mdWriter.WriteLine("The following table links to documentation for the source version of FHIR, for implementers to understand if there is an extension for the element they are trying to use.");
-        mdWriter.WriteLine($"These are structures defined in FHIR {igTr.PackagePair.SourceFhirSequence} (the source package), with applicable usage as mapped into FHIR {igTr.PackagePair.TargetFhirSequence} (the target package).");
+        mdWriter.WriteLine($"The following table links to documentation for source FHIR {sourceArtifactPlural}, for implementers to understand cross-version representation details.");
+        mdWriter.WriteLine($"These are {sourceArtifactPlural} defined in FHIR {igTr.PackagePair.SourceFhirSequence} (the source package), with applicable usage as mapped into FHIR {igTr.PackagePair.TargetFhirSequence} (the target package).");
         mdWriter.WriteLine();
 
-        string cmId = $"ConceptMap-{igTr.PackagePair.SourcePackageShortName}-resources-for-{igTr.PackagePair.TargetPackageShortName}";
-        string cmName =
-            $"ConceptMap" +
-            $"{igTr.PackagePair.SourcePackageShortName.ToPascalCase()}" +
-            $"ResourcesFor" +
-            $"{igTr.PackagePair.TargetPackageShortName.ToPascalCase()}";
-
-        mdWriter.WriteLine(
-            $"A computable version of the following element information is available in:" +
-            $" [{cmName}](ConceptMap-{cmId}.html)");
+        XVerIgFileRecord? conceptMapFile = conceptMapFiles.FirstOrDefault();
+        if (conceptMapFile?.Id is not null)
+        {
+            mdWriter.WriteLine(
+                $"A computable version of the following {sourceArtifactLabel} mapping information is available in:" +
+                $" [{conceptMapFile.Name}](ConceptMap-{conceptMapFile.Id}.html)");
+        }
+        else
+        {
+            mdWriter.WriteLine($"No computable {sourceArtifactLabel} ConceptMap was generated.");
+        }
         mdWriter.WriteLine();
         mdWriter.WriteLine(
-            $"| {igTr.PackagePair.SourceFhirSequence} Structure" +
-            $" | {igTr.PackagePair.TargetFhirSequence} Structure" +
+            $"| {igTr.PackagePair.SourceFhirSequence} {sourceColumnLabel}" +
+            $" | {igTr.PackagePair.TargetFhirSequence} {targetColumnLabel}" +
             $" | Lookup File" +
             $" | Profile" +
             $" |");
@@ -650,24 +711,23 @@ public class StructurePageExporter
                 continue;
             }
 
-            string targetId = sdOutcome.TargetId ?? "Basic";
+            bool hasDirectTargetStructure = hasDirectTarget(sdOutcome, sourceArtifactClass);
+            string targetMarkdown = hasDirectTargetStructure
+                ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetId}]({targetBaseUrl}{sdOutcome.TargetId}.html)"
+                : isResourceLookup
+                ? $"[{igTr.PackagePair.TargetFhirSequence} Basic]({targetBaseUrl}Basic.html)"
+                : "No direct target type";
+            string profileMarkdown = sdOutcome.GenFileName is null
+                ? "No profile generated"
+                : $"[XVer Profile: {getLookupId(sdOutcome)}]({sdOutcome.GenFileName}.html)";
 
-            string id = sdOutcome.GenShortId!;
-            id = id.StartsWith("profile-", StringComparison.OrdinalIgnoreCase)
-                ? id["profile-".Length..]
-                : id.StartsWith("profile", StringComparison.OrdinalIgnoreCase)
-                ? id["profile".Length..]
-                : id.StartsWith("prfl-", StringComparison.OrdinalIgnoreCase)
-                ? id["prfl-".Length..]
-                : id.StartsWith("prfl", StringComparison.OrdinalIgnoreCase)
-                ? id["prfl".Length..]
-                : id;
+            string id = getLookupId(sdOutcome);
 
             mdWriter.WriteLine(
                 $"| [{igTr.PackagePair.SourceFhirSequence} {sdOutcome.SourceName}]({sourceBaseUrl}{sdOutcome.SourceId}.html)" +
-                $" | [{igTr.PackagePair.TargetFhirSequence} {targetId}]({targetBaseUrl}{targetId}.html)" +
+                $" | {targetMarkdown}" +
                 $" | [XVer Lookup: {id}](lookup-sd-{id}.html)" +
-                $" | [XVer Profile: {id}](StructureDefinition-{sdOutcome.GenShortId}.html)" +
+                $" | {profileMarkdown}" +
                 $" |");
         }
 

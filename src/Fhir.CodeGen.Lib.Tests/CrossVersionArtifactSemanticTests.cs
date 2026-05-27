@@ -100,6 +100,41 @@ public class CrossVersionArtifactSemanticTests
         elementMapJson.ShouldNotContain("Basic");
     }
 
+    [Fact]
+    public void XVerTypeLookupIndexLinksTypeMap()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+
+        string lookupIndex = File.ReadAllText(fixture.TypeLookupIndexPath);
+
+        lookupIndex.ShouldContain("ConceptMap-R4-type-map-to-R5.html");
+        lookupIndex.ShouldNotContain("resource-map");
+        lookupIndex.ShouldNotContain("ConceptMap-ConceptMap-");
+    }
+
+    [Fact]
+    public void XVerTypeLookupPagesUseTypeWording()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+
+        string lookupPage = File.ReadAllText(fixture.AddressTypeLookupPath);
+
+        lookupPage.ShouldContain("complex type");
+        lookupPage.ShouldNotContain("resource is represented");
+    }
+
+    [Fact]
+    public void XVerUnmappedTypeLookupDoesNotLinkBasic()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+
+        string lookupPage = File.ReadAllText(fixture.UnmappedTypeLookupPath);
+
+        lookupPage.ShouldNotContain("Basic.html");
+        lookupPage.ShouldNotContain("Basic resource");
+        lookupPage.ShouldContain("no direct target type");
+    }
+
     private static List<string> GetConceptMapSourceCodes(string path)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
@@ -150,6 +185,8 @@ public class CrossVersionArtifactSemanticTests
 
         public string ResourceDirectory => Path.Combine(PackageRoot, "input", "resources");
 
+        public string PageContentDirectory => Path.Combine(PackageRoot, "input", "pagecontent");
+
         public string ResourceConceptMapPath => Path.Combine(ResourceDirectory, $"{SourceShortName}-resource-map-to-{TargetShortName}.json");
 
         public string TypeConceptMapPath => Path.Combine(ResourceDirectory, $"{SourceShortName}-type-map-to-{TargetShortName}.json");
@@ -159,6 +196,12 @@ public class CrossVersionArtifactSemanticTests
         public string UnmappedTypeProfilePath => Path.Combine(ResourceDirectory, "StructureDefinition-r4-unmappedtype-to-r5-nomap.json");
 
         public string UnmappedTypeElementMapPath => Path.Combine(ResourceDirectory, $"{SourceShortName}-UnmappedType-elements-for-{TargetShortName}-NoMap.json");
+
+        public string TypeLookupIndexPath => Path.Combine(PageContentDirectory, "lookup-sd-types.md");
+
+        public string AddressTypeLookupPath => Path.Combine(PageContentDirectory, "lookup-sd-r4-address-to-r5-address.md");
+
+        public string UnmappedTypeLookupPath => Path.Combine(PageContentDirectory, "lookup-sd-r4-unmappedtype-to-r5-nomap.md");
 
         public static SemanticFixture Create()
         {
