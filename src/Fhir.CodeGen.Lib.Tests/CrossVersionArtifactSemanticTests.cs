@@ -141,7 +141,7 @@ public class CrossVersionArtifactSemanticTests
     }
 
     [Fact]
-    public void XVerUnmappedTypeLookupDoesNotLinkBasic()
+    public void XVerUnmappedTypeLookupLinksExtension()
     {
         using SemanticFixture fixture = SemanticFixture.Create();
 
@@ -149,7 +149,23 @@ public class CrossVersionArtifactSemanticTests
 
         lookupPage.ShouldNotContain("Basic.html");
         lookupPage.ShouldNotContain("Basic resource");
-        lookupPage.ShouldContain("no direct target type");
+        lookupPage.ShouldContain("Extension");
+        lookupPage.ShouldContain("extensibility.html#Extension");
+    }
+
+    [Fact]
+    public void XVerTypeLookupIndexLinksExtensionForUnmapped()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+
+        string typeLookupIndex = File.ReadAllText(fixture.TypeLookupIndexPath);
+
+        string[] lines = typeLookupIndex.Split('\n');
+        string? unmappedRow = lines.FirstOrDefault(l => l.Contains("UnmappedType", StringComparison.Ordinal));
+        unmappedRow.ShouldNotBeNull("Expected an UnmappedType row in the type lookup index.");
+        unmappedRow!.ShouldContain("Extension");
+        unmappedRow.ShouldContain("extensibility.html#Extension");
+        unmappedRow.ShouldNotContain("No direct target type");
     }
 
     private static List<string> GetConceptMapSourceCodes(string path)

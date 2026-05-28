@@ -187,7 +187,8 @@ public class StructurePageExporter
             {
                 mdWriter.WriteLine(
                    $"The FHIR {igTr.PackagePair.SourceFhirSequence} complex type has no direct target type" +
-                   $" in FHIR {igTr.PackagePair.TargetFhirSequence}; use the generated profile and extension representation instead.");
+                   $" in FHIR {igTr.PackagePair.TargetFhirSequence}; use the generated" +
+                   $" [`Extension`]({targetBaseUrl}extensibility.html#Extension) representation linked below.");
             }
             mdWriter.WriteLine();
 
@@ -752,7 +753,7 @@ public class StructurePageExporter
                 ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetId}]({targetBaseUrl}{sdOutcome.TargetId}.html)"
                 : isResourceLookup
                 ? $"[{igTr.PackagePair.TargetFhirSequence} Basic]({targetBaseUrl}Basic.html)"
-                : "No direct target type";
+                : $"[{igTr.PackagePair.TargetFhirSequence} Extension]({targetBaseUrl}extensibility.html#Extension)";
 
             string id = getLookupId(sdOutcome);
 
