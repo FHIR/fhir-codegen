@@ -724,13 +724,11 @@ public class CrossVersionTests
 
             string[] allResourceFiles = Directory.GetFiles(resourcesDir, "*.json", SearchOption.TopDirectoryOnly);
 
-            // Sentinel complex types must each produce at least one profile + one extension.
+            // Sentinel complex types must each produce at least one extension SD.
+            // Per-complex-type profiles are no longer emitted; the type ConceptMap
+            // plus per-element extension definitions carry the representation.
             foreach (string sentinel in sentinelTypes)
             {
-                allResourceFiles.Any(f => Path.GetFileName(f).Contains(sentinel, StringComparison.OrdinalIgnoreCase) &&
-                                          Path.GetFileName(f).StartsWith("StructureDefinition-", StringComparison.OrdinalIgnoreCase))
-                    .ShouldBeTrue($"Expected at least one StructureDefinition profile for complex type {sentinel} under {resourcesDir}");
-
                 allResourceFiles.Any(f => Path.GetFileName(f).Contains(sentinel, StringComparison.OrdinalIgnoreCase) &&
                                           Path.GetFileName(f).Contains("extension", StringComparison.OrdinalIgnoreCase))
                     .ShouldBeTrue($"Expected at least one extension StructureDefinition for complex type {sentinel} under {resourcesDir}");

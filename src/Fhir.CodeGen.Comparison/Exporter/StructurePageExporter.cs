@@ -191,17 +191,20 @@ public class StructurePageExporter
             }
             mdWriter.WriteLine();
 
-            if (sdOutcome.GenFileName is not null)
+            if (isResourceLookup)
             {
-                mdWriter.WriteLine(
-                   $"Note that there is a profile defined to simplify use of this cross-version {sourceArtifactLabel} representation:" +
-                   $"[Profile: {id}]({sdOutcome.GenFileName}.html)");
+                if (sdOutcome.GenFileName is not null)
+                {
+                    mdWriter.WriteLine(
+                       $"Note that there is a profile defined to simplify use of this cross-version {sourceArtifactLabel} representation:" +
+                       $"[Profile: {id}]({sdOutcome.GenFileName}.html)");
+                }
+                else
+                {
+                    mdWriter.WriteLine($"No profile generated for this cross-version {sourceArtifactLabel} representation.");
+                }
+                mdWriter.WriteLine();
             }
-            else
-            {
-                mdWriter.WriteLine($"No profile generated for this cross-version {sourceArtifactLabel} representation.");
-            }
-            mdWriter.WriteLine();
 
             bool hasElementConceptMap = (sdOutcome.ElementConceptMapFileName is not null) &&
                 igTr.ElementMapFiles.Any(file => file.FileNameWithoutExtension == sdOutcome.ElementConceptMapFileName);
@@ -707,13 +710,25 @@ public class StructurePageExporter
             mdWriter.WriteLine($"No computable {sourceArtifactLabel} ConceptMap was generated.");
         }
         mdWriter.WriteLine();
-        mdWriter.WriteLine(
-            $"| {igTr.PackagePair.SourceFhirSequence} {sourceColumnLabel}" +
-            $" | {igTr.PackagePair.TargetFhirSequence} {targetColumnLabel}" +
-            $" | Lookup File" +
-            $" | Profile" +
-            $" |");
-        mdWriter.WriteLine("| --------- | ----------- | ----------- | ----------- |");
+        if (isResourceLookup)
+        {
+            mdWriter.WriteLine(
+                $"| {igTr.PackagePair.SourceFhirSequence} {sourceColumnLabel}" +
+                $" | {igTr.PackagePair.TargetFhirSequence} {targetColumnLabel}" +
+                $" | Lookup File" +
+                $" | Profile" +
+                $" |");
+            mdWriter.WriteLine("| --------- | ----------- | ----------- | ----------- |");
+        }
+        else
+        {
+            mdWriter.WriteLine(
+                $"| {igTr.PackagePair.SourceFhirSequence} {sourceColumnLabel}" +
+                $" | {igTr.PackagePair.TargetFhirSequence} {targetColumnLabel}" +
+                $" | Lookup File" +
+                $" |");
+            mdWriter.WriteLine("| --------- | ----------- | ----------- |");
+        }
 
         // get the structure outcomes for this pair
         List<DbStructureOutcome> sdOutcomes = DbStructureOutcome.SelectList(
@@ -738,18 +753,30 @@ public class StructurePageExporter
                 : isResourceLookup
                 ? $"[{igTr.PackagePair.TargetFhirSequence} Basic]({targetBaseUrl}Basic.html)"
                 : "No direct target type";
-            string profileMarkdown = sdOutcome.GenFileName is null
-                ? "No profile generated"
-                : $"[XVer Profile: {getLookupId(sdOutcome)}]({sdOutcome.GenFileName}.html)";
 
             string id = getLookupId(sdOutcome);
 
-            mdWriter.WriteLine(
-                $"| [{igTr.PackagePair.SourceFhirSequence} {sdOutcome.SourceName}]({sourceBaseUrl}{sdOutcome.SourceId}.html)" +
-                $" | {targetMarkdown}" +
-                $" | [XVer Lookup: {id}](lookup-sd-{id}.html)" +
-                $" | {profileMarkdown}" +
-                $" |");
+            if (isResourceLookup)
+            {
+                string profileMarkdown = sdOutcome.GenFileName is null
+                    ? "No profile generated"
+                    : $"[XVer Profile: {id}]({sdOutcome.GenFileName}.html)";
+
+                mdWriter.WriteLine(
+                    $"| [{igTr.PackagePair.SourceFhirSequence} {sdOutcome.SourceName}]({sourceBaseUrl}{sdOutcome.SourceId}.html)" +
+                    $" | {targetMarkdown}" +
+                    $" | [XVer Lookup: {id}](lookup-sd-{id}.html)" +
+                    $" | {profileMarkdown}" +
+                    $" |");
+            }
+            else
+            {
+                mdWriter.WriteLine(
+                    $"| [{igTr.PackagePair.SourceFhirSequence} {sdOutcome.SourceName}]({sourceBaseUrl}{sdOutcome.SourceId}.html)" +
+                    $" | {targetMarkdown}" +
+                    $" | [XVer Lookup: {id}](lookup-sd-{id}.html)" +
+                    $" |");
+            }
         }
 
         mdWriter.WriteLine("{: .grid }");

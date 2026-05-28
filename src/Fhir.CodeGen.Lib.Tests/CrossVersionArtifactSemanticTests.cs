@@ -82,28 +82,25 @@ public class CrossVersionArtifactSemanticTests
     }
 
     [Fact]
-    public void XVerComplexTypeProfilesUseComplexTypeKind()
+    public void XVerComplexTypeProfilesAreNotEmitted()
     {
         using SemanticFixture fixture = SemanticFixture.Create();
-        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(fixture.AddressProfilePath));
 
-        document.RootElement.GetProperty("kind").GetString().ShouldBe("complex-type");
-        document.RootElement.GetProperty("type").GetString().ShouldBe("Address");
-        document.RootElement.GetProperty("baseDefinition").GetString().ShouldEndWith("/Address");
+        File.Exists(fixture.AddressProfilePath).ShouldBeFalse();
+        File.Exists(fixture.UnmappedTypeProfilePath).ShouldBeFalse();
     }
 
     [Fact]
-    public void XVerUnmappedComplexTypeProfileDoesNotUseBasic()
+    public void XVerTypeLookupIndexHasNoProfileColumn()
     {
         using SemanticFixture fixture = SemanticFixture.Create();
-        string profileJson = File.ReadAllText(fixture.UnmappedTypeProfilePath);
-        using JsonDocument document = JsonDocument.Parse(profileJson);
 
-        document.RootElement.GetProperty("kind").GetString().ShouldBe("complex-type");
-        document.RootElement.GetProperty("type").GetString().ShouldBe("Element");
-        document.RootElement.GetProperty("baseDefinition").GetString().ShouldEndWith("/Element");
-        profileJson.ShouldNotContain("StructureDefinition/Basic");
-        profileJson.ShouldNotContain("\"type\": \"Basic\"");
+        string typeLookupIndex = File.ReadAllText(fixture.TypeLookupIndexPath);
+
+        string[] lines = typeLookupIndex.Split('\n');
+        string? headerLine = lines.FirstOrDefault(l => l.TrimStart().StartsWith("| R4 Type", StringComparison.Ordinal));
+        headerLine.ShouldNotBeNull("Expected a `| R4 Type` header row in the type lookup index.");
+        headerLine!.ShouldNotContain("Profile");
     }
 
     [Fact]

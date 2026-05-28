@@ -1120,6 +1120,14 @@ public class StructureFhirExporter
                 continue;
             }
 
+            // complex types are represented in the cross-version output via the
+            // type ConceptMap and the per-element extension definitions; no
+            // per-type profile is emitted
+            if (sourceSd.ArtifactClass == FhirArtifactClassEnum.ComplexType)
+            {
+                continue;
+            }
+
             // get the structure outcomes for this source structure
             List<DbStructureOutcome> sdOutcomes = DbStructureOutcome.SelectList(
                 _db,
