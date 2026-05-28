@@ -5,10 +5,10 @@ using Fhir.CodeGen.Lib.Configuration;
 using Fhir.CodeGen.Lib.Tests.Extensions;
 using Xunit.Abstractions;
 using System.CommandLine;
-using System.CommandLine.Parsing;
 
 namespace Fhir.CodeGen.Lib.Tests;
 
+[Collection("EnvVarSerial")]
 public class ConfigTests
 {
     [Fact]
@@ -196,20 +196,22 @@ public class ConfigTests
 
     /// <summary>
     /// Builds a parser with all <see cref="ConfigRoot"/> options registered
-    /// as global options, mirroring the pattern used by the other tests in
-    /// this file.
+    /// as recursive (globally visible) options, mirroring the pattern used
+    /// by the other tests in this file.
     /// </summary>
-    private static Parser BuildRootParser()
+    private static (RootCommand Root, ParserConfiguration Config) BuildRootParser()
     {
         ConfigurationOption[] configurationOptions = (new ConfigRoot()).GetOptions();
 
         RootCommand rootCommand = new("Root command for unit testing.");
         foreach (ConfigurationOption co in configurationOptions)
         {
-            rootCommand.AddGlobalOption(co.CliOption);
+            co.CliOption.Recursive = true;
+            rootCommand.Options.Add(co.CliOption);
         }
 
-        return new CommandLineBuilder(rootCommand).UseDefaults().Build();
+        ParserConfiguration parserConfig = new();
+        return (rootCommand, parserConfig);
     }
 
     /// <summary>
@@ -236,13 +238,15 @@ public class ConfigTests
     [Fact]
     public void Parse_WithMissingDefaultFhirCache_DoesNotThrow_AndUsesUserProfileDefault()
     {
+        using EnvVarScope envScope = new("Fhir_Cache", null);
+
         string tempProfile = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(tempProfile);
 
         try
         {
-            Parser parser = BuildRootParser();
-            ParseResult pr = parser.Parse([]);
+            (RootCommand root, ParserConfiguration parserConfig) = BuildRootParser();
+            ParseResult pr = root.Parse([], parserConfig);
 
             TestConfigRoot config = new() { ProfileDir = tempProfile };
 
@@ -260,6 +264,8 @@ public class ConfigTests
     [Fact]
     public void Parse_WithExplicitMissingRelativeFhirCache_DoesNotThrow_AndFallsBackAndWarns()
     {
+        using EnvVarScope envScope = new("Fhir_Cache", null);
+
         string tempProfile = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(tempProfile);
 
@@ -267,8 +273,8 @@ public class ConfigTests
 
         try
         {
-            Parser parser = BuildRootParser();
-            ParseResult pr = parser.Parse(["--fhir-cache", missing]);
+            (RootCommand root, ParserConfiguration parserConfig) = BuildRootParser();
+            ParseResult pr = root.Parse(["--fhir-cache", missing], parserConfig);
 
             TestConfigRoot config = new() { ProfileDir = tempProfile };
 
@@ -287,6 +293,8 @@ public class ConfigTests
     [Fact]
     public void Parse_WithExplicitRootedFhirCache_PassesValueThrough()
     {
+        using EnvVarScope envScope = new("Fhir_Cache", null);
+
         string tempProfile = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(tempProfile);
 
@@ -295,8 +303,8 @@ public class ConfigTests
 
         try
         {
-            Parser parser = BuildRootParser();
-            ParseResult pr = parser.Parse(["--fhir-cache", rooted]);
+            (RootCommand root, ParserConfiguration parserConfig) = BuildRootParser();
+            ParseResult pr = root.Parse(["--fhir-cache", rooted], parserConfig);
 
             TestConfigRoot config = new() { ProfileDir = tempProfile };
 
@@ -314,6 +322,8 @@ public class ConfigTests
     [Fact]
     public void Parse_WithExplicitRelativeFhirCacheThatResolves_DoesNotWarn()
     {
+        using EnvVarScope envScope = new("Fhir_Cache", null);
+
         string tempProfile = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(tempProfile);
 
@@ -327,8 +337,8 @@ public class ConfigTests
 
         try
         {
-            Parser parser = BuildRootParser();
-            ParseResult pr = parser.Parse(["--fhir-cache", leafName]);
+            (RootCommand root, ParserConfiguration parserConfig) = BuildRootParser();
+            ParseResult pr = root.Parse(["--fhir-cache", leafName], parserConfig);
 
             TestConfigRoot config = new() { ProfileDir = tempProfile };
 
@@ -355,5 +365,26 @@ public class ConfigTests
         public string ProfileDir { get; init; } = string.Empty;
 
         protected override string GetUserProfileDirectory() => ProfileDir;
+    }
+
+    /// <summary>
+    /// Disposable scope that sets and restores a single env var, used to
+    /// isolate the FhirCache resolution tests below from any pre-existing
+    /// <c>Fhir_Cache</c> setting on the developer's machine. Mirrors the
+    /// helper in <see cref="ConfigPrecedenceTests"/>.
+    /// </summary>
+    private sealed class EnvVarScope : IDisposable
+    {
+        private readonly string _name;
+        private readonly string? _previous;
+
+        public EnvVarScope(string name, string? value)
+        {
+            _name = name;
+            _previous = Environment.GetEnvironmentVariable(name);
+            Environment.SetEnvironmentVariable(name, value);
+        }
+
+        public void Dispose() => Environment.SetEnvironmentVariable(_name, _previous);
     }
 }
