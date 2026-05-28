@@ -62,6 +62,26 @@ public class CrossVersionArtifactSemanticTests
     }
 
     [Fact]
+    public void XVerExcludesDataTypeAndPrimitiveTypeFromTypeIndex()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+
+        File.Exists(Path.Combine(fixture.ResourceDirectory, "StructureDefinition-r4-datatype-to-r5-nomap.json")).ShouldBeFalse();
+        File.Exists(Path.Combine(fixture.ResourceDirectory, "StructureDefinition-r4-primitivetype-to-r5-nomap.json")).ShouldBeFalse();
+
+        File.Exists(Path.Combine(fixture.PageContentDirectory, "lookup-sd-r4-datatype-to-r5-nomap.md")).ShouldBeFalse();
+        File.Exists(Path.Combine(fixture.PageContentDirectory, "lookup-sd-r4-primitivetype-to-r5-nomap.md")).ShouldBeFalse();
+
+        string typeLookupIndex = File.ReadAllText(fixture.TypeLookupIndexPath);
+        typeLookupIndex.ShouldNotContain("DataType");
+        typeLookupIndex.ShouldNotContain("PrimitiveType");
+
+        List<string> typeSources = GetConceptMapSourceCodes(fixture.TypeConceptMapPath);
+        typeSources.ShouldNotContain("DataType");
+        typeSources.ShouldNotContain("PrimitiveType");
+    }
+
+    [Fact]
     public void XVerComplexTypeProfilesUseComplexTypeKind()
     {
         using SemanticFixture fixture = SemanticFixture.Create();
@@ -262,11 +282,15 @@ public class CrossVersionArtifactSemanticTests
             DbStructureDefinition sourceAddress = InsertStructure(connection, sourcePackage, "Address", FhirArtifactClassEnum.ComplexType);
             DbStructureDefinition sourceUnmappedType = InsertStructure(connection, sourcePackage, "UnmappedType", FhirArtifactClassEnum.ComplexType);
             DbStructureDefinition sourceUnmappedResource = InsertStructure(connection, sourcePackage, "UnmappedResource", FhirArtifactClassEnum.Resource);
+            DbStructureDefinition sourceDataType = InsertStructure(connection, sourcePackage, "DataType", FhirArtifactClassEnum.ComplexType);
+            DbStructureDefinition sourcePrimitiveType = InsertStructure(connection, sourcePackage, "PrimitiveType", FhirArtifactClassEnum.ComplexType);
 
             InsertRootElement(connection, sourcePackage, sourcePatient);
             InsertRootElement(connection, sourcePackage, sourceAddress);
             InsertRootElement(connection, sourcePackage, sourceUnmappedType);
             InsertRootElement(connection, sourcePackage, sourceUnmappedResource);
+            InsertRootElement(connection, sourcePackage, sourceDataType);
+            InsertRootElement(connection, sourcePackage, sourcePrimitiveType);
 
             DbStructureDefinition targetPatient = InsertStructure(connection, targetPackage, "Patient", FhirArtifactClassEnum.Resource);
             DbStructureDefinition targetAddress = InsertStructure(connection, targetPackage, "Address", FhirArtifactClassEnum.ComplexType);
@@ -288,6 +312,8 @@ public class CrossVersionArtifactSemanticTests
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceAddress, targetAddress);
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceUnmappedType, null);
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceUnmappedResource, null);
+            InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceDataType, null);
+            InsertStructureOutcome(connection, sourcePackage, targetPackage, sourcePrimitiveType, null);
         }
 
         private static DbFhirPackage InsertPackage(

@@ -39,7 +39,9 @@ public class StructurePageExporter
         "Base",
         "BackboneType",
         "BackboneElement",
+        "DataType",
         "Element",
+        "PrimitiveType",
         ];
 
     public StructurePageExporter(
