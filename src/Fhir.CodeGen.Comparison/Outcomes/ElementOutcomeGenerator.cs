@@ -89,6 +89,10 @@ public class ElementOutcomeGenerator
     private readonly Dictionary<string, string?> _targetBasicElementPathLookup;
     private readonly Dictionary<string, DbElement> _targetBasicElementsById;
 
+    private readonly Dictionary<string, string?> _targetExtensionElementPathLookup;
+    private readonly Dictionary<string, DbElement> _targetExtensionElementsById;
+
+
     private readonly Dictionary<int, DbElement> _allSourceElements;
     private readonly ILookup<int, DbElement> _allSourceElementsBySdKey;
 
@@ -218,6 +222,43 @@ public class ElementOutcomeGenerator
             }
         }
 
+        _targetExtensionElementPathLookup = [];
+        _targetExtensionElementsById = [];
+
+        // check for a basic structure
+        DbStructureDefinition? targetExtensionType = DbStructureDefinition.SelectSingle(
+            _db,
+            FhirPackageKey: _packagePair.TargetPackageKey,
+            Name: "Extension",
+            ArtifactClass: FhirArtifactClassEnum.ComplexType);
+        if (targetExtensionType != null)
+        {
+            // get the elements for this structure
+            List<DbElement> targetExtensionElements = DbElement.SelectList(
+                _db,
+                StructureKey: targetExtensionType.Key,
+                orderByProperties: [nameof(DbElement.ResourceFieldOrder)]);
+
+            // iterate over the elements
+            foreach (DbElement element in targetExtensionElements)
+            {
+                // skip root and elements with empty paths
+                if ((element.ResourceFieldOrder == 0) ||
+                    string.IsNullOrEmpty(element.Path))
+                {
+                    continue;
+                }
+
+                // add the path to the dictionary, but strip "Extension" from the front
+                _targetExtensionElementPathLookup.Add(element.Path.Substring(9), element.BasePath);
+                _targetExtensionElementsById.Add(element.Id, element);
+                if (element.BasePath is not null)
+                {
+                    _targetExtensionElementsById[element.BasePath] = element;
+                }
+            }
+        }
+
         // build our extension substitution lookup
         List<DbExtensionSubstitution> extensionSubstitutions = DbExtensionSubstitution.SelectList(
             _db,
@@ -317,7 +358,7 @@ public class ElementOutcomeGenerator
 
     private static readonly char[] _literalSplitChars = [',', '(', ')', '[', ']'];
 
-    private bool canSourceMapToBasicElementType(
+    private bool canMapElementsByType(
         DbElement sourceEd,
         DbElement targetEd)
     {
@@ -450,7 +491,7 @@ public class ElementOutcomeGenerator
     //            _targetBasicElementPathLookup.TryGetValue(sourceEd.Path.Substring(sourceSd.Name.Length), out basicBasePath) &&
     //            _targetBasicElementsById.TryGetValue(basicBasePath!, out DbElement? basicEd))
     //        {
-    //            if (canSourceMapToBasicElementType(sourceEd, basicEd) &&
+    //            if (canMapElementsByType(sourceEd, basicEd) &&
     //                (sourceEd.MinCardinality >= basicEd.MinCardinality) &&
     //                ((basicEd.MaxCardinality == -1) || (basicEd.MaxCardinality >= sourceEd.MaxCardinality)) &&
     //                (   ((sourceEd.ChildElementCount == 0) && (basicEd.ChildElementCount == 0)) ||
@@ -697,7 +738,7 @@ public class ElementOutcomeGenerator
         foreach (ElementOutcomeTrackingRecord edTr in elementTrackingRecords.Values.OrderBy(etr => etr.SourceElement.ResourceFieldOrder))
         {
             // don't create element edOutcomes for unmapped primitive types - they are handled at the structure level
-            if (sourceSd.ArtifactClass == Common.Models.FhirArtifactClassEnum.PrimitiveType)
+            if (sourceSd.ArtifactClass == FhirArtifactClassEnum.PrimitiveType)
             {
                 continue;
             }
@@ -739,6 +780,11 @@ public class ElementOutcomeGenerator
             string? basicBasePath = null;
             string? basicPath = null;
             DbElement? basicEd = null;
+
+            string? extensionBasePath = null;
+            string? extensionPath = null;
+            DbElement? extensionEd = null;
+
             DbExtensionSubstitution? extSubstitute = null;
             bool elementRequiresXVer = (sourceEd.ResourceFieldOrder != 0) &&
                 (!edTr.IsFullyMappedAcrossAllTargets) &&
@@ -767,12 +813,13 @@ public class ElementOutcomeGenerator
             {
                 if (sourceIsRootEd)
                 {
-                    // we cannot generate extensions for root elements
-                    elementRequiresXVer = false;
                     sdTr.SourceRootElement = sourceEd;
 
+                    // we cannot generate extensions for root elements of resources
                     if (sourceSd.ArtifactClass == FhirArtifactClassEnum.Resource)
                     {
+                        elementRequiresXVer = false;
+
                         FhirArtifactClassEnum tAC = sdTr.TargetStructure?.ArtifactClass ?? FhirArtifactClassEnum.Resource;
                         string tName = sdTr.TargetStructure?.Name ?? "Basic";
 
@@ -809,80 +856,154 @@ public class ElementOutcomeGenerator
                 // if the structure target is unmapped, add a non-mapping outcome target
                 if (sdTr.TargetStructure is null)
                 {
-                    targetStructures.Add("Basic");
-
-                    targetSdEdComparisons = elementComparisons
-                        .Where(ec => ec.TargetStructureKey is null)
-                        .ToList();
-
-                    // determine the context, if possible
-                    if (sourceIsRootEd)
+                    if (sourceSd.ArtifactClass == FhirArtifactClassEnum.Resource)
                     {
-                        contextTargetEd = DbElement.SelectSingle(
-                            _db,
-                            FhirPackageKey: _packagePair.TargetPackageKey,
-                            Id: "Basic",
-                            ResourceFieldOrder: 0);
+                        targetStructures.Add("Basic");
 
-                        if (contextTargetEd is not null)
+                        targetSdEdComparisons = elementComparisons
+                            .Where(ec => ec.TargetStructureKey is null)
+                            .ToList();
+
+                        // determine the context, if possible
+                        if (sourceIsRootEd)
                         {
-                            allContextTargets[contextTargetEd.Key] = contextTargetEd;
+                            contextTargetEd = DbElement.SelectSingle(
+                                _db,
+                                FhirPackageKey: _packagePair.TargetPackageKey,
+                                Id: "Basic",
+                                ResourceFieldOrder: 0);
+
+                            if (contextTargetEd is not null)
+                            {
+                                allContextTargets[contextTargetEd.Key] = contextTargetEd;
+                            }
                         }
+                        else
+                        {
+                            if ((sourceEd.ParentElementKey is not null) &&
+                                edKeyOutcomeLookup.TryGetValue(sourceEd.ParentElementKey.Value, out (DbElementOutcome outcome, DbElementOutcome? rootOutcome) nmParent))
+                            {
+                                contextRootExtensionUrl = nmParent.rootOutcome?.GenUrl;
+                                contextParentExtensionUrl = nmParent.outcome.GenUrl;
+                            }
+                        }
+
+                        targetComments =
+                            $"Element `{sourceEd.Id}` is not mapped to FHIR {_packagePair.TargetFhirSequence}," +
+                            $" since FHIR {_packagePair.SourceFhirSequence} `{sourceSd.Name}` is not mapped.";
+
+                        // create our target
+                        DbElementOutcomeTarget nmEOT = new()
+                        {
+                            Key = DbElementOutcomeTarget.GetIndex(),
+                            ElementOutcomeKey = edTr.ElementOutcomeKey,
+                            StructureOutcomeKey = sdTr.StructureOutcomeKey,
+                            ElementComparisonKey = targetSdEdComparisons.FirstOrDefault()?.Key,
+
+                            SourceFhirPackageKey = _packagePair.SourcePackageKey,
+                            SourceFhirSequence = _packagePair.SourceFhirSequence,
+                            TargetFhirPackageKey = _packagePair.TargetPackageKey,
+                            TargetFhirSequence = _packagePair.TargetFhirSequence,
+
+                            TargetStructureKey = null,
+                            TargetElementKey = null,
+                            TargetElementId = null,
+                            TargetResourceOrder = null,
+                            TargetComponentOrder = null,
+                            TargetMinCardinality = null,
+                            TargetMaxCardinalityString = null,
+                            TargetIsModifier = null,
+
+                            ContextElementKey = contextTargetEd?.Key,
+                            ContextElementId = contextTargetEd?.Id,
+                            ContextRootExtensionUrl = contextRootExtensionUrl,
+                            ContextParentExtensionUrl = contextParentExtensionUrl,
+
+                            FullyMapsToThisTarget = false,
+                            Comments = targetComments,
+                        };
+
+                        edTr.OutcomeTargets.Add(nmEOT);
+                        _edOutcomeTargetCache.CacheAdd(nmEOT);
+                        currentElementOutcomeTargets.Add(nmEOT);
                     }
                     else
                     {
-                        if ((sourceEd.ParentElementKey is not null) &&
-                            edKeyOutcomeLookup.TryGetValue(sourceEd.ParentElementKey.Value, out (DbElementOutcome outcome, DbElementOutcome? rootOutcome) nmParent))
+                        targetStructures.Add("Extension");
+
+                        targetSdEdComparisons = elementComparisons
+                            .Where(ec => ec.TargetStructureKey is null)
+                            .ToList();
+
+                        // determine the context, if possible
+                        if (sourceIsRootEd)
                         {
-                            contextRootExtensionUrl = nmParent.rootOutcome?.GenUrl;
-                            contextParentExtensionUrl = nmParent.outcome.GenUrl;
+                            contextTargetEd = DbElement.SelectSingle(
+                                _db,
+                                FhirPackageKey: _packagePair.TargetPackageKey,
+                                Id: "Extension",
+                                ResourceFieldOrder: 0);
+
+                            if (contextTargetEd is not null)
+                            {
+                                allContextTargets[contextTargetEd.Key] = contextTargetEd;
+                            }
                         }
+                        else
+                        {
+                            if ((sourceEd.ParentElementKey is not null) &&
+                                edKeyOutcomeLookup.TryGetValue(sourceEd.ParentElementKey.Value, out (DbElementOutcome outcome, DbElementOutcome? rootOutcome) nmParent))
+                            {
+                                contextRootExtensionUrl = nmParent.rootOutcome?.GenUrl;
+                                contextParentExtensionUrl = nmParent.outcome.GenUrl;
+                            }
+                        }
+
+                        targetComments =
+                            $"Element `{sourceEd.Id}` is not mapped to FHIR {_packagePair.TargetFhirSequence}," +
+                            $" since FHIR {_packagePair.SourceFhirSequence} `{sourceSd.Name}` is not mapped.";
+
+                        // create our target
+                        DbElementOutcomeTarget nmEOT = new()
+                        {
+                            Key = DbElementOutcomeTarget.GetIndex(),
+                            ElementOutcomeKey = edTr.ElementOutcomeKey,
+                            StructureOutcomeKey = sdTr.StructureOutcomeKey,
+                            ElementComparisonKey = targetSdEdComparisons.FirstOrDefault()?.Key,
+
+                            SourceFhirPackageKey = _packagePair.SourcePackageKey,
+                            SourceFhirSequence = _packagePair.SourceFhirSequence,
+                            TargetFhirPackageKey = _packagePair.TargetPackageKey,
+                            TargetFhirSequence = _packagePair.TargetFhirSequence,
+
+                            TargetStructureKey = null,
+                            TargetElementKey = null,
+                            TargetElementId = null,
+                            TargetResourceOrder = null,
+                            TargetComponentOrder = null,
+                            TargetMinCardinality = null,
+                            TargetMaxCardinalityString = null,
+                            TargetIsModifier = null,
+
+                            ContextElementKey = contextTargetEd?.Key,
+                            ContextElementId = contextTargetEd?.Id,
+                            ContextRootExtensionUrl = contextRootExtensionUrl,
+                            ContextParentExtensionUrl = contextParentExtensionUrl,
+
+                            FullyMapsToThisTarget = false,
+                            Comments = targetComments,
+                        };
+
+                        edTr.OutcomeTargets.Add(nmEOT);
+                        _edOutcomeTargetCache.CacheAdd(nmEOT);
+                        currentElementOutcomeTargets.Add(nmEOT);
                     }
-
-                    targetComments =
-                        $"Element `{sourceEd.Id}` is not mapped to FHIR {_packagePair.TargetFhirSequence}," +
-                        $" since FHIR {_packagePair.SourceFhirSequence} `{sourceSd.Name}` is not mapped.";
-
-                    // create our target
-                    DbElementOutcomeTarget nmEOT = new()
-                    {
-                        Key = DbElementOutcomeTarget.GetIndex(),
-                        ElementOutcomeKey = edTr.ElementOutcomeKey,
-                        StructureOutcomeKey = sdTr.StructureOutcomeKey,
-                        ElementComparisonKey = targetSdEdComparisons.FirstOrDefault()?.Key,
-
-                        SourceFhirPackageKey = _packagePair.SourcePackageKey,
-                        SourceFhirSequence = _packagePair.SourceFhirSequence,
-                        TargetFhirPackageKey = _packagePair.TargetPackageKey,
-                        TargetFhirSequence = _packagePair.TargetFhirSequence,
-
-                        TargetStructureKey = null,
-                        TargetElementKey = null,
-                        TargetElementId = null,
-                        TargetResourceOrder = null,
-                        TargetComponentOrder = null,
-                        TargetMinCardinality = null,
-                        TargetMaxCardinalityString = null,
-                        TargetIsModifier = null,
-
-                        ContextElementKey = contextTargetEd?.Key,
-                        ContextElementId = contextTargetEd?.Id,
-                        ContextRootExtensionUrl = contextRootExtensionUrl,
-                        ContextParentExtensionUrl = contextParentExtensionUrl,
-
-                        FullyMapsToThisTarget = false,
-                        Comments = targetComments,
-                    };
-
-                    edTr.OutcomeTargets.Add(nmEOT);
-                    _edOutcomeTargetCache.CacheAdd(nmEOT);
-                    currentElementOutcomeTargets.Add(nmEOT);
 
                     continue;
                 }
 
                 // skip primitive targets
-                if (sdTr.TargetStructure.ArtifactClass == Common.Models.FhirArtifactClassEnum.PrimitiveType)
+                if (sdTr.TargetStructure.ArtifactClass == FhirArtifactClassEnum.PrimitiveType)
                 {
                     continue;
                 }
@@ -1091,10 +1212,21 @@ public class ElementOutcomeGenerator
 
             bool allowsBasicReplacement = false;
             // check if we are only targeting basic
-            if ((targetStructures.Count == 0) ||
+            if (((targetStructures.Count == 0) && (sourceSd.ArtifactClass == FhirArtifactClassEnum.Resource)) ||
                 ((targetStructures.Count == 1) && targetStructures.Contains("Basic")))
             {
                 allowsBasicReplacement = true;
+            }
+
+            bool typeTargetsExtension = false;
+            if ((sourceSd.ArtifactClass == FhirArtifactClassEnum.ComplexType) &&
+                ((targetStructures.Count == 0) || ((targetStructures.Count == 1) && targetStructures.Contains("Extension"))))
+            {
+                if (sourceSd.Name != "Extension")
+                {
+                    elementRequiresXVer = true;
+                    typeTargetsExtension = true;
+                }
             }
 
             // check to see if we are trying to define an extension onto basic that has a matching basic path
@@ -1105,7 +1237,7 @@ public class ElementOutcomeGenerator
             {
                 basicPath = basicEd.Id;
 
-                if (canSourceMapToBasicElementType(sourceEd, basicEd) &&
+                if (canMapElementsByType(sourceEd, basicEd) &&
                     (sourceEd.MinCardinality >= basicEd.MinCardinality) &&
                     ((basicEd.MaxCardinality == -1) || (basicEd.MaxCardinality >= sourceEd.MaxCardinality)) &&
                     (((sourceEd.ChildElementCount == 0) && (basicEd.ChildElementCount == 0)) ||
@@ -1128,6 +1260,40 @@ public class ElementOutcomeGenerator
                         $" the definitions are not compatible" +
                         $" (source: `{sourceEd.FullCollatedTypeLiteral}`:{sourceEd.FhirCardinalityString}" +
                         $" -> basic: `{basicEd.FullCollatedTypeLiteral}`:{basicEd.FhirCardinalityString}).");
+                }
+            }
+
+            // check to see if we are trying to define an extension onto extension that has a matching path
+            if (elementRequiresXVer &&
+                typeTargetsExtension &&
+                _targetExtensionElementPathLookup.TryGetValue(sourceEd.Path.Substring(sourceSd.Name.Length), out extensionBasePath) &&
+                _targetExtensionElementsById.TryGetValue(extensionBasePath!, out extensionEd))
+            {
+                extensionPath = extensionEd.Id;
+
+                if (canMapElementsByType(sourceEd, extensionEd) &&
+                    (sourceEd.MinCardinality >= extensionEd.MinCardinality) &&
+                    ((extensionEd.MaxCardinality == -1) || (extensionEd.MaxCardinality >= sourceEd.MaxCardinality)) &&
+                    (((sourceEd.ChildElementCount == 0) && (extensionEd.ChildElementCount == 0)) ||
+                        ((sourceEd.ChildElementCount > 0) && (extensionEd.ChildElementCount > 0))))
+                {
+                    elementRequiresXVer = false;
+                    outcomeComments.Add(
+                        $"Element matches Extension element path `{extensionPath}` (`{extensionBasePath}`)," +
+                        $" use that element instead.");
+                    elementRequiresXVer = false;
+                    allContextTargets.Clear();
+                    parentOutcome = null;
+                }
+                else
+                {
+                    extensionBasePath = null;
+                    extensionPath = null;
+                    outcomeNotes.Add(
+                        $"While the source element matches Extension element path `{extensionPath}` (`{extensionBasePath}`)," +
+                        $" the definitions are not compatible" +
+                        $" (source: `{sourceEd.FullCollatedTypeLiteral}`:{sourceEd.FhirCardinalityString}" +
+                        $" -> extension: `{extensionEd.FullCollatedTypeLiteral}`:{extensionEd.FhirCardinalityString}).");
                 }
             }
 
@@ -1694,6 +1860,8 @@ public class ElementOutcomeGenerator
                 ExtensionContexts = allContextTargets.Values.Select(ed => ed.Id).Distinct().Order().ToList(),
                 BasicElementBaseId = basicBasePath,
                 BasicElementId = basicPath,
+                ExtensionElementBaseId = extensionBasePath,
+                ExtensionElementId = extensionPath,
                 ExtensionSubstitutionKey = extSubstitute?.Key,
                 ExtensionSubstitutionUrl = extSubstitute?.ReplacementUrl,
 

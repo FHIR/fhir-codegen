@@ -394,6 +394,25 @@ public class StructurePageExporter
                 targetLines.Add($"[{targetLabel}]({targetLink})");
             }
 
+            // check for mapping to an Extension element
+            if (edOutcome.ExtensionElementId is not null)
+            {
+                string targetLabel;
+                string targetLink;
+
+                targetLabel = edOutcome.ExtensionElementId;
+                targetLink = $"{targetBaseUrl}extensibility.html#Extension";
+
+                if (!outcomeAccumulator.TryGetValue(edOutcome.Key, out List<(string label, string link)>? outcomeLines))
+                {
+                    outcomeLines = [];
+                    outcomeAccumulator[edOutcome.Key] = outcomeLines;
+                }
+
+                outcomeLines.Add((targetLabel, targetLink));
+                targetLines.Add($"[{targetLabel}]({targetLink})");
+            }
+
             // check for exporting this outcome as an extension
             if (edOutcome.RequiresExtensionDefinition)
             {

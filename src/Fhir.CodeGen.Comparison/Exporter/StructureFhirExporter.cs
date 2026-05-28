@@ -587,6 +587,50 @@ public class StructureFhirExporter
                 }
             }
 
+            // check for mapping to an Extension element
+            if (edOutcome.ExtensionElementId is not null)
+            {
+                string extensionCanonical = $"http://hl7.org/fhir/StructureDefinition/Extension|{igTr.PackagePair.TargetPackage.PackageVersion}";
+                if (!groupsByTarget.TryGetValue(extensionCanonical, out ConceptMap.GroupComponent? currentGroup))
+                {
+                    currentGroup = new()
+                    {
+                        Source = sourceSd.VersionedUrl,
+                        Target = extensionCanonical,
+                        Element = [],
+                    };
+                    edCm.Group.Add(currentGroup);
+                    groupsByTarget[extensionCanonical] = currentGroup;
+                }
+
+                string cmSourceKey = extensionCanonical + "|" + edOutcome.SourceId;
+                if (!cmSources.TryGetValue(cmSourceKey, out ConceptMap.SourceElementComponent? cmSourceElement))
+                {
+                    cmSourceElement = new()
+                    {
+                        Code = edOutcome.SourceId,
+                        Display = edOutcome.SourceName,
+                        Target = [],
+                    };
+                    currentGroup.Element.Add(cmSourceElement);
+                    cmSources[cmSourceKey] = cmSourceElement;
+                }
+
+                string targetCode = edOutcome.ExtensionElementId;
+                if (usedTargetLiterals.Add(cmSourceKey + targetCode))
+                {
+                    // add the target for this extension element equivalent
+                    ConceptMap.TargetElementComponent cmTargetElement = new()
+                    {
+                        Code = targetCode,
+                        Display = targetCode,
+                        Relationship = CMR.Equivalent,
+                        Comment = edOutcome.GenMappingComment ?? edOutcome.Comments,
+                    };
+                    cmSourceElement.Target.Add(cmTargetElement);
+                }
+            }
+
             if (igTr.EdOutcomeMapTargets.TryGetValue(edOutcome.Key, out List<EdOutcomeMapTargetRecord>? mapTargetRecs) &&
                 (mapTargetRecs.Count > 0))
             {

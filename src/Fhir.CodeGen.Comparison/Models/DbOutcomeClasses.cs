@@ -536,6 +536,9 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
     public required string? BasicElementBaseId { get; set; }
     public required string? BasicElementId { get; set; }
 
+    public required string? ExtensionElementBaseId { get; set; }
+    public required string? ExtensionElementId { get; set; }
+
     [CgSQLiteForeignKey(referenceTable: "ElementOutcomes", referenceColumn: nameof(Key), modelTypeName: nameof(DbElementOutcome))]
     public required int? ContentReferenceOutcomeKey { get; set; }
     public required string? ContentReferenceExtensionUrl { get; set; }
