@@ -796,13 +796,13 @@ public class IgExporter
                 <a href="index.html">Home</a>
               </li>
               <li>
-                <a href="lookup-sd.html">Resource Lookup</a>
+                <a href="index-resources.html">Resource Lookup</a>
               </li>
               <li>
-                <a href="lookup-sd-types.html">Type Lookup</a>
+                <a href="index-types.html">Type Lookup</a>
               </li>
               <li>
-                <a href="lookup-vs.html">ValueSet Lookup</a>
+                <a href="index-vs.html">ValueSet Lookup</a>
               </li>
               <li>
                 <a href="artifacts.html">Artifacts</a>
@@ -852,9 +852,9 @@ public class IgExporter
     {
         HashSet<string> skipPages = [
             "index",
-            "lookup-sd",
-            "lookup-sd-types",
-            "lookup-vs",
+            "index-resources",
+            "index-types",
+            "index-vs",
             "downloads",
             "changelog",
         ];
@@ -993,9 +993,9 @@ public class IgExporter
 
         HashSet<string> skipPages = [
             "index",
-            "lookup-sd",
-            "lookup-sd-types",
-            "lookup-vs",
+            "index-resources",
+            "index-types",
+            "index-vs",
             "downloads",
             "changelog",
         ];
@@ -1284,9 +1284,9 @@ public class IgExporter
 
         HashSet<string> skipPages = [
             "index",
-            "lookup-sd",
-            "lookup-sd-types",
-            "lookup-vs",
+            "index-resources",
+            "index-types",
+            "index-vs",
             "downloads",
             "changelog",
         ];
@@ -1464,9 +1464,9 @@ public class IgExporter
 
         HashSet<string> skipPages = [
             "index",
-            "lookup-sd",
-            "lookup-sd-types",
-            "lookup-vs",
+            "index-resources",
+            "index-types",
+            "index-vs",
             "downloads",
             "changelog",
         ];

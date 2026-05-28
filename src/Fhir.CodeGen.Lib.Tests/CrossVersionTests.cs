@@ -739,12 +739,12 @@ public class CrossVersionTests
                 .ShouldBeTrue($"Expected a *-type-map-to-* ConceptMap under {resourcesDir}");
 
             // Type lookup page index.
-            File.Exists(Path.Combine(pageContentDir, "lookup-sd-types.md"))
-                .ShouldBeTrue($"Expected lookup-sd-types.md under {pageContentDir}");
+            File.Exists(Path.Combine(pageContentDir, "index-types.md"))
+                .ShouldBeTrue($"Expected index-types.md under {pageContentDir}");
 
             // Resource lookup page index, with the renamed title.
-            string lookupSdPath = Path.Combine(pageContentDir, "lookup-sd.md");
-            File.Exists(lookupSdPath).ShouldBeTrue($"Expected lookup-sd.md under {pageContentDir}");
+            string lookupSdPath = Path.Combine(pageContentDir, "index-resources.md");
+            File.Exists(lookupSdPath).ShouldBeTrue($"Expected index-resources.md under {pageContentDir}");
 
             // Exclusion guard: no artifacts for the abstract bases.
             string[] excludedRoots = ["Base", "Element", "BackboneElement", "BackboneType"];

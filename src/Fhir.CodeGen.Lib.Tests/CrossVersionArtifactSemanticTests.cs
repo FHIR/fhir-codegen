@@ -230,7 +230,7 @@ public class CrossVersionArtifactSemanticTests
 
         public string UnmappedTypeElementMapPath => Path.Combine(ResourceDirectory, $"{SourceShortName}-UnmappedType-elements-for-{TargetShortName}-NoMap.json");
 
-        public string TypeLookupIndexPath => Path.Combine(PageContentDirectory, "lookup-sd-types.md");
+        public string TypeLookupIndexPath => Path.Combine(PageContentDirectory, "index-types.md");
 
         public string AddressTypeLookupPath => Path.Combine(PageContentDirectory, "lookup-sd-r4-address-to-r5-address.md");
 

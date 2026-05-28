@@ -64,7 +64,7 @@ public class StructurePageExporter
             exportLookupIndexPage(
                 igTr,
                 FhirArtifactClassEnum.Resource,
-                "lookup-sd.md",
+                "index-resources.md",
                 "Resource Lookup",
                 igTr.ResourceLookupFiles);
             exportLookupPages(
@@ -76,7 +76,7 @@ public class StructurePageExporter
             exportLookupIndexPage(
                 igTr,
                 FhirArtifactClassEnum.ComplexType,
-                "lookup-sd-types.md",
+                "index-types.md",
                 "Type Lookup",
                 igTr.TypeLookupFiles);
             exportLookupPages(
