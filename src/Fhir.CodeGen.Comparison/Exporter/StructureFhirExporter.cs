@@ -2853,9 +2853,11 @@ public class StructureFhirExporter
             extensionMinCardinality += sourceEd.MinCardinality;
         }
 
+        ElementDefinition? currentExtensionElement = null;
+
         if (needsExtensionElement)
         {
-            ElementDefinition extensionElement = new()
+            currentExtensionElement = new()
             {
                 ElementId = extElementId + ".extension",
                 Path = extElementPath + ".extension",
@@ -2880,7 +2882,7 @@ public class StructureFhirExporter
                 Max = "*",
             };
 
-            extSd.Differential.Element.Add(extensionElement);
+            extSd.Differential.Element.Add(currentExtensionElement);
         }
 
         // nest into child elements first
@@ -3007,6 +3009,13 @@ public class StructureFhirExporter
                         addUrlEd: true,
                         addValueEd: true);
 
+                    // this adds a required min child element, so we need to adjust the cardinality of the extension element
+                    if (currentExtensionElement?.Min is not null)
+                    {
+                        currentExtensionElement.Min++;
+                    }
+
+                    // iterate over the relevant elements from the type to add them
                     foreach (DbElement dtEtEd in dtElements)
                     {
                         if (skipElement(dtEtEd, skipFirstElement: true, skipIds: true, skipExtensions: true, skipModifierExtenions: true))
