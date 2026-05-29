@@ -2499,6 +2499,13 @@ public class StructureFhirExporter
             }
         }
 
+        string? dataTypeNameLiteral = null;
+        if ((sourceSd.ArtifactClass == FhirArtifactClassEnum.ComplexType) &&
+            (sourceEd.ResourceFieldOrder == 0))
+        {
+            dataTypeNameLiteral = sourceSd.Name;
+        }
+
         // add this element and its children to the differential
         addToDifferentialRecursive(
             extSd,
@@ -2509,7 +2516,8 @@ public class StructureFhirExporter
             contentReferenceExtUrlsByEdKey,
             edOutcome,
             sourceSd,
-            sourceEd);
+            sourceEd,
+            dataTypeNameLiteral: dataTypeNameLiteral);
 
         return extSd;
     }
