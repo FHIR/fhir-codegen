@@ -212,7 +212,7 @@
         },
         "XVer fhir-db": {
             "commandName": "Project",
-            "commandLineArgs": "xver fhir --output-path ../../temp/xver --xver-version 0.1.0 --xver-export-for-publisher true --xver-generate-snapshots false --xver-generate-npms false --xver-include-scripts true",
+            "commandLineArgs": "xver fhir --output-path ../../temp/xver --xver-export-for-publisher true --xver-generate-snapshots false --xver-generate-npms false --xver-include-scripts true",
             "workingDirectory": "$(MSBuildProjectDirectory)"
         },
         "CQL R4": {
