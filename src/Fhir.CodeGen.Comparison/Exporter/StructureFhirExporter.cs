@@ -2451,6 +2451,7 @@ public class StructureFhirExporter
             {
                 case XVerExporter.VersionSpecificExtensionBehaviorCodes.None:
                     break;
+
                 case XVerExporter.VersionSpecificExtensionBehaviorCodes.ShortVersion:
                     {
                         extSd.Extension.Add(new Extension()
@@ -2471,6 +2472,7 @@ public class StructureFhirExporter
                         });
                     }
                     break;
+
                 case XVerExporter.VersionSpecificExtensionBehaviorCodes.TargetVersion:
                     {
                         // add the version-specific fhir version information
@@ -2622,8 +2624,7 @@ public class StructureFhirExporter
         }
         else if (!excludeExtensionElement)
         {
-            // add the primary slice
-            ElementDefinition sliceElement = new()
+            ElementDefinition rootElement = new()
             {
                 ElementId = extElementId,
                 SliceName = elementUrlOverride ?? edOutcome.SourceNameClean(),  // edOutcome.GenShortId,
@@ -2641,15 +2642,15 @@ public class StructureFhirExporter
                     Path = "Extension.extension",
                     Min = 0,
                     Max = "*",
-                }
+                },
             };
 
             if (sourceEd.IsDeprecated)
             {
-                sliceElement.AddExtension(CommonDefinitions.ExtUrlStandardStatus, new Code("deprecated"));
+                rootElement.AddExtension(CommonDefinitions.ExtUrlStandardStatus, new Code("deprecated"));
             }
 
-            extSd.Differential.Element.Add(sliceElement);
+            extSd.Differential.Element.Add(rootElement);
 
             mapTargetRecs.Add(new()
             {
@@ -2752,21 +2753,6 @@ public class StructureFhirExporter
             });
         }
 
-        // if this is a datatype element, add the necessary meta elements
-        if (dataTypeNameLiteral is not null)
-        {
-            addDataTypeMetaElements(
-                igTr.PackagePair.SourceFhirSequence,
-                igTr.PackagePair.TargetFhirSequence,
-                extSd,
-                extElementId,
-                extElementPath,
-                dataTypeNameLiteral,
-                addSliceEd: true,
-                addUrlEd: true,
-                addValueEd: true);
-        }
-
         // get the child outcomes so we know if there are child elements to process
         List<DbElementOutcome> childOutcomes = DbElementOutcome.SelectList(
             _db,
@@ -2855,15 +2841,16 @@ public class StructureFhirExporter
             needsExtensionElement = hasChildren || (invalidValueTypes.Count > 0);
         }
 
+        ElementDefinition? currentExtensionElement = null;
+
         int extensionMinCardinality = childOutcomes.Sum(eo => eo.SourceMinCardinality);
         if (invalidValueTypes.Count > 0)
         {
             extensionMinCardinality += sourceEd.MinCardinality;
         }
 
-        ElementDefinition? currentExtensionElement = null;
-
-        if (needsExtensionElement)
+        if ((needsExtensionElement || (dataTypeNameLiteral is not null)) &&
+            (currentExtensionElement is null))
         {
             currentExtensionElement = new()
             {
@@ -2891,6 +2878,23 @@ public class StructureFhirExporter
             };
 
             extSd.Differential.Element.Add(currentExtensionElement);
+        }
+
+        // if this is a datatype element, add the necessary meta elements
+        if (dataTypeNameLiteral is not null)
+        {
+            addDataTypeMetaElements(
+                igTr.PackagePair.SourceFhirSequence,
+                igTr.PackagePair.TargetFhirSequence,
+                extSd,
+                extElementId,
+                extElementPath,
+                dataTypeNameLiteral,
+                addSliceEd: true,
+                addUrlEd: true,
+                addValueEd: true);
+
+            currentExtensionElement!.Min += 1;
         }
 
         // nest into child elements first
