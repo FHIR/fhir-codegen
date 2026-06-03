@@ -792,6 +792,9 @@ public class ElementOutcomeGenerator
             List<string> outcomeComments = [];
             List<string> outcomeNotes = [];
 
+            bool requiresCardDefinition = false;
+            bool requiresCardSlice = false;
+
             Dictionary<int, DbElement> allContextTargets = [];
 
             DbElementOutcome? ancestorOutcome = null;
@@ -1208,6 +1211,29 @@ public class ElementOutcomeGenerator
                 //elementRequiresXVer = false;
                 ancestorOutcome = null;
                 parentOutcome = null;
+            }
+
+            // check to see if we are mapping an array onto a non-array
+            if (elementComparisons.Any(ec => ec.SourceAllowsMoreValues == true))
+            {
+                requiresCardDefinition = true;
+                outcomeComments.Add(
+                    $"Element `{sourceEd.Id}` allows multiple values in the source, but is mapped to an element that does not allow multiple values in the target.");
+            }
+
+            if (parentOutcome?.RequiresCardinalityDefinition == true)
+            {
+                requiresCardSlice = true;
+                outcomeComments.Add(
+                    $"Element `{sourceEd.Id}` is part of an existing definition because parent element" +
+                    $" `{parentOutcome.SourceId}` requires an extension for additional cardinality.");
+            }
+            else if (ancestorOutcome?.RequiresCardinalityDefinition == true)
+            {
+                requiresCardSlice = true;
+                outcomeComments.Add(
+                    $"Element `{sourceEd.Id}` is part of an existing definition because ancestor element" +
+                    $" `{ancestorOutcome.SourceId}` requires an extension for additional cardinality.");
             }
 
             bool allowsBasicReplacement = false;
@@ -1832,6 +1858,9 @@ public class ElementOutcomeGenerator
                 GenName = name,
                 GenFileName = extFilename,
                 GenSliceName = sourceEd.NameClean(),
+
+                RequiresCardinalityDefinition = requiresCardDefinition,
+                RequiresCardinalitySlice = requiresCardSlice,
 
                 GenArtifactShort = artifactShort,
                 GenArtifactDescription = artifactDescription,

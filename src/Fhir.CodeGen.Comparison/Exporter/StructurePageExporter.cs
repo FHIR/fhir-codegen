@@ -499,7 +499,7 @@ public class StructurePageExporter
             }
 
             // check for exporting this outcome as an extension
-            if (edOutcome.RequiresExtensionDefinition)
+            if (edOutcome.RequiresExtensionDefinition || edOutcome.RequiresCardinalityDefinition)
             {
                 string targetLabel;
                 string targetLink;
@@ -523,7 +523,7 @@ public class StructurePageExporter
             }
 
             // check for exporting as a slice
-            if (edOutcome.RequiresSliceDefinition)
+            if (edOutcome.RequiresSliceDefinition || edOutcome.RequiresCardinalitySlice)
             {
                 // check to see if we have a slice definition
                 if ((edOutcome.ParentElementOutcomeKey is not null) &&

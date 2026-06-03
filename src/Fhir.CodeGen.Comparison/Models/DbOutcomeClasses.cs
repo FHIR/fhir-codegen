@@ -435,6 +435,9 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
     public required bool RequiresSliceDefinition { get; set; }
     public required string? GenSliceName { get; set; }
 
+    public required bool RequiresCardinalityDefinition { get; set; }
+    public required bool RequiresCardinalitySlice { get; set; }
+
     public required int SourceResourceOrder { get; set; }
     public required int SourceComponentOrder { get; set; }
     public required int SourceMinCardinality { get; set; }
@@ -719,34 +722,6 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
             UnmappedChildTypeElementNamesLiteral = string.Join(',', value);
         }
     }
-
-    //public bool NeedsExtensionDefinition()
-    //{
-    //    if (BasicElementBaseId is not null)
-    //    {
-    //        return false;
-    //    }
-
-    //    if (RequiresXVerDefinition &&
-    //        (ExtensionSubstitutionKey is null) &&
-    //        (ContentReferenceExtensionUrl is null) &&
-    //        (ParentRequiresXverDefinition != true))
-    //    {
-    //        return true;
-    //    }
-
-    //    if (RequiresDefinitionAsContentReference == true)
-    //    {
-    //        return true;
-    //    }
-
-    //    if (RequiresDefinitionForGroupRepetitions == true)
-    //    {
-    //        return true;
-    //    }
-
-    //    return false;
-    //}
 }
 
 [CgSQLiteTable(tableName: "ElementOutcomeTargets")]

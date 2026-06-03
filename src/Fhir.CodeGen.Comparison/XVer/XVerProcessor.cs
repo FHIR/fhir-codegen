@@ -272,12 +272,12 @@ public partial class XVerProcessor
 
                 //UpdateValueSetMaps();
 
-                LoadDatabase(true);
+                //LoadDatabase(true);
 
-                LoadFhirCrossVersionMaps();
+                //LoadFhirCrossVersionMaps();
 
-                LoadExtensionSubstitutions();
-                LoadFhirTypeValueSets();
+                //LoadExtensionSubstitutions();
+                //LoadFhirTypeValueSets();
 
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.ValueSet, maxStepSize: 1);
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.ValueSet);
@@ -285,7 +285,7 @@ public partial class XVerProcessor
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.Resource, maxStepSize: 1);
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.Resource);
-                CompareInDatabase();
+                //CompareInDatabase();
 
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, maxStepSize: 1);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, specificPairs: specificPairs);
@@ -294,7 +294,7 @@ public partial class XVerProcessor
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource);
                 //GenerateOutcomes(specificPairs: specificPairs);
-                GenerateOutcomes();
+                //GenerateOutcomes();
 
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, maxStepSize: 1, includeIgScripts: false);
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, includeIgScripts: false);

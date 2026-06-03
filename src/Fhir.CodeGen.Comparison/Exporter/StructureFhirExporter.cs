@@ -1150,39 +1150,13 @@ public class StructureFhirExporter
                     targetSd,
                     sdOutcome);
 
-                //if ((targetSd is null) ||
-                //    ((targetSd.Name == "Basic") && (sourceSd.Name != "Basic")))
-                //{
-                //    DbElementOutcome? rootElementOutcome = DbElementOutcome.SelectSingle(
-                //            _db,
-                //            SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
-                //            TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
-                //            SourceStructureKey: sdOutcome.SourceStructureKey,
-                //            SourceResourceOrder: 0);
-
-                //    if (rootElementOutcome is null)
-                //    {
-                //        throw new Exception($"First element outcome for source structure `{sourceSd.Name}` in package pair `{igTr.PackageId}` is not the root element");
-                //    }
-
-                //    // if this is a basic resource profile, it only needs the root extension
-                //    addContentForBasicProfile(
-                //        igTr,
-                //        sourceSd,
-                //        sdOutcome,
-                //        rootElementOutcome,
-                //        profileSd);
-                //}
-                //else
-                //{
-                    // add the content for a mapped resource
-                    addContentForMappedProfile(
-                        igTr,
-                        sourceSd,
-                        targetSd,
-                        sdOutcome,
-                        profileSd);
-                //}
+                // add the content for a mapped resource
+                addContentForMappedProfile(
+                    igTr,
+                    sourceSd,
+                    targetSd,
+                    sdOutcome,
+                    profileSd);
 
                 // write the profile to a file
                 string filename = sdOutcome.GenFileName ?? throw new ArgumentNullException(nameof(sdOutcome.GenFileName));
@@ -1345,10 +1319,11 @@ public class StructureFhirExporter
             List<DbElementOutcome> targetEdOutcomes = edOutcomeContextLookup[targetEd.Id]
                 .Where(eo =>
                     (eo.ExtensionDefinitionIsProhibited != true) &&
-                    (eo.RequiresXVerDefinition ||
-                    (eo.ExtensionSubstitutionUrl is not null) ||
-                    (eo.AlternateCanonicalTargetsLiteral is not null) ||
-                    (eo.AlternateReferenceTargetsLiteral is not null)))
+                    (   eo.RequiresXVerDefinition ||
+                        eo.RequiresCardinalityDefinition ||
+                        (eo.ExtensionSubstitutionUrl is not null) ||
+                        (eo.AlternateCanonicalTargetsLiteral is not null) ||
+                        (eo.AlternateReferenceTargetsLiteral is not null)))
                 .OrderBy(eo => eo.SourceResourceOrder)
                 .ToList();
 
@@ -1368,15 +1343,14 @@ public class StructureFhirExporter
             foreach (DbElementOutcome reviewOutcome in extSubReview)
             {
                 if ((reviewOutcome.ParentElementOutcomeKey is null) ||
-                    !edOutcomes.TryGetValue(reviewOutcome.ParentElementOutcomeKey.Value, out DbElementOutcome? rpOutcome))
+                    !edOutcomes.TryGetValue(reviewOutcome.ParentElementOutcomeKey.Value, out DbElementOutcome? reviewParentEdOutcome))
                 {
                     continue;
                 }
 
-                if (rpOutcome.RequiresExtensionDefinition ||
-                    rpOutcome.RequiresExtensionDefinition ||
-                    rpOutcome.RequiresSliceDefinition ||
-                    (rpOutcome.ContentReferenceRequiresXVerDefinition == true))
+                if (reviewParentEdOutcome.RequiresExtensionDefinition ||
+                    reviewParentEdOutcome.RequiresSliceDefinition ||
+                    (reviewParentEdOutcome.ContentReferenceRequiresXVerDefinition == true))
                 {
                     targetEdOutcomes.Remove(reviewOutcome);
                 }
@@ -1493,6 +1467,58 @@ public class StructureFhirExporter
 
                 // check for extension
                 if (targetEdOutcome.RequiresExtensionDefinition)
+                {
+                    if (targetEdOutcome.DefineAsModifier)
+                    {
+                        string sliceSuffix = addedModifierSlice
+                            ? "Ext"
+                            : string.Empty;
+                        addedModifierSlice = true;
+
+                        if (!addedTargetModifierSlicingEd)
+                        {
+                            profileSd.Differential.Element.Add(targetModifierSlicingEd);
+                            addedTargetModifierSlicingEd = true;
+                        }
+
+                        profileSd.Differential.Element.Add(getEd(
+                            targetEdOutcome.GenUrl!,
+                            modifierIdPrefix + sliceSuffix,
+                            sliceName + sliceSuffix,
+                            targetModifierPath,
+                            edShort,
+                            edDefinition,
+                            edComment,
+                            adjustedMin,
+                            targetEdOutcome.SourceMaxCardinalityString));
+                    }
+                    else
+                    {
+                        string sliceSuffix = addedSlice
+                            ? "Ext"
+                            : string.Empty;
+                        addedSlice = true;
+
+                        if (!addedTargetSlicingEd)
+                        {
+                            profileSd.Differential.Element.Add(targetSlicingEd);
+                            addedTargetSlicingEd = true;
+                        }
+
+                        profileSd.Differential.Element.Add(getEd(
+                            targetEdOutcome.GenUrl!,
+                            idPrefix + sliceSuffix,
+                            sliceName + sliceSuffix,
+                            targetPath,
+                            edShort,
+                            edDefinition,
+                            edComment,
+                            adjustedMin,
+                            targetEdOutcome.SourceMaxCardinalityString));
+                    }
+                }
+
+                if (targetEdOutcome.RequiresCardinalityDefinition && (targetEdOutcome.RequiresExtensionDefinition != true))
                 {
                     if (targetEdOutcome.DefineAsModifier)
                     {
@@ -2110,6 +2136,14 @@ public class StructureFhirExporter
             TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
             RequiresExtensionDefinition: true,
             orderByProperties: [nameof(DbElementOutcome.SourceStructureKey), nameof(DbElementOutcome.SourceResourceOrder)]);
+
+        edOutcomes.AddRange(DbElementOutcome.SelectList(
+            _db,
+            SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
+            TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
+            RequiresExtensionDefinition: false,
+            RequiresCardinalityDefinition: true,
+            orderByProperties: [nameof(DbElementOutcome.SourceStructureKey), nameof(DbElementOutcome.SourceResourceOrder)]));
 
         // iterate over the outcomes that need exporting
         foreach (DbElementOutcome edOutcome in edOutcomes)
