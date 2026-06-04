@@ -4,5 +4,5 @@
   href: fhirdb-comparer-do-structure.md
 - name: FhirDbComparer.doValueSetComparisons
   href: fhirdb-comparer-do-valueset.md
-- name: XVerProcessor.WriteFhirFromDatabase
+- name: XVerExporter.Export
   href: xver-processor-write-fhir.md

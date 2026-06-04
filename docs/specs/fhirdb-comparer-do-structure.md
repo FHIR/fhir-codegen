@@ -1,17 +1,34 @@
 # FhirDbComparer.doStructureComparisons Specification
 
+> **Status note (2026-06-04):** The entire body of
+> `FhirDbComparerStructures.cs` (and its sibling
+> `FhirDbComparerValueSets.cs`, `FhirDbComparerElements.cs`,
+> `FhirDbComparerElementTypes.cs`,
+> `FhirDbComparerValueSetConcepts.cs`) is currently wrapped in
+> `#if false ... #endif` and is therefore **not part of the compiled
+> binary**. The active structure-comparison pipeline runs through
+> `StructureComparer.CompareStructures`
+> (`src/Fhir.CodeGen.Comparison/CompareTool/StructureComparer.cs:85`),
+> called from `FhirDbComparer.Compare`
+> (`src/Fhir.CodeGen.Comparison/CompareTool/FhirDbComparer.cs:111`). This
+> spec is retained as a reference for the dormant code, which is
+> preserved in-source for possible re-activation; it does **not**
+> describe the live execution path. See
+> [`fhirdb-comparer-compare.md`](./fhirdb-comparer-compare.md) for the
+> active orchestrator.
+
 ## Executive Summary
 
-The `doStructureComparisons` method is a private orchestrator method within the `FhirDbComparer` class that manages the comparison of FHIR Structure Definitions between two packages. It discovers, creates, and processes structure comparisons by combining cached data, database queries, and specialized logic for different FHIR artifact types, particularly handling primitive type mappings through predefined relationships.
+`doStructureComparisons` is a private hand-off method in `FhirDbComparerStructures.cs` that processes structure comparison records that already exist in memory or in the comparison database. In the current source, it does not discover target structures, does not create new forward comparisons, and does not perform fallback matching itself. It loads cached and persisted forward comparisons for one source structure and one target package, exits when none exist, skips comparisons already reviewed as complete, resolves each target structure by key, and delegates element-level analysis and relationship updates to `DoStructureComparison` (`FhirDbComparerStructures.cs:554-620`, `623-775`).
 
 ## Architecture Overview
 
-This method operates as a high-level coordinator within the FHIR cross-version comparison system. It sits between the main comparison driver (`Compare` method) and the detailed comparison logic (`DoStructureComparison`), serving as the discovery and setup layer that:
+This method now sits after comparison discovery, not before it. Active structure discovery is initiated by `FhirDbComparer.Compare`, which creates `StructureComparer` and calls `StructureComparer.CompareStructures` (`FhirDbComparer.cs:132-140`). `StructureComparer` builds package pairs, discovers direct or transitive comparison paths, creates `DbStructureComparison` records, and persists cached changes (`StructureComparer.cs:85-130`, `133-177`, `180-238`). `doStructureComparisons` only consumes comparisons that are already present in `_sdComparisonCache` or returned from `DbStructureComparison.SelectList`.
 
-1. **Discovers Existing Comparisons**: Checks both cache and database for existing structure comparisons
-2. **Auto-Generates Missing Comparisons**: Creates comparisons for structures that haven't been compared yet
-3. **Delegates Deep Analysis**: Calls `DoStructureComparison` for detailed element-level comparison
-4. **Manages Bidirectional Relationships**: Ensures forward and reverse comparison pairs are properly linked
+1. **Collect Existing Forward Comparisons**: Reads cached comparisons for `sourceSd.Key`, filtered to `targetPackage.Key`, then reads persisted rows for the same package/structure tuple.
+2. **Merge Without Re-adding Duplicates**: Appends database rows that are not already present in the cached list.
+3. **Return When Discovery Found Nothing**: Logs "No forward comparisons found ..." and exits without creating replacements.
+4. **Delegate Detailed Comparison**: For each non-reviewed comparison, resolves the target structure and calls `DoStructureComparison` with the shared caches and package pair objects.
 
 ## Method Signature
 
@@ -20,110 +37,70 @@ private void doStructureComparisons(
     DbFhirPackage sourcePackage,
     DbStructureDefinition sourceSd,
     DbFhirPackage targetPackage,
-    DbFhirPackageComparisonPair forwardPair,
-    DbFhirPackageComparisonPair reversePair)
+    FhirPackageComparisonPair forwardPair,
+    FhirPackageComparisonPair reversePair)
 ```
 
 ### Parameters
-- **`sourcePackage`**: Source FHIR package containing the structure to compare
-- **`sourceSd`**: Source structure definition being compared
-- **`targetPackage`**: Target FHIR package to compare against  
-- **`forwardPair`**: Forward comparison pair (source → target)
-- **`reversePair`**: Reverse comparison pair (target → source)
+
+- **`sourcePackage`**: Source FHIR package containing `sourceSd`.
+- **`sourceSd`**: Source `DbStructureDefinition` whose existing forward comparisons are being processed.
+- **`targetPackage`**: Target FHIR package used to filter comparisons.
+- **`forwardPair`**: In-memory `FhirPackageComparisonPair` for the source-to-target direction; this type wraps source/target `DbFhirPackage` instances and exposes source/target package key and short-name helpers (`FhirPackageComparisonPair.cs:10-43`).
+- **`reversePair`**: In-memory `FhirPackageComparisonPair` for the target-to-source direction, used by `DoStructureComparison` and inverse creation (`FhirDbComparerStructures.cs:633-640`, `778-827`).
 
 ## Detailed Algorithm
 
-### Phase 1: Comparison Discovery
-1. **Cache Lookup**: Query `_sdComparisonCache.ForSource(sourceSd.Key)` for cached comparisons
-2. **Database Query**: Execute `DbStructureComparison.SelectList()` for existing database comparisons
-3. **Merge Results**: Combine cached and database results, avoiding duplicates
+### Step 1: Load cached forward comparisons
 
-### Phase 2: Auto-Generation Logic
-If no existing comparisons are found, the method attempts to create them using different strategies:
+The method starts with `_sdComparisonCache.ForSource(sourceSd.Key)`, filters the results to rows whose `TargetFhirPackageKey` equals `targetPackage.Key`, and materializes them as a list (`FhirDbComparerStructures.cs:561-564`).
 
-#### For Primitive Types (`FhirArtifactClassEnum.PrimitiveType`)
-- **Mapping Source**: Uses `FhirTypeMappings.PrimitiveMappings` predefined relationships
-- **Validation**: Ensures both source and target primitive types exist in their respective packages
-- **Relationship Assignment**: Applies predefined relationships from type mappings
-- **Generated Properties**: 
-  - `IsGenerated = true`
-  - `TechnicalMessage = tm.Comment` (from type mapping)
-  - Relationship values from mapping structure
+### Step 2: Load persisted forward comparisons
 
-#### For Other Artifact Types
-Uses a hierarchical matching strategy with progressively relaxed criteria:
+It queries `DbStructureComparison.SelectList` using the current package comparison key, source package key, target package key, and source structure key (`FhirDbComparerStructures.cs:566-571`):
 
-1. **Primary Match**: `UnversionedUrl` comparison
-   - Query: `DbStructureDefinition.SelectList(_db, FhirPackageKey: targetPackage.Key, UnversionedUrl: sourceSd.UnversionedUrl)`
-   - Message: "Inferred comparison based on unversioned URL match"
+```csharp
+DbStructureComparison.SelectList(
+    _db,
+    PackageComparisonKey: forwardPair.Key,
+    SourceFhirPackageKey: sourcePackage.Key,
+    TargetFhirPackageKey: targetPackage.Key,
+    SourceStructureKey: sourceSd.Key);
+```
 
-2. **Secondary Match**: `Name` comparison  
-   - Query: `DbStructureDefinition.SelectList(_db, FhirPackageKey: targetPackage.Key, Name: sourceSd.Name)`
-   - Message: "Inferred comparison based on Name match"
+### Step 3: Merge and exit if empty
 
-3. **Tertiary Match**: `Id` comparison
-   - Query: `DbStructureDefinition.SelectList(_db, FhirPackageKey: targetPackage.Key, Id: sourceSd.Id)`
-   - Message: "Inferred comparison based on Id match"
+Each database comparison is appended only when `forwardComparisons.Contains(c)` is false (`FhirDbComparerStructures.cs:573-580`). If the merged list is empty, the method logs that no forward comparisons were found for the source structure and target package, then returns immediately (`FhirDbComparerStructures.cs:582-587`). There is no in-method replacement generation or target discovery in this branch.
 
-### Phase 3: Deep Comparison Processing
-For each discovered or created comparison:
+### Step 4: Process each remaining comparison
 
-1. **Review Status Check**: Skip if `LastReviewedOn != null` and `ReviewType == Complete`
-2. **Target Resolution**: Resolve target structure definition using `DbStructureDefinition.SelectSingle()`
-3. **Deep Analysis**: Call `DoStructureComparison()` with all necessary cache and package parameters
-4. **Cache Management**: Update comparison cache with results
+For every merged comparison (`FhirDbComparerStructures.cs:589-617`):
+
+1. Skip when `LastReviewedOn != null` and `ReviewType == StructureReviewTypeCodes.Complete` (`FhirDbComparerStructures.cs:592-596`).
+2. Resolve `TargetStructureKey` via `DbStructureDefinition.SelectSingle(_db, Key: forwardComparison.TargetStructureKey)` and throw if the target cannot be found (`FhirDbComparerStructures.cs:598-602`).
+3. Call `DoStructureComparison`, passing `_sdComparisonCache`, `_edComparisonCache`, `_collatedTypeComparisonCache`, `_typeComparisonCache`, packages, structures, the forward comparison, and both package pairs (`FhirDbComparerStructures.cs:604-616`).
 
 ## Mermaid Workflow Diagram
 
 ```mermaid
 flowchart TD
-    Start([doStructureComparisons Start]) --> CacheQuery[Query Cache for Existing Comparisons]
-    CacheQuery --> DbQuery[Query Database for Existing Comparisons] 
-    DbQuery --> MergeResults[Merge Cache + DB Results]
-    MergeResults --> CheckExists{Any Comparisons Found?}
-    
-    CheckExists -->|Yes| ProcessComparisons[Process Each Comparison]
-    CheckExists -->|No| CheckArtifactType{Check Artifact Type}
-    
-    CheckArtifactType -->|PrimitiveType| PrimitiveLogic[Use FhirTypeMappings.PrimitiveMappings]
-    CheckArtifactType -->|Other| InferredLogic[Try Inferred Matching]
-    
-    PrimitiveLogic --> IterateMappings[For Each Type Mapping]
-    IterateMappings --> ValidateTypes[Validate Source/Target Types Exist]
-    ValidateTypes --> CreatePrimitiveComparison[Create DbStructureComparison with Mapping Data]
-    CreatePrimitiveComparison --> CacheAdd1[Add to _sdComparisonCache]
-    
-    InferredLogic --> TryUnversionedUrl[Try UnversionedUrl Match]
-    TryUnversionedUrl --> FoundUnversioned{Found Matches?}
-    FoundUnversioned -->|No| TryName[Try Name Match]
-    FoundUnversioned -->|Yes| CreateInferredComparison1[Create Comparison with UnversionedUrl Message]
-    
-    TryName --> FoundName{Found Matches?}
-    FoundName -->|No| TryId[Try Id Match]
-    FoundName -->|Yes| CreateInferredComparison2[Create Comparison with Name Message]
-    
-    TryId --> FoundId{Found Matches?}
-    FoundId -->|No| ProcessComparisons
-    FoundId -->|Yes| CreateInferredComparison3[Create Comparison with Id Message]
-    
-    CreateInferredComparison1 --> CacheAdd2[Add to _sdComparisonCache]
-    CreateInferredComparison2 --> CacheAdd2
-    CreateInferredComparison3 --> CacheAdd2
-    CacheAdd1 --> ProcessComparisons
-    CacheAdd2 --> ProcessComparisons
-    
-    ProcessComparisons --> IterateComparisons[For Each Comparison]
-    IterateComparisons --> CheckReviewed{Already Reviewed Complete?}
-    CheckReviewed -->|Yes| SkipComparison[Skip This Comparison]
-    CheckReviewed -->|No| ResolveTarget[Resolve Target Structure Definition]
-    
-    ResolveTarget --> CallDeepComparison[Call DoStructureComparison]
-    CallDeepComparison --> UpdateCache[Update Comparison Cache]
-    UpdateCache --> MoreComparisons{More Comparisons?}
-    
-    SkipComparison --> MoreComparisons
-    MoreComparisons -->|Yes| IterateComparisons
-    MoreComparisons -->|No| End([Method Complete])
+    Start([doStructureComparisons Start]) --> Cached[Read _sdComparisonCache.ForSource sourceSd.Key]
+    Cached --> Filter[Filter cached rows to targetPackage.Key]
+    Filter --> DbRows[Read DbStructureComparison.SelectList for package/source/target/source structure]
+    DbRows --> Merge[Append DB rows not already in cached list]
+    Merge --> Any{Any forward comparisons?}
+    Any -->|No| Log[Log no forward comparisons found]
+    Log --> End([Return])
+    Any -->|Yes| Loop[For each forward comparison]
+    Loop --> Reviewed{LastReviewedOn set and ReviewType Complete?}
+    Reviewed -->|Yes| More{More comparisons?}
+    Reviewed -->|No| Resolve[Resolve target DbStructureDefinition by TargetStructureKey]
+    Resolve --> Found{Target resolved?}
+    Found -->|No| Throw[Throw missing target Structure exception]
+    Found -->|Yes| Deep[Call DoStructureComparison with caches, packages, structures, comparison, pairs]
+    Deep --> More
+    More -->|Yes| Loop
+    More -->|No| End
 ```
 
 ## Dependencies & Interactions
@@ -131,207 +108,211 @@ flowchart TD
 ### Core Dependencies
 
 #### **Cache Operations**
-- **`_sdComparisonCache.ForSource(sourceSd.Key)`** - FhirDbComparerStructures.cs:317
-  - Retrieves cached structure comparisons filtered by source key
-  - Returns `IEnumerable<DbStructureComparison>` with target package filtering applied
-  - Cache type: `DbComparisonCache<DbStructureComparison>`
 
-- **`_sdComparisonCache.CacheAdd(comparison)`** - FhirDbComparerStructures.cs:396, 465
-  - Adds new comparisons to cache for database persistence
-  - Updates internal key-based and pair-based dictionaries
+- **`_sdComparisonCache.ForSource(sourceSd.Key)`** - `FhirDbComparerStructures.cs:561-564`
+  - Supplies cached structure comparisons that are already known for the source structure.
+  - The method filters these cached rows to the current target package.
+
+- **Caches forwarded to `DoStructureComparison`** - `FhirDbComparerStructures.cs:604-616`
+  - `_sdComparisonCache` tracks structure comparison additions/updates.
+  - `_edComparisonCache` tracks element comparison changes.
+  - `_collatedTypeComparisonCache` and `_typeComparisonCache` support element type comparison work delegated below this method.
 
 #### **Database Operations**
-- **`DbStructureComparison.SelectList(_db, ...)`** - FhirDbComparerStructures.cs:321
-  - Parameters: PackageComparisonKey, SourceFhirPackageKey, TargetFhirPackageKey, SourceStructureKey
-  - Returns existing database comparison records
 
-- **`DbStructureDefinition.SelectSingle(_db, ...)`** - FhirDbComparerStructures.cs:352, 358, 483
-  - Used for primitive type validation and target resolution
-  - Parameters vary: Key, FhirPackageKey + Name combinations
+- **`DbStructureComparison.SelectList(_db, ...)`** - `FhirDbComparerStructures.cs:566-571`
+  - Parameters: `PackageComparisonKey`, `SourceFhirPackageKey`, `TargetFhirPackageKey`, and `SourceStructureKey`.
+  - Returns existing persisted forward structure comparisons for this exact source/target context.
 
-- **`DbStructureDefinition.SelectList(_db, ...)`** - FhirDbComparerStructures.cs:407, 414, 422
-  - Used for inferred matching by UnversionedUrl, Name, Id
-  - Returns `List<DbStructureDefinition>` of potential matches
+- **`DbStructureDefinition.SelectSingle(_db, Key: ...)`** - `FhirDbComparerStructures.cs:598-602`
+  - Resolves each forward comparison's target structure before deep comparison.
+  - Throws when the key cannot be resolved.
+
+- **No target-discovery `DbStructureDefinition.SelectList` calls occur in `doStructureComparisons`**.
+  - Current source/target discovery lives in `StructureComparer`: explicit mappings (`StructureComparer.cs:615-666`), same-id and same-url probes (`StructureComparer.cs:672-726`), same-name fallback when no target exists (`StructureComparer.cs:728-755`), inverse mappings (`StructureComparer.cs:757-807`), and no-map records (`StructureComparer.cs:867-884`).
 
 #### **Core Processing Method**
-- **`DoStructureComparison(...)`** - FhirDbComparerStructures.cs:489
-  - Parameters: Multiple cache objects, packages, structures, comparisons, pairs
-  - Performs detailed element-level comparison analysis
-  - Updates comparison relationships and generates user messages
+
+- **`DoStructureComparison(...)`** - `FhirDbComparerStructures.cs:623-775`
+  - Ensures or creates the inverse comparison (`FhirDbComparerStructures.cs:636-640`, `778-827`).
+  - Runs element comparisons via `doElementComparisons` (`FhirDbComparerStructures.cs:642-656`).
+  - Updates `IsIdentical` on forward and inverse records when necessary (`FhirDbComparerStructures.cs:658-669`).
+  - Leaves reviewed records unchanged when `LastReviewedOn != null` and `ReviewType > StructureReviewTypeCodes.None` (`FhirDbComparerStructures.cs:671-676`).
+  - Aggregates element relationships into structure relationships (`FhirDbComparerStructures.cs:678-686`, `848-943`).
+  - Applies configured composite/type mapping overrides and builds the final user message (`FhirDbComparerStructures.cs:688-774`).
 
 ### Supporting Systems
 
 #### **Type Mapping Infrastructure**
-- **`FhirTypeMappings.PrimitiveMappings`** - Static array of `CodeGenTypeMapping` structures
-- **`ComparisonDatabase.GetCompositeName(...)`** - Generates standardized comparison names
-- **`DbStructureComparison.GetIndex()`** - Generates unique keys for new comparisons
+
+`doStructureComparisons` itself does not consult type mapping tables. `CodeGenTypeMapping` is used downstream in `DoStructureComparison` for `FhirTypeMappings.CompositeMappingOverrides` and `FhirTypeMappings.TryGetMapping` (`FhirDbComparerStructures.cs:688-725`) and in `invert` when building an inverse record (`FhirDbComparerStructures.cs:946-1021`).
 
 #### **Data Models**
-- **`DbStructureComparison`**: Core comparison record with relationship, review, and identity data
-- **`DbStructureDefinition`**: FHIR structure metadata including artifact class classification
-- **`DbFhirPackage`**: Package metadata for source/target identification
-- **`FhirArtifactClassEnum`**: Categorizes FHIR artifacts (PrimitiveType, ComplexType, Resource, etc.)
+
+- **`DbStructureComparison`**: Existing comparison record consumed by this method; includes source/target keys, review state, relationships, identity flags, technical/user messages, and inverse linkage.
+- **`DbStructureDefinition`**: Structure metadata. `doStructureComparisons` uses only the source instance passed in and a target resolved by key.
+- **`DbFhirPackage`**: Package metadata used for filtering, logging, and delegation.
+- **`FhirPackageComparisonPair`**: In-memory source/target package pair used by current structure comparison code, distinct from the persisted `DbFhirPackageComparisonPair` model (`FhirPackageComparisonPair.cs:10-43`).
 
 ## Data Models
 
 ### Input Structures
+
 ```csharp
-// Source package and structure being compared
 DbFhirPackage sourcePackage { Key, ShortName, ... }
-DbStructureDefinition sourceSd { 
-    Key, Name, Id, UnversionedUrl, VersionedUrl, 
-    Version, ArtifactClass, ...
+
+DbStructureDefinition sourceSd {
+    Key,
+    Name,
+    Id,
+    UnversionedUrl,
+    VersionedUrl,
+    Version,
+    ...
 }
 
-// Target package for comparison
 DbFhirPackage targetPackage { Key, ShortName, ... }
 
-// Bidirectional comparison pairs
-DbFhirPackageComparisonPair forwardPair { Key, SourcePackageKey, TargetPackageKey, ... }
-DbFhirPackageComparisonPair reversePair { Key, SourcePackageKey, TargetPackageKey, ... }
+FhirPackageComparisonPair forwardPair {
+    SourcePackage,
+    TargetPackage,
+    SourcePackageKey,
+    TargetPackageKey,
+    SourcePackageShortName,
+    TargetPackageShortName,
+    ...
+}
+
+FhirPackageComparisonPair reversePair { ... }
 ```
 
-### Generated Structures
+### Consumed and Updated Structures
+
+`doStructureComparisons` consumes existing `DbStructureComparison` rows rather than constructing new forward rows:
+
 ```csharp
-// Created comparison records
 DbStructureComparison {
-    Key,                              // Generated index
-    PackageComparisonKey,             // From forwardPair.Key
-    SourceFhirPackageKey,             // From sourcePackage.Key
-    TargetFhirPackageKey,             // From targetPackage.Key
-    SourceStructureKey,               // From sourceSd.Key
-    TargetStructureKey,               // From matched target structure
-    SourceCanonicalVersioned,         // From sourceSd.VersionedUrl
-    TargetCanonicalVersioned,         // From target structure
-    SourceName, TargetName,           // Structure names
-    CompositeName,                    // Generated composite identifier
-    Relationship,                     // From mappings or null
-    ConceptDomainRelationship,        // From mappings or null
-    ValueDomainRelationship,          // From mappings or null
-    IsGenerated = true,               // Always true for auto-generated
-    TechnicalMessage,                 // Mapping comment or inference message
-    UserMessage = null,               // Set later by DoStructureComparison
-    IsIdentical = null,               // Determined by element comparison
+    Key,
+    PackageComparisonKey,
+    SourceFhirPackageKey,
+    TargetFhirPackageKey,
+    SourceStructureKey,
+    TargetStructureKey,
+    SourceCanonicalVersioned,
+    TargetCanonicalVersioned,
+    SourceName,
+    TargetName,
+    CompositeName,
+    Relationship,
+    ConceptDomainRelationship,
+    ValueDomainRelationship,
+    LastReviewedOn,
+    ReviewType,
+    IsIdentical,
+    TechnicalMessage,
+    UserMessage,
+    InverseComparisonKey,
 }
 ```
 
+`DoStructureComparison` may update `IsIdentical`, relationships, generated flags, technical messages, inverse linkage, and user messages. If an inverse comparison is missing, `findOrCreateInverse` creates one from the forward comparison and caches it (`FhirDbComparerStructures.cs:778-827`, `946-1021`).
+
 ### Type Mapping Structure
-```csharp
-// Primitive type mappings from FhirTypeMappings.PrimitiveMappings
-readonly record struct CodeGenTypeMapping(
-    string SourceType,                // Source primitive type name
-    string TargetType,                // Target primitive type name  
-    CMR Relationship,                 // ConceptMapRelationship enum
-    CMR ConceptDomainRelationship,    // Domain-level relationship
-    CMR ValueDomainRelationship,      // Value-level relationship
-    string Comment                    // Technical description
-)
-```
+
+There is no type-mapping-driven creation phase in `doStructureComparisons`. Mapping records are applied only after a comparison has already been selected for deep processing, inside `DoStructureComparison` and `invert` (`FhirDbComparerStructures.cs:688-725`, `946-1021`).
 
 ## Error Handling
 
 ### Database Resolution Failures
+
 ```csharp
-// Target structure resolution - FhirDbComparerStructures.cs:483-486
-DbStructureDefinition targetSd = DbStructureDefinition.SelectSingle(_db, Key: forwardComparison.TargetStructureKey)
-    ?? throw new Exception($"Could not resolve target Structure with Key: {forwardComparison.TargetStructureKey} (`{forwardComparison.TargetCanonicalVersioned}`)");
+DbStructureDefinition targetSd = DbStructureDefinition.SelectSingle(
+    _db,
+    Key: forwardComparison.TargetStructureKey)
+    ?? throw new Exception(
+        $"Could not resolve target Structure with Key: {forwardComparison.TargetStructureKey} (`{forwardComparison.TargetCanonicalVersioned}`)");
 ```
 
+This is the only explicit exception thrown by `doStructureComparisons` (`FhirDbComparerStructures.cs:598-602`).
+
 ### Error Categories
-1. **Missing Target Structures**: Exception thrown if target structure cannot be resolved by key
-2. **Database Connection Issues**: Underlying database operations may fail with connection errors
-3. **Cache Corruption**: Invalid cache state could cause lookup failures
-4. **Mapping Validation**: Primitive type mappings may reference non-existent structures
+
+1. **Missing Target Structures**: A selected comparison with an unresolved `TargetStructureKey` throws before `DoStructureComparison`.
+2. **Database Operation Failures**: Select operations may surface provider-level errors.
+3. **Delegated Comparison Failures**: Element comparison, inverse creation, aggregation, or message generation errors occur inside `DoStructureComparison` or its callees.
 
 ### Resilience Patterns
-- **Graceful Degradation**: If inferred matching finds no targets, processing continues without creating comparisons
-- **Defensive Null Checking**: Extensive null checking for database query results
-- **Transaction Support**: Database operations designed for rollback capability
-- **Skip-on-Error**: Individual comparison failures don't halt overall processing
+
+- **Empty-list early return**: No existing comparisons means no work and no generated substitute (`FhirDbComparerStructures.cs:582-587`).
+- **Reviewed-complete skip**: Human-reviewed complete comparisons are not reprocessed (`FhirDbComparerStructures.cs:592-596`).
+- **Delegated reviewed guard**: `DoStructureComparison` also avoids relationship aggregation for any reviewed comparison whose review type is greater than `None` (`FhirDbComparerStructures.cs:671-676`).
 
 ## Performance Considerations
 
 ### Computational Complexity
-- **Cache Lookups**: O(1) dictionary-based operations for existing comparisons
-- **Database Queries**: O(log n) for indexed database lookups  
-- **Inferred Matching**: O(n) linear scan through potential targets (typically small datasets)
-- **Overall**: O(n * m) where n = source structures, m = target packages
+
+- **Cache lookup/filter**: Linear in the number of cached comparisons for `sourceSd.Key`.
+- **Database lookup**: One targeted `DbStructureComparison.SelectList` per source/target context.
+- **Merge**: Linear over database rows, with `Contains` using the model's equality behavior.
+- **Processing**: One target lookup and one `DoStructureComparison` call per non-skipped comparison.
 
 ### Optimization Strategies
-1. **Cache-First Design**: Prioritizes cached data over database queries
-2. **Batch Processing**: Accumulates changes for bulk database operations
-3. **Early Termination**: Skips already-reviewed complete comparisons
-4. **Indexed Queries**: Uses database indexes for efficient structure lookups
+
+1. **Cache-first collection**: Starts with `_sdComparisonCache` so pending in-memory changes can be included before database rows.
+2. **Early termination**: Avoids target resolution and element comparison when no forward comparisons exist.
+3. **Review-aware skip**: Avoids recalculating comparisons that are marked complete.
+4. **Delegation to shared caches**: Passes all caches to `DoStructureComparison`, allowing lower layers to batch changes for persistence.
 
 ### Memory Usage
-- **Cache Overhead**: Maintains in-memory dictionaries for comparison caching
-- **Lazy Loading**: Database structures loaded on-demand during processing
-- **Batch Accumulation**: Temporarily stores changes before database persistence
 
-### Scaling Factors
-- **Package Size**: Larger FHIR packages increase processing time linearly
-- **Cache Hit Rate**: Higher cache hit rates significantly improve performance
-- **Database Performance**: Query performance directly impacts overall speed
-- **Type Mapping Size**: Primitive mapping lookup is constant-time regardless of mapping table size
+- The method materializes one merged `List<DbStructureComparison>` for the current source structure and target package.
+- It does not allocate candidate target lists or generated forward-comparison records.
+- Additional memory use comes from delegated element/type comparison work in `DoStructureComparison`.
 
 ## Usage Examples
 
-### Basic Structure Comparison Setup
+### Existing Comparison Processing
+
 ```csharp
-// Called from main Compare method - FhirDbComparer.cs:265
-foreach ((DbFhirPackageComparisonPair forward, DbFhirPackageComparisonPair reverse) in bidirectionalPairs)
-{
-    DbFhirPackage targetPackage = packages[forward.TargetPackageKey];
-    doStructureComparisons(
-        sourcePackage,      // Source FHIR package
-        sourceSd,          // Source structure definition
-        targetPackage,     // Target FHIR package  
-        forward,           // Forward comparison pair
-        reverse);          // Reverse comparison pair
-}
+// Conceptual private invocation after comparison records already exist.
+doStructureComparisons(
+    sourcePackage,
+    sourceSd,
+    targetPackage,
+    forwardPair,  // FhirPackageComparisonPair
+    reversePair); // FhirPackageComparisonPair
 ```
 
-### Primitive Type Mapping Example
-```csharp
-// For sourceSd with ArtifactClass = FhirArtifactClassEnum.PrimitiveType
-// Method automatically creates comparisons using predefined mappings:
+The method expects discovery to have produced `DbStructureComparison` rows in `_sdComparisonCache` or the database. If neither location has a forward row for the source structure and target package, it only logs and returns.
 
-FhirTypeMappings.CodeGenTypeMapping example = new(
-    SourceType: "string",
-    TargetType: "string", 
-    Relationship: CMR.Equivalent,
-    ConceptDomainRelationship: CMR.Equivalent,
-    ValueDomainRelationship: CMR.Equivalent,
-    Comment: "Primitive type string maps directly between versions"
-);
+### Active Pipeline Context
+
+```csharp
+StructureComparer sdComparer = new(_db, _loggerFactory);
+sdComparer.CompareStructures(maxStepSize: maxStepSize, specificPairs: specificPairs);
 ```
 
-### Inferred Matching Flow
-```csharp
-// For non-primitive types, tries progressive matching:
-// 1. UnversionedUrl: "http://hl7.org/fhir/StructureDefinition/Patient"
-// 2. Name: "Patient"  
-// 3. Id: "Patient"
-
-List<DbStructureDefinition> potentialTargets = DbStructureDefinition.SelectList(
-    _db, 
-    FhirPackageKey: targetPackage.Key, 
-    UnversionedUrl: sourceSd.UnversionedUrl);
-```
+This is the current active structure path from `FhirDbComparer.Compare` (`FhirDbComparer.cs:132-140`). `StructureComparer.CompareStructures` handles package-pair construction, discovery, comparison record creation, and persistence (`StructureComparer.cs:85-130`, `133-177`, `180-238`).
 
 ## Integration Notes
 
 ### Caller Context
-- **Primary Caller**: `FhirDbComparer.Compare()` method during structure definition processing
-- **Execution Order**: Called after value set comparisons, before database persistence  
-- **Iteration Context**: Called once per source structure per target package pair
+
+- Active `FhirDbComparer.Compare` delegates structure work to `StructureComparer.CompareStructures` (`FhirDbComparer.cs:132-140`).
+- `doStructureComparisons` is present in `FhirDbComparerStructures.cs` inside the file's disabled `#if false` region (`FhirDbComparerStructures.cs:17`, `1023`). Its current body should therefore be read as legacy/private orchestration code, not as the active discovery path.
+- The body still passes `forwardPair.Key` as `PackageComparisonKey` (`FhirDbComparerStructures.cs:566-571`), while the visible in-memory `FhirPackageComparisonPair` type exposes source/target package keys rather than a persisted comparison-pair key (`FhirPackageComparisonPair.cs:10-43`).
+- Discovery and forward comparison creation now happen upstream in `StructureComparer`, including direct neighbor paths and transitive paths (`StructureComparer.cs:207-238`, `604-884`).
 
 ### Cache Coordination
-- **Shared Caches**: Operates on class-level caches (`_sdComparisonCache`, `_edComparisonCache`)
-- **Persistence Strategy**: Changes accumulated in cache, persisted in batches by caller
-- **Thread Safety**: Not thread-safe; designed for single-threaded execution
+
+- `doStructureComparisons` reads `_sdComparisonCache` before querying the database (`FhirDbComparerStructures.cs:561-571`).
+- It passes structure, element, collated-type, and element-type caches to `DoStructureComparison` (`FhirDbComparerStructures.cs:604-616`).
+- `DoStructureComparison` marks changed records through the supplied structure cache (`FhirDbComparerStructures.cs:658-669`, `678-725`, `773-774`).
 
 ### Database Transaction Scope
-- **No Direct Commits**: Method only updates caches; caller handles database persistence
-- **Atomic Operations**: Individual database queries are atomic but overall operation is not
-- **Rollback Support**: Cache-based design supports transaction rollback at caller level
+
+- `doStructureComparisons` performs selects only; it does not insert, update, or delete rows directly.
+- Persistence is handled by the owning comparison flow after cached changes are accumulated. In the active `StructureComparer` flow, `applyCachedChanges` inserts and updates cached structure, element, and element-type comparisons (`StructureComparer.cs:133-177`).
+
+---
+*Verified against commit `d02100974b2dc1b05ecf1af69c29095e6973f4c8` on `2026-06-04`.*
