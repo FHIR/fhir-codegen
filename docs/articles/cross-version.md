@@ -247,3 +247,55 @@ Throughout the process, detailed records are maintained documenting every mappin
 - Round-trip conversion strategies
 
 This comprehensive process ensures that FHIR implementations can seamlessly work with data from multiple FHIR versions while maintaining semantic fidelity and validation compliance.
+
+
+<!-- NEW SEVEN-STEP NARRATIVE BELOW; PROMOTE ABOVE LEGACY AND DROP DRAFT BANNER IN PHASE 4 -->
+
+# Cross-Version FHIR Artifacts Generation Process
+
+## Overview
+
+TODO
+
+## Pipeline at a Glance
+
+TODO
+
+## Subcommand → Step Matrix
+
+TODO
+
+## Step 1: XVerProcessor.LoadDatabase
+
+TODO
+
+## Step 2: XVerProcessor.LoadFhirCrossVersionMaps
+
+TODO
+
+## Step 3: XVerProcessor.LoadExtensionSubstitutions
+
+TODO
+
+## Step 4: XVerProcessor.LoadFhirTypeValueSets
+
+TODO
+
+## Step 5: XVerProcessor.CompareInDatabase
+
+TODO
+
+## Step 6: XVerProcessor.GenerateOutcomes
+
+TODO
+
+## Step 7: XVerProcessor.ExportOutcomes
+
+TODO
+
+## Glossary
+
+TODO
+
+---
+*Verified against commit `d02100974b2dc1b05ecf1af69c29095e6973f4c8` on `2026-06-04`.*
