@@ -6,3 +6,17 @@
   href: fhirdb-comparer-do-valueset.md
 - name: XVerExporter.Export
   href: xver-processor-write-fhir.md
+- name: XVerProcessor.LoadDatabase
+  href: xver-load-database.md
+- name: XVerProcessor.LoadFhirCrossVersionMaps
+  href: xver-load-fhir-cross-version-maps.md
+- name: XVerProcessor.LoadExtensionSubstitutions
+  href: xver-load-extension-substitutions.md
+- name: XVerProcessor.LoadFhirTypeValueSets
+  href: xver-load-fhir-type-valuesets.md
+- name: XVerProcessor.CompareInDatabase
+  href: xver-compare-in-database.md
+- name: XVerProcessor.GenerateOutcomes
+  href: xver-generate-outcomes.md
+- name: XVerProcessor.ExportOutcomes
+  href: xver-export-outcomes.md
