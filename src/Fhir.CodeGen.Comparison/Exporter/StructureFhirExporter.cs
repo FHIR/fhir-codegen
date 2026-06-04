@@ -33,6 +33,15 @@ namespace Fhir.CodeGen.Comparison.Exporter;
 
 public class StructureFhirExporter
 {
+    private enum TargetReferenceModes
+    {
+        Resource,
+        Profile,
+        Both
+    };
+
+    private const TargetReferenceModes _targetReferenceMode = TargetReferenceModes.Resource;
+
     private readonly XVerExporter _exporter;
     private readonly IDbConnection _db;
 
@@ -201,9 +210,10 @@ public class StructureFhirExporter
                     _db,
                     SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
                     TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey);
-
+                
                 foreach (DbStructureOutcome sdOutcome in structureOutcomes)
                 {
+                    bool added = false;
                     bool hasDirectTarget = hasDirectTargetForSource(sdOutcome);
                     string? sdTargetName = hasDirectTarget
                         ? sdOutcome.TargetName ?? sdOutcome.TargetId
@@ -212,13 +222,15 @@ public class StructureFhirExporter
                         ? sdOutcome.TargetCanonicalUnversioned
                         : null;
 
-                    if (sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource)
+                    if ((sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource) &&
+                        (_targetReferenceMode != TargetReferenceModes.Profile))
                     {
                         sdTargetName ??= "Basic";
                         sdTargetUrl ??= "http://hl7.org/fhir/StructureDefinition/Basic";
                     }
 
-                    if (sdTargetName is not null)
+                    if ((sdTargetName is not null) &&
+                        (_targetReferenceMode != TargetReferenceModes.Profile))
                     {
                         if (!structureMappingTracker.TargetStructuresByName.TryGetValue(sdOutcome.SourceName, out List<string>? sdNameTargets))
                         {
@@ -230,9 +242,12 @@ public class StructureFhirExporter
                         {
                             sdNameTargets.Add(sdTargetName);
                         }
+
+                        added = true;
                     }
 
-                    if (sdTargetUrl is not null)
+                    if (sdTargetUrl is not null &&
+                        (_targetReferenceMode != TargetReferenceModes.Profile))
                     {
                         if (!structureMappingTracker.TargetStructuresByUrl.TryGetValue(sdOutcome.SourceCanonicalUnversioned, out List<string>? sdUrlTargets))
                         {
@@ -244,6 +259,13 @@ public class StructureFhirExporter
                         {
                             sdUrlTargets.Add(sdTargetUrl);
                         }
+
+                        added = true;
+                    }
+
+                    if ((_targetReferenceMode == TargetReferenceModes.Resource) && added)
+                    {
+                        continue;
                     }
 
                     string profileTarget = sdOutcome.GenUrl!;
@@ -1518,7 +1540,9 @@ public class StructureFhirExporter
                     }
                 }
 
-                if (targetEdOutcome.RequiresCardinalityDefinition && (targetEdOutcome.RequiresExtensionDefinition != true))
+                if (targetEdOutcome.RequiresCardinalityDefinition &&
+                    (targetEdOutcome.RequiresExtensionDefinition != true) &&
+                    (targetEdOutcome.ExtensionSubstitutionUrl is null))
                 {
                     if (targetEdOutcome.DefineAsModifier)
                     {
@@ -2143,6 +2167,7 @@ public class StructureFhirExporter
             TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
             RequiresExtensionDefinition: false,
             RequiresCardinalityDefinition: true,
+            ExtensionSubstitutionUrlIsNull: true,
             orderByProperties: [nameof(DbElementOutcome.SourceStructureKey), nameof(DbElementOutcome.SourceResourceOrder)]));
 
         // iterate over the outcomes that need exporting

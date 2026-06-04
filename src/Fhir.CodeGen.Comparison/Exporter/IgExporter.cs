@@ -1855,6 +1855,8 @@ public class IgExporter
             Description = $"Extensions for Using Data Elements from FHIR {igTr.PackagePair.SourceFhirSequence} in FHIR {igTr.PackagePair.TargetFhirSequence}",
         };
 
+        _logger.LogInformation($"Creating XVer IG Directories, output path: {_outputPath}...");
+
         createXVerIgDirectories(igTr);
         igTr.XVerSourcePageContentFiles = copyIgSourceContent(igTr.InputDir!, igTr.PageContentDir!);
 

@@ -499,7 +499,8 @@ public class StructurePageExporter
             }
 
             // check for exporting this outcome as an extension
-            if (edOutcome.RequiresExtensionDefinition || edOutcome.RequiresCardinalityDefinition)
+            if ((edOutcome.RequiresExtensionDefinition || edOutcome.RequiresCardinalityDefinition) &&
+                (edOutcome.ExtensionSubstitutionUrl is null))
             {
                 string targetLabel;
                 string targetLink;
