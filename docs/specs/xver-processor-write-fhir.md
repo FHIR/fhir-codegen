@@ -412,19 +412,17 @@ their `XVerIgExportTrackingRecord`. Optional publisher scripts (when
 ## Cross-Version Mapping Outcome Categories
 
 `StructureFhirExporter` and `VocabularyFhirExporter` consume mapping
-outcomes that were classified by `GenerateOutcomes`. The element-level
-outcome categories are documented in
-[`xver-generate-outcomes.md`](./xver-generate-outcomes.md); the brief
-summary is:
-
-| Outcome | Meaning at export time |
-|---|---|
-| `UseElementSameName` | No cross-version extension or profile artifact needed for this element; consumers reference the target element directly. |
-| `UseElementRenamed` | An element-level ConceptMap entry is emitted; no extension. |
-| `UseExtension` | A cross-version Extension StructureDefinition is emitted by `StructureFhirExporter`. |
-| `UseExtensionFromAncestor` | No new extension is emitted; consumers reach for the ancestor's extension. |
-| `UseBasicElement` | The element is mapped through a `Basic` resource path; lookup pages document the substitution. |
-| `UseOneOfElements` | Multiple targets are recorded; the lookup pages list all options. |
+outcomes that were classified by `GenerateOutcomes`. The authoritative
+enums live in
+`src/Fhir.CodeGen.Comparison/Models/DbOutcomeClasses.cs` —
+`OutcomeValueSetActionCodes`, `OutcomeValueSetConceptActionCodes`,
+`OutcomeStructureActionCodes`, `OutcomeElementActionCodes`. The
+deep-dive of how those values are assigned (and the decision tree that
+produces them) lives in
+[`xver-generate-outcomes.md`](./xver-generate-outcomes.md); each
+exporter's behavior is then a straightforward switch on the outcome
+value, which the per-exporter sections above describe in their
+algorithm bullets.
 
 `xver-export-outcomes.md` covers the pipeline-level decisions that drive
 which exporters run; this spec covers what each exporter does given
