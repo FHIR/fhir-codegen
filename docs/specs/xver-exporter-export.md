@@ -1,11 +1,5 @@
 # XVerExporter.Export Specification
 
-> **Note:** This spec was originally written when the export logic lived on
-> `XVerProcessor.WriteFhirFromDatabase`. That method has been removed; the
-> equivalent entry point is now `XVerExporter.Export`, called by
-> `XVerProcessor.ExportOutcomes`. The filename is retained for stable
-> incoming links; the TOC entry has been renamed to match the new H1.
-
 ## Executive Summary
 
 `XVerExporter.Export` is the primary entry point for materializing the

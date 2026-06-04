@@ -11,12 +11,10 @@ The comparison pipeline is split between the public `FhirDbComparer` facade and 
 ```
 FhirDbComparer (public facade)
 ├── FhirDbComparer.cs           - Compare entry point, DB connection/logger ownership, table reset, delegation
-├── ValueSetComparer.cs         - Active value set package-pair orchestration and value set/concept cache flushing
-├── StructureComparer.cs        - Active structure package-pair orchestration and structure/element/type cache flushing
+├── ValueSetComparer.cs         - Value set package-pair orchestration and value set/concept cache flushing
+├── StructureComparer.cs        - Structure package-pair orchestration and structure/element/type cache flushing
 ├── ElementComparer.cs          - Element comparison support used by StructureComparer
-├── ElementTypeComparer.cs      - Element type comparison support used by ElementComparer
-├── FhirDbComparerValueSets.cs  - Partial-class value set routines documented separately; not duplicated here
-└── FhirDbComparerStructures.cs - Partial-class structure routines documented separately; not duplicated here
+└── ElementTypeComparer.cs      - Element type comparison support used by ElementComparer
 ```
 
 `FhirDbComparer` owns the `ComparisonDatabase` connection and logger factory (`FhirDbComparer.cs:88-108`). Runtime comparison caches are owned by the delegated comparer classes, not by the `Compare` method body.
@@ -52,11 +50,11 @@ public void Compare(
 
 3. **Run value set comparisons when requested**
    - If `processValueSets` is `true`, `Compare` constructs `ValueSetComparer` with the shared database connection and logger factory, then calls `CompareValueSets(maxStepSize, specificPairs)` (`FhirDbComparer.cs:121-130`).
-   - `CompareValueSets` loads FHIR type value set URLs, loads packages ordered by package version, defaults `maxStepSize`, then processes progressively wider package distances in both ascending and descending directions when allowed by `specificPairs`. For each processed direction it runs the value set comparison pass, applies cached value set/concept changes, and performs concept post-processing (`ValueSetComparer.cs:100-145`). The per-package pass selects source value sets, skips excluded URLs, chooses direct neighbor or transitive comparison paths based on step size, and records comparisons (`ValueSetComparer.cs:318-369`). Lower-level value set comparison details are covered in [fhirdb-comparer-do-valueset.md](./fhirdb-comparer-do-valueset.md).
+   - `CompareValueSets` loads FHIR type value set URLs, loads packages ordered by package version, defaults `maxStepSize`, then processes progressively wider package distances in both ascending and descending directions when allowed by `specificPairs`. For each processed direction it runs the value set comparison pass, applies cached value set/concept changes, and performs concept post-processing (`ValueSetComparer.cs:100-145`). The per-package pass selects source value sets, skips excluded URLs, chooses direct neighbor or transitive comparison paths based on step size, and records comparisons (`ValueSetComparer.cs:318-369`).
 
 4. **Run structure comparisons when requested**
    - If `processStructures` is `true`, `Compare` constructs `StructureComparer` with the shared database connection and logger factory, then calls `CompareStructures(maxStepSize, specificPairs)` (`FhirDbComparer.cs:132-140`).
-   - `CompareStructures` loads packages ordered by package version, builds a directional package-pair list by step size and `specificPairs`, initializes `ElementComparer`, then processes each package pair in built order and applies cached structure/element/type changes after each pair (`StructureComparer.cs:85-131`). The per-pair pass processes artifact classes in dependency order (`PrimitiveType`, `ComplexType`, `Resource`, `Profile`), selects source structures by class, skips excluded URLs, and chooses direct neighbor or transitive paths based on step size and primitive handling (`StructureComparer.cs:180-246`). Lower-level structure comparison details are covered in [fhirdb-comparer-do-structure.md](./fhirdb-comparer-do-structure.md).
+   - `CompareStructures` loads packages ordered by package version, builds a directional package-pair list by step size and `specificPairs`, initializes `ElementComparer`, then processes each package pair in built order and applies cached structure/element/type changes after each pair (`StructureComparer.cs:85-131`). The per-pair pass processes artifact classes in dependency order (`PrimitiveType`, `ComplexType`, `Resource`, `Profile`), selects source structures by class, skips excluded URLs, and chooses direct neighbor or transitive paths based on step size and primitive handling (`StructureComparer.cs:180-246`).
 
 ## Mermaid Workflow Diagram
 
@@ -169,7 +167,7 @@ The active `FhirDbComparer` fields are limited to the database and logging depen
 
 - **Table reset cost**: Proportional to the selected table groups and the database provider's drop/create work.
 - **Package traversal cost**: Bounded by the number of ordered package pairs whose distance is less than or equal to `maxStepSize` and whose directions pass `specificPairs`.
-- **Artifact comparison cost**: Owned by `ValueSetComparer` and `StructureComparer`; this page intentionally does not duplicate the lower-level algorithms documented in [fhirdb-comparer-do-valueset.md](./fhirdb-comparer-do-valueset.md) and [fhirdb-comparer-do-structure.md](./fhirdb-comparer-do-structure.md).
+- **Artifact comparison cost**: Owned by `ValueSetComparer` and `StructureComparer`; this page describes the `Compare` orchestrator only, not the per-family algorithms inside those comparer classes.
 
 ### Scalability Considerations
 

@@ -55,14 +55,13 @@ The table set comes from `DbComparisonClasses.DropTables` / `CreateTables`, whic
 
 1. If `_db` is `null`, call `LoadDatabase(false)` as a non-reloading attempt to attach the existing database (`XVerProcessor.cs:673-676`).
 2. If `_db` is still `null`, throw `Cannot compare without a loaded database!` (`XVerProcessor.cs:678-681`).
-3. Ignore the commented-out `FhirMappingComparerVs` implementation; those lines are inactive (`XVerProcessor.cs:683-684`).
-4. Construct a `FhirDbComparer` using the loaded database and configured logger factory (`XVerProcessor.cs:686`).
-5. Dispatch on `artifactFilter` (`XVerProcessor.cs:687-715`):
+3. Construct a `FhirDbComparer` using the loaded database and configured logger factory (`XVerProcessor.cs:686`).
+4. Dispatch on `artifactFilter` (`XVerProcessor.cs:687-715`):
    1. `CodeSystem` or `ValueSet` calls `Compare(processValueSets: true, processStructures: false, maxStepSize, specificPairs)` (`XVerProcessor.cs:689-696`).
    2. `PrimitiveType`, `ComplexType`, `Resource`, `Profile`, or `Extension` calls `Compare(processValueSets: false, processStructures: true, maxStepSize, specificPairs)` (`XVerProcessor.cs:698-708`).
    3. `null` or any otherwise-unhandled value calls `Compare(maxStepSize, specificPairs)`, relying on `FhirDbComparer.Compare` defaults of `processValueSets: true` and `processStructures: true` (`XVerProcessor.cs:710-714`, `FhirDbComparer.cs:111-115`).
 
-`FhirDbComparer.Compare` owns table reset and delegation to the value-set and structure comparers; see [`fhirdb-comparer-compare.md`](./fhirdb-comparer-compare.md) for its internals. `ValueSetComparer.CompareValueSets` and `StructureComparer.CompareStructures` both build package pairs by increasing `stepSize` so closer package versions are processed first, and both include ascending and descending directions only when allowed by `specificPairs` (`ValueSetComparer.cs:112-142`, `StructureComparer.cs:95-113`). Their per-artifact comparison details are intentionally out of scope here; see [`fhirdb-comparer-do-valueset.md`](./fhirdb-comparer-do-valueset.md) and [`fhirdb-comparer-do-structure.md`](./fhirdb-comparer-do-structure.md).
+`FhirDbComparer.Compare` owns table reset and delegation to the value-set and structure comparers; see [`fhirdb-comparer-compare.md`](./fhirdb-comparer-compare.md) for its internals. `ValueSetComparer.CompareValueSets` and `StructureComparer.CompareStructures` both build package pairs by increasing `stepSize` so closer package versions are processed first, and both include ascending and descending directions only when allowed by `specificPairs` (`ValueSetComparer.cs:112-142`, `StructureComparer.cs:95-113`).
 
 ## Decision Points
 
@@ -71,18 +70,16 @@ The table set comes from `DbComparisonClasses.DropTables` / `CreateTables`, whic
 - **Rule:** `ValueSetComparer.CompareValueSets` and `StructureComparer.CompareStructures` iterate package pairs in both directions: ascending lower-index package to higher-index package, then descending in reverse. Filtering by `specificPairs` is checked separately per direction. **Source:** `ValueSetComparer.cs:120-142`, `StructureComparer.cs:103-113`, `ComparisonAnnotation.cs:17-20`. **Rationale:** The live value-set comparer labels those blocks `ascending` and `descending`, and the shared `ComparisonDirection` enum names the same conceptual directions as `Up` and `Down` (`ValueSetComparer.cs:120-132`, `ComparisonAnnotation.cs:17-20`).
 - **Rule:** `maxStepSize` defaults to `_packages.Count - 1` inside delegated comparers; otherwise it limits how far apart package indices may be while still being compared. **Source:** `ValueSetComparer.cs:107-114`, `StructureComparer.cs:89-97`. **Rationale:** AI Guess: because both comparers process increasing `stepSize` and explicitly comment that closer versions are processed first, a smaller `maxStepSize` is a faster inner-loop development mode while still exercising nearest-neighbor comparisons (`ValueSetComparer.cs:112-114`, `StructureComparer.cs:95-97`).
 - **Rule:** When `specificPairs` is non-null, only the listed `(source, target)` sequence-code pairs are compared. **Source:** `ValueSetComparer.cs:121-122`, `ValueSetComparer.cs:133-134`, `StructureComparer.cs:103-104`, `StructureComparer.cs:109-110`. **Rationale:** Each direction is guarded by either `specificPairs is null` or an exact `Contains((sourceSequence, targetSequence))` check before work is queued or executed.
-- **Rule:** `_directions` is declared as `[ComparisonDirection.Up, ComparisonDirection.Down]`, but active code in `src/Fhir.CodeGen.Comparison` has no direct usages beyond the declaration. **Source:** `XVerProcessor.cs:108-111`; repository search for `_directions` under `src\Fhir.CodeGen.Comparison` returned only `XVerProcessor.cs:111`. **Rationale:** AI Guess: `_directions` is likely vestigial from an earlier traversal design; the live implementation expresses directionality through ascending/descending package loops in the delegated comparers rather than by iterating this constant.
 - **Rule:** `FhirArtifactClassEnum.Extension` routes to structure comparison, not vocabulary comparison. **Source:** `XVerProcessor.cs:698-708`. **Rationale:** The code places `Extension` in the same switch arm as `PrimitiveType`, `ComplexType`, `Resource`, and `Profile`, and that arm sets `processStructures: true` and `processValueSets: false`.
 
 ## Rationale Coverage
 
-`Decisions: 7 total — cited: 4 — AI Guess: 3 — unresolved: 0`
+`Decisions: 6 total — cited: 4 — AI Guess: 2 — unresolved: 0`
 
 ## Failure Modes & Edge Cases
 
 - If `_db` is initially `null`, `CompareInDatabase` attempts `LoadDatabase(false)`; if that still leaves `_db` null, it throws `Cannot compare without a loaded database!` (`XVerProcessor.cs:673-681`).
 - The `FhirDbComparer.Compare` delegation returns no result; exceptions from table reset, `ValueSetComparer.CompareValueSets`, or `StructureComparer.CompareStructures` propagate to the caller (`FhirDbComparer.cs:117-140`).
-- The commented-out `FhirMappingComparerVs` lines suggest a prior implementation or refactoring remnant, but they are inactive and do not affect behavior (`XVerProcessor.cs:683-684`).
 - Re-running `compare`, `compare-vs`, `compare-sd`, or the default pipeline wipes the tables for whichever comparison domains are requested before writing fresh comparison rows (`FhirDbComparer.cs:117-119`, `DbComparisonClasses.cs:32-70`).
 - Passing `artifactFilter: null` runs both domains through default parameters; passing an unhandled enum value also falls into the default arm and runs both domains (`XVerProcessor.cs:710-714`, `FhirDbComparer.cs:111-115`).
 
@@ -92,7 +89,7 @@ The table set comes from `DbComparisonClasses.DropTables` / `CreateTables`, whic
 - [x] Artifact-filter switch (`XVerProcessor.cs:687-715`)
 - [x] Delegation to `FhirDbComparer.Compare` — linked to [`fhirdb-comparer-compare.md`](./fhirdb-comparer-compare.md); internals not duplicated
 - [x] Briefly: `StructureComparer.CompareStructures` and `ValueSetComparer.CompareValueSets` package-pair generation
-- [x] `_directions` constant + `ComparisonDirection` enum
+- [x] `ComparisonDirection` enum (`Up`/`Down`)
 - [x] Subcommand routing (`compare`, `compare-vs`, `compare-sd`, default)
 
 ## References
@@ -111,8 +108,6 @@ The table set comes from `DbComparisonClasses.DropTables` / `CreateTables`, whic
   - [`xver-load-fhir-type-valuesets.md`](./xver-load-fhir-type-valuesets.md)
   - [`xver-generate-outcomes.md`](./xver-generate-outcomes.md) — primary downstream consumer
   - [`fhirdb-comparer-compare.md`](./fhirdb-comparer-compare.md) — internals
-  - [`fhirdb-comparer-do-structure.md`](./fhirdb-comparer-do-structure.md) — disabled `#if false` internals
-  - [`fhirdb-comparer-do-valueset.md`](./fhirdb-comparer-do-valueset.md) — disabled `#if false` internals
 - Related `ConfigXVer` options: `ReloadDatabase`.
 
 ---

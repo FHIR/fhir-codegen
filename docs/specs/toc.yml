@@ -1,11 +1,7 @@
 - name: FhirDbComparer.Compare
   href: fhirdb-comparer-compare.md
-- name: FhirDbComparer.doStructureComparisons
-  href: fhirdb-comparer-do-structure.md
-- name: FhirDbComparer.doValueSetComparisons
-  href: fhirdb-comparer-do-valueset.md
 - name: XVerExporter.Export
-  href: xver-processor-write-fhir.md
+  href: xver-exporter-export.md
 - name: XVerProcessor.LoadDatabase
   href: xver-load-database.md
 - name: XVerProcessor.LoadFhirCrossVersionMaps

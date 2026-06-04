@@ -79,7 +79,6 @@ public void GenerateOutcomes(
 - **Rule:** `UseStructureRenamed` means a single mapped target with a different ID. **Source:** `DbOutcomeClasses.cs:84-87`; `StructureOutcomeGenerator.cs:353,427-450`. **Rationale:** The concrete target is usable, but rename metadata is preserved.
 - **Rule:** `UseBasicResource` is the conceptual outcome for an unmapped source resource represented through target `Basic`. **Source:** enum text `DbOutcomeClasses.cs:88-91`; Basic no-target element path `ElementOutcomeGenerator.cs:821-839,859-932`. **Rationale:** Basic is the target resource available for otherwise unmapped resource data.
 - **Rule:** `UseDatatypeExtension` is the conceptual outcome for an unmapped non-resource type represented as Extension. **Source:** enum text `DbOutcomeClasses.cs:92-95`; non-resource no-target path `ElementOutcomeGenerator.cs:933-1003`; complex-type-to-extension flag `ElementOutcomeGenerator.cs:1247-1255`. **Rationale:** AI Guess: datatypes have no Basic equivalent, so the portable target representation is an extension profile.
-- **Rule:** Structure `UseOneOf` is commented out and not implemented. **Source:** `DbOutcomeClasses.cs:96-100`; no `OutcomeStructureActionCodes` assignments in the generator. **Rationale:** AI Guess: multi-target mappings are represented by multiple target records/counts instead.
 
 ### Element outcomes
 
@@ -93,8 +92,6 @@ public void GenerateOutcomes(
 - **Rule:** `UseBasicElement` means an otherwise-xver resource element matches a compatible target `Basic` element path. **Source:** enum `DbOutcomeClasses.cs:120-123`; Basic path logic `ElementOutcomeGenerator.cs:1239-1245,1258-1289`; stored fields `ElementOutcomeGenerator.cs:1890-1891`. **Rationale:** Reusing Basic avoids unnecessary generated extensions.
 - **Rule:** `Unresolved` means xver is needed but extension definition is prohibited, especially for Resource-typed values. **Source:** enum `DbOutcomeClasses.cs:128-131`; prohibition logic `ElementOutcomeGenerator.cs:1804-1815`; stored fields `ElementOutcomeGenerator.cs:1849-1850`. **Rationale:** AI Guess: these rows remain for review/diagnostics because safe extension generation is not possible.
 - **Rule:** `IsExtension` is represented by omission: source extension/modifierExtension elements are skipped and no outcome row is created. **Source:** enum `DbOutcomeClasses.cs:132-135`; skip logic `ElementOutcomeGenerator.cs:347-357,707-709`. **Rationale:** Source-side extensions already have extension semantics.
-- **Rule:** `IsElementId` and `MappedElsewhere` appear in the enum but are not among the requested seven active categories and are not assigned by current generation. **Source:** `DbOutcomeClasses.cs:136-143`; repository search found no active assignment sites. **Rationale:** Unresolved: source does not explain whether these are legacy or planned categories.
-- **Rule:** Element `UseOneOf` is commented out and not implemented. **Source:** `DbOutcomeClasses.cs:124-127`; no `OutcomeElementActionCodes` assignments in `ElementOutcomeGenerator.cs`. **Rationale:** AI Guess: multi-target cases are represented with multiple `DbElementOutcomeTarget` rows.
 - **Rule:** `_extensionSubstitutionsByElementId` is built from source-sequence-specific and global `DbExtensionSubstitution` rows; duplicate keys silently overwrite earlier entries. **Source:** `ElementOutcomeGenerator.cs:262-301`, especially writes at `280,285,293,297`. **Rationale:** AI Guess: substitution rows are SME override data; the code does not log conflicts.
 - **Rule:** A matching extension substitution prevents generating a new extension by making `extSubstitute` non-null and storing substitution fields. **Source:** lookup `ElementOutcomeGenerator.cs:1432-1455`; `requiresExtensionDefinition` condition `ElementOutcomeGenerator.cs:1616-1621`; fields `ElementOutcomeGenerator.cs:1894-1895`. **Rationale:** AI Guess: curated external extensions should be reused rather than duplicated. Caveat: later alternate-reference/canonical logic can overwrite `extSubstitute` (`ElementOutcomeGenerator.cs:1509-1512,1550-1553`).
 - **Rule:** Standard `alternate-reference` and `alternate-canonical` substitutions can absorb unmapped Reference/CodeableReference/canonical target-profile gaps; if they remove all unmapped types, xver is cleared. **Source:** `ElementOutcomeGenerator.cs:1465-1582`. **Rationale:** AI Guess: these standard extensions preserve narrower target profile/canonical allowances without generating a full element extension.
@@ -107,9 +104,9 @@ public void GenerateOutcomes(
 
 ## Rationale Coverage
 
-`Decisions: 52 total — cited: 35 — AI Guess: 16 — unresolved: 1`
+`Decisions: 49 total — cited: 35 — AI Guess: 14 — unresolved: 0`
 
-Every rule above has a source citation. `cited` means the rationale is directly supported by code structure, comments, enum docs, or stored fields; `AI Guess` means the rule is source-backed but the reason is inferred; `unresolved` means the behavior is visible but the source gives no reason. The unresolved item is the unused `IsElementId` / `MappedElsewhere` element enum vocabulary.
+Every rule above has a source citation. `cited` means the rationale is directly supported by code structure, comments, enum docs, or stored fields; `AI Guess` means the rule is source-backed but the reason is inferred.
 
 ## Failure Modes & Edge Cases
 
@@ -150,7 +147,7 @@ Every rule above has a source citation. `cited` means the rationale is directly 
   - [`xver-load-fhir-cross-version-maps.md`](./xver-load-fhir-cross-version-maps.md) — feeds the algorithmic mappings
   - [`xver-compare-in-database.md`](./xver-compare-in-database.md) — produces the comparison rows consumed here
   - [`xver-export-outcomes.md`](./xver-export-outcomes.md) — consumes the outcomes produced here
-  - [`xver-processor-write-fhir.md`](./xver-processor-write-fhir.md) — exporter deep-dive
+  - [`xver-exporter-export.md`](./xver-exporter-export.md) — exporter deep-dive
 - Related `ConfigXVer` options: `ReloadDatabase`, `XverArtifactVersion`, `CrossVersionMapSourcePath`.
 
 ---

@@ -242,10 +242,7 @@ results.
 See [`xver-compare-in-database.md`](../specs/xver-compare-in-database.md)
 for the orchestration, and
 [`fhirdb-comparer-compare.md`](../specs/fhirdb-comparer-compare.md) for
-the internals of `FhirDbComparer.Compare`. (Note: the two
-`fhirdb-comparer-do-*.md` specs describe code currently disabled
-under `#if false`; the active per-family comparers live in
-`ValueSetComparer.cs` and `StructureComparer.cs`.)
+the internals of `FhirDbComparer.Compare`.
 
 [src-direction]: https://github.com/FHIR/fhir-codegen/blob/main/src/Fhir.CodeGen.Comparison/XVer/ComparisonAnnotation.cs
 
@@ -318,7 +315,7 @@ then `"0.1.0"` as a final default.
 See [`xver-export-outcomes.md`](../specs/xver-export-outcomes.md) for
 the orchestration view (from `XVerProcessor.ExportOutcomes`'
 perspective), and
-[`xver-processor-write-fhir.md`](../specs/xver-processor-write-fhir.md)
+[`xver-exporter-export.md`](../specs/xver-exporter-export.md)
 for the deep-dive of `XVerExporter.Export` and its five component
 exporters.
 
@@ -360,9 +357,7 @@ exporters.
   `Fhir.CodeGen.Comparison.XVer.ComparisonAnnotation`. `Up` is the
   ascending traversal (lower-index → higher-index FHIR sequence);
   `Down` is descending. The active comparers iterate both directions
-  per step-size. The vestigial `XVerProcessor._directions` constant
-  at line 111 declares the pair as an array but has no current callers
-  in active code.
+  per step-size.
 - **Comparison pair / package pair** — a `(source, target)`
   `DbFhirPackage` pair, wrapped at runtime in
   `FhirPackageComparisonPair`. The exporters key per-pair caches by

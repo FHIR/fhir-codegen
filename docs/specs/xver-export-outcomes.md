@@ -13,7 +13,7 @@ the `processVocabulary` / `processStructures` boolean pair that
 `XVerExporter.Export` understands, and dispatches.
 
 The orchestration is intentionally thin. All real export logic lives in
-[`XVerExporter`](./xver-processor-write-fhir.md) and its five component
+[`XVerExporter`](./xver-exporter-export.md) and its five component
 exporters (`IgExporter`, `VocabularyFhirExporter`,
 `VocabularyPageExporter`, `StructureFhirExporter`,
 `StructurePageExporter`). This spec covers what `ExportOutcomes`
@@ -98,7 +98,7 @@ public void ExportOutcomes(
 `ExportOutcomes` itself writes nothing. All output is performed by
 `XVerExporter.Export` and its component exporters. The shape of that
 output is documented in
-[`xver-processor-write-fhir.md`](./xver-processor-write-fhir.md). At a
+[`xver-exporter-export.md`](./xver-exporter-export.md). At a
 glance, each invocation produces, under `_config.OutputDirectory/fhir/`:
 
 - One cross-version IG per `(source, target)` package pair allowed by
@@ -149,7 +149,7 @@ The four content exporters (`VocabularyFhirExporter`,
 `VocabularyPageExporter`, `StructureFhirExporter`,
 `StructurePageExporter`) and the IG builder (`IgExporter`) are invoked
 inside `XVerExporter.Export`. See
-[`xver-processor-write-fhir.md`](./xver-processor-write-fhir.md) for the
+[`xver-exporter-export.md`](./xver-exporter-export.md) for the
 internals; this spec does not repeat them.
 
 ## Decision Points
@@ -316,7 +316,7 @@ internals; this spec does not repeat them.
 - [x] Hard-coded `_versionSpecificExtBehavior` / `_versionSpecificExport`
 - [x] `_exclusionSet` re-applied at export time
 - [x] `wip`, `export`, and default-branch subcommand routing
-- [x] Pointer to [`xver-processor-write-fhir.md`](./xver-processor-write-fhir.md)
+- [x] Pointer to [`xver-exporter-export.md`](./xver-exporter-export.md)
       for `XVerExporter.Export` internals (not duplicated)
 
 ## References
@@ -338,7 +338,7 @@ internals; this spec does not repeat them.
 
 ### Related specs
 
-- [`xver-processor-write-fhir.md`](./xver-processor-write-fhir.md) —
+- [`xver-exporter-export.md`](./xver-exporter-export.md) —
   deep-dive of `XVerExporter.Export` and the five component
   exporters. **Authoritative for export internals.**
 - [`xver-generate-outcomes.md`](./xver-generate-outcomes.md) — produces
