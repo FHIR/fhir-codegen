@@ -413,6 +413,53 @@ public class StructureFhirExporter
         igTr.ElementMapFiles = exported;
     }
 
+    private static void addTargetElement(
+        ConceptMap.SourceElementComponent cmSourceElement,
+        HashSet<string> usedTargetLiterals,
+        string cmSourceKey,
+        string targetCode,
+        CMR relationship,
+        bool fullyMapsToThisTarget,
+        string? comment)
+    {
+        if (!usedTargetLiterals.Add(cmSourceKey + targetCode))
+        {
+            return;
+        }
+
+        CMR targetRelationship = selectTargetRelationship(relationship, fullyMapsToThisTarget);
+
+        // add the target for this basic element equivalent
+        ConceptMap.TargetElementComponent cmTargetElement = new()
+        {
+            Code = targetCode,
+            Display = targetCode,
+            Relationship = targetRelationship,
+            Comment = comment,
+        };
+        cmSourceElement.Target.Add(cmTargetElement);
+    }
+
+    private static CMR selectTargetRelationship(CMR relationship, bool fullyMapsToThisTarget)
+    {
+        if (fullyMapsToThisTarget)
+        {
+            return relationship switch
+            {
+                CMR.Equivalent => relationship,
+                CMR.SourceIsNarrowerThanTarget => relationship,
+                _ => CMR.Equivalent,
+            };
+        }
+
+        return relationship switch
+        {
+            CMR.Equivalent => CMR.SourceIsBroaderThanTarget,
+            CMR.SourceIsNarrowerThanTarget => CMR.RelatedTo,
+            _ => relationship,
+        };
+    }
+
     private void addMappedElementsToElementCm(
         XVerIgExportTrackingRecord igTr,
         ConceptMap edCm,
@@ -485,74 +532,90 @@ public class StructureFhirExporter
             // iterate over the targets
             foreach (DbElementOutcomeTarget edTarget in edTargets)
             {
-                if ((edTarget.TargetStructureKey is null) ||
-                    (edTarget.TargetElementId is null))
+                if (edTarget.TargetStructureKey is null)
                 {
                     continue;
                 }
 
                 DbStructureDefinition? targetSd = null;
-                ConceptMap.GroupComponent? currentGroup;
-
                 targetSd = targetSds[edTarget.TargetStructureKey.Value];
-                if (!groupsByTarget.TryGetValue(targetSd.VersionedUrl, out currentGroup))
-                {
-                    currentGroup = new()
-                    {
-                        Source = sourceSd.VersionedUrl,
-                        Target = targetSd.VersionedUrl,
-                        Element = [],
-                    };
-                    edCm.Group.Add(currentGroup);
-                    groupsByTarget[targetSd.VersionedUrl] = currentGroup;
-                }
-
                 string cmSourceKey = targetSd.VersionedUrl + "|" + edOutcome.SourceId;
-                if (!cmSources.TryGetValue(cmSourceKey, out ConceptMap.SourceElementComponent? cmSourceElement))
+
+                if (edTarget.TargetElementId is not null)
                 {
-                    cmSourceElement = new()
+                    ConceptMap.GroupComponent? currentGroup;
+
+                    if (!groupsByTarget.TryGetValue(targetSd.VersionedUrl, out currentGroup))
                     {
-                        Code = edOutcome.SourceId,
-                        Display = edOutcome.SourceName,
-                        Target = [],
-                    };
-                    currentGroup.Element.Add(cmSourceElement);
-                    cmSources[cmSourceKey] = cmSourceElement;
+                        currentGroup = new()
+                        {
+                            Source = sourceSd.VersionedUrl,
+                            Target = targetSd.VersionedUrl,
+                            Element = [],
+                        };
+                        edCm.Group.Add(currentGroup);
+                        groupsByTarget[targetSd.VersionedUrl] = currentGroup;
+                    }
+
+                    if (!cmSources.TryGetValue(cmSourceKey, out ConceptMap.SourceElementComponent? cmSourceElement))
+                    {
+                        cmSourceElement = new()
+                        {
+                            Code = edOutcome.SourceId,
+                            Display = edOutcome.SourceName,
+                            Target = [],
+                        };
+                        currentGroup.Element.Add(cmSourceElement);
+                        cmSources[cmSourceKey] = cmSourceElement;
+                    }
+
+                    addTargetElement(
+                        cmSourceElement,
+                        usedTargetLiterals,
+                        cmSourceKey,
+                        edTarget.TargetElementId,
+                        relationship,
+                        edTarget.FullyMapsToThisTarget,
+                        edOutcome.GenMappingComment ?? edOutcome.Comments);
                 }
 
-                string targetCode = edTarget.TargetElementId;
-                if (usedTargetLiterals.Add(cmSourceKey + targetCode))
+                if ((edTarget.CardinalityContextElementId is not null) &&
+                    (edTarget.CardinalityContextElementId != edTarget.TargetElementId))
                 {
-                    CMR targetRelationship = relationship;
+                    ConceptMap.GroupComponent? currentGroup;
 
-                    if (edTarget.FullyMapsToThisTarget)
+                    if (!groupsByTarget.TryGetValue(targetSd.VersionedUrl, out currentGroup))
                     {
-                        targetRelationship = relationship switch
+                        currentGroup = new()
                         {
-                            CMR.Equivalent => relationship,
-                            CMR.SourceIsNarrowerThanTarget => relationship,
-                            _ => CMR.Equivalent,
+                            Source = sourceSd.VersionedUrl,
+                            Target = targetSd.VersionedUrl,
+                            Element = [],
                         };
-                    }
-                    else
-                    {
-                        targetRelationship = relationship switch
-                        {
-                            CMR.Equivalent => CMR.SourceIsBroaderThanTarget,
-                            CMR.SourceIsNarrowerThanTarget => CMR.RelatedTo,
-                            _ => relationship,
-                        };
+                        edCm.Group.Add(currentGroup);
+                        groupsByTarget[targetSd.VersionedUrl] = currentGroup;
                     }
 
-                    // add the target for this basic element equivalent
-                    ConceptMap.TargetElementComponent cmTargetElement = new()
+                    if (!cmSources.TryGetValue(cmSourceKey, out ConceptMap.SourceElementComponent? cmSourceElement))
                     {
-                        Code = targetCode,
-                        Display = targetCode,
-                        Relationship = targetRelationship,
-                        Comment = edOutcome.GenMappingComment ?? edOutcome.Comments,
-                    };
-                    cmSourceElement.Target.Add(cmTargetElement);
+                        cmSourceElement = new()
+                        {
+                            Code = edOutcome.SourceId,
+                            Display = edOutcome.SourceName,
+                            Target = [],
+                        };
+                        currentGroup.Element.Add(cmSourceElement);
+                        cmSources[cmSourceKey] = cmSourceElement;
+                    }
+
+                    addTargetElement(
+                        cmSourceElement,
+                        usedTargetLiterals,
+                        cmSourceKey,
+                        edTarget.CardinalityContextElementId,
+                        relationship,
+                        edTarget.FullyMapsToThisTarget,
+                        edOutcome.GenMappingComment ?? edOutcome.Comments);
                 }
             }
 
@@ -1292,7 +1355,7 @@ public class StructureFhirExporter
 
         // build a lookup based on context paths
         ILookup<string, DbElementOutcome> edOutcomeContextLookup = edOutcomes.Values
-            .SelectMany(edo => edo.ExtensionContexts, (edo, context) => new { Context = context, Outcome = edo })
+            .SelectMany(edo => edo.GetCombinedContexts(), (edo, context) => new { Context = context, Outcome = edo })
             .ToLookup(x => x.Context, x => x.Outcome);
 
         // we need to traverse the elements in the order of the target structure
@@ -1341,7 +1404,7 @@ public class StructureFhirExporter
             List<DbElementOutcome> targetEdOutcomes = edOutcomeContextLookup[targetEd.Id]
                 .Where(eo =>
                     (eo.ExtensionDefinitionIsProhibited != true) &&
-                    (   eo.RequiresXVerDefinition ||
+                    (   eo.RequiresExtensionDefinition ||
                         eo.RequiresCardinalityDefinition ||
                         (eo.ExtensionSubstitutionUrl is not null) ||
                         (eo.AlternateCanonicalTargetsLiteral is not null) ||
@@ -1364,6 +1427,13 @@ public class StructureFhirExporter
             // check to see if there is a parent outcome that is generating an extension
             foreach (DbElementOutcome reviewOutcome in extSubReview)
             {
+                // skip outcomes that we know generate extensions
+                if ((reviewOutcome.RequiresExtensionDefinition == true) ||
+                    (reviewOutcome.RequiresCardinalityDefinition == true))
+                {
+                    continue;
+                }
+
                 if ((reviewOutcome.ParentElementOutcomeKey is null) ||
                     !edOutcomes.TryGetValue(reviewOutcome.ParentElementOutcomeKey.Value, out DbElementOutcome? reviewParentEdOutcome))
                 {
@@ -1488,7 +1558,7 @@ public class StructureFhirExporter
                 bool addedModifierSlice = false;
 
                 // check for extension
-                if (targetEdOutcome.RequiresExtensionDefinition)
+                if (targetEdOutcome.RequiresExtensionDefinition || targetEdOutcome.RequiresCardinalityDefinition)
                 {
                     if (targetEdOutcome.DefineAsModifier)
                     {
@@ -1540,59 +1610,59 @@ public class StructureFhirExporter
                     }
                 }
 
-                if (targetEdOutcome.RequiresCardinalityDefinition &&
-                    (targetEdOutcome.RequiresExtensionDefinition != true) &&
-                    (targetEdOutcome.ExtensionSubstitutionUrl is null))
-                {
-                    if (targetEdOutcome.DefineAsModifier)
-                    {
-                        string sliceSuffix = addedModifierSlice
-                            ? "Ext"
-                            : string.Empty;
-                        addedModifierSlice = true;
+                //if (targetEdOutcome.RequiresCardinalityDefinition &&
+                //    (targetEdOutcome.RequiresExtensionDefinition != true) &&
+                //    (targetEdOutcome.ExtensionSubstitutionUrl is null))
+                //{
+                //    if (targetEdOutcome.DefineAsModifier)
+                //    {
+                //        string sliceSuffix = addedModifierSlice
+                //            ? "Ext"
+                //            : string.Empty;
+                //        addedModifierSlice = true;
 
-                        if (!addedTargetModifierSlicingEd)
-                        {
-                            profileSd.Differential.Element.Add(targetModifierSlicingEd);
-                            addedTargetModifierSlicingEd = true;
-                        }
+                //        if (!addedTargetModifierSlicingEd)
+                //        {
+                //            profileSd.Differential.Element.Add(targetModifierSlicingEd);
+                //            addedTargetModifierSlicingEd = true;
+                //        }
 
-                        profileSd.Differential.Element.Add(getEd(
-                            targetEdOutcome.GenUrl!,
-                            modifierIdPrefix + sliceSuffix,
-                            sliceName + sliceSuffix,
-                            targetModifierPath,
-                            edShort,
-                            edDefinition,
-                            edComment,
-                            adjustedMin,
-                            targetEdOutcome.SourceMaxCardinalityString));
-                    }
-                    else
-                    {
-                        string sliceSuffix = addedSlice
-                            ? "Ext"
-                            : string.Empty;
-                        addedSlice = true;
+                //        profileSd.Differential.Element.Add(getEd(
+                //            targetEdOutcome.GenUrl!,
+                //            modifierIdPrefix + sliceSuffix,
+                //            sliceName + sliceSuffix,
+                //            targetModifierPath,
+                //            edShort,
+                //            edDefinition,
+                //            edComment,
+                //            adjustedMin,
+                //            targetEdOutcome.SourceMaxCardinalityString));
+                //    }
+                //    else
+                //    {
+                //        string sliceSuffix = addedSlice
+                //            ? "Ext"
+                //            : string.Empty;
+                //        addedSlice = true;
 
-                        if (!addedTargetSlicingEd)
-                        {
-                            profileSd.Differential.Element.Add(targetSlicingEd);
-                            addedTargetSlicingEd = true;
-                        }
+                //        if (!addedTargetSlicingEd)
+                //        {
+                //            profileSd.Differential.Element.Add(targetSlicingEd);
+                //            addedTargetSlicingEd = true;
+                //        }
 
-                        profileSd.Differential.Element.Add(getEd(
-                            targetEdOutcome.GenUrl!,
-                            idPrefix + sliceSuffix,
-                            sliceName + sliceSuffix,
-                            targetPath,
-                            edShort,
-                            edDefinition,
-                            edComment,
-                            adjustedMin,
-                            targetEdOutcome.SourceMaxCardinalityString));
-                    }
-                }
+                //        profileSd.Differential.Element.Add(getEd(
+                //            targetEdOutcome.GenUrl!,
+                //            idPrefix + sliceSuffix,
+                //            sliceName + sliceSuffix,
+                //            targetPath,
+                //            edShort,
+                //            edDefinition,
+                //            edComment,
+                //            adjustedMin,
+                //            targetEdOutcome.SourceMaxCardinalityString));
+                //    }
+                //}
 
                 // check for content reference link
                 if ((targetEdOutcome.RequiresDefinitionAsContentReference == true) &&
@@ -2152,116 +2222,132 @@ public class StructureFhirExporter
             igTr.PackagePair.TargetPackageKey);
 
         HashSet<string> generatedExtensionIds = [];
+        bool generatingForCardinality = false;
 
-        // get the element outcomes for this pair
-        List<DbElementOutcome> edOutcomes = DbElementOutcome.SelectList(
-            _db,
-            SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
-            TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
-            RequiresExtensionDefinition: true,
-            orderByProperties: [nameof(DbElementOutcome.SourceStructureKey), nameof(DbElementOutcome.SourceResourceOrder)]);
-
-        edOutcomes.AddRange(DbElementOutcome.SelectList(
-            _db,
-            SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
-            TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
-            RequiresExtensionDefinition: false,
-            RequiresCardinalityDefinition: true,
-            ExtensionSubstitutionUrlIsNull: true,
-            orderByProperties: [nameof(DbElementOutcome.SourceStructureKey), nameof(DbElementOutcome.SourceResourceOrder)]));
-
-        // iterate over the outcomes that need exporting
-        foreach (DbElementOutcome edOutcome in edOutcomes)
+        for (int i = 0; i < 2; i++)
         {
-            // get the source structure
-            if (!sourceSds.TryGetValue(edOutcome.SourceStructureKey, out DbStructureDefinition? sourceSd))
+            List<DbElementOutcome> edOutcomes;
+
+            // get the element outcomes for this pair
+            switch (i)
             {
-                _logger.LogError($"Source structure with key `{edOutcome.SourceStructureKey}` not found for element outcome with key `{edOutcome.Key}`");
-                continue;
+                case 0:
+                    generatingForCardinality = false;
+                    edOutcomes = DbElementOutcome.SelectList(
+                        _db,
+                        SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
+                        TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
+                        RequiresExtensionDefinition: true,
+                        orderByProperties: [nameof(DbElementOutcome.SourceStructureKey), nameof(DbElementOutcome.SourceResourceOrder)]);
+                    break;
+
+                case 1:
+                    generatingForCardinality = true;
+                    edOutcomes = DbElementOutcome.SelectList(
+                        _db,
+                        SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
+                        TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey,
+                        RequiresCardinalityDefinition: true,
+                        orderByProperties: [nameof(DbElementOutcome.SourceStructureKey), nameof(DbElementOutcome.SourceResourceOrder)]);
+                    break;
+
+                default:
+                    continue;
             }
 
-            if (StructurePageExporter.StructureExportExclusions.Contains(edOutcome.SourceId) ||
-                StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Name))
+            // iterate over the outcomes that need exporting
+            foreach (DbElementOutcome edOutcome in edOutcomes)
             {
-                continue;
-            }
-
-            // get the source element
-            if (!sourceEds.TryGetValue(edOutcome.SourceElementKey, out DbElement? sourceEd))
-            {
-                _logger.LogError($"Source element with key `{edOutcome.SourceElementKey}` not found for element outcome with key `{edOutcome.Key}`");
-                continue;
-
-            }
-
-            if (skipElement(sourceEd, skipFirstElement: false))
-            {
-                continue;
-            }
-
-            if (edOutcome.ExtensionDefinitionIsProhibited)
-            {
-                continue;
-            }
-
-            List<StructureDefinition.ContextComponent> contexts = edOutcome.ExtensionContexts
-                .Select(c => new StructureDefinition.ContextComponent()
+                // get the source structure
+                if (!sourceSds.TryGetValue(edOutcome.SourceStructureKey, out DbStructureDefinition? sourceSd))
                 {
-                    Type = StructureDefinition.ExtensionContextType.Element,
-                    Expression = c,
-                })
-                .ToList();
+                    _logger.LogError($"Source structure with key `{edOutcome.SourceStructureKey}` not found for element outcome with key `{edOutcome.Key}`");
+                    continue;
+                }
 
-            string purpose = buildPurpose(
-                igTr,
-                edComparisons,
-                sourceEd,
-                edOutcome);
+                if (StructurePageExporter.StructureExportExclusions.Contains(edOutcome.SourceId) ||
+                    StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Name))
+                {
+                    continue;
+                }
 
-            StructureDefinition? extSd = buildExtSd(
-                generatedExtensionIds,
-                igTr,
-                sourceEds,
-                targetEds,
-                edComparisons,
-                contentReferenceExtUrlsByEdKey,
-                edOutcome,
-                sourceSd,
-                sourceEd,
-                purpose,
-                contexts,
-                useComponentDefinition: false);
+                // get the source element
+                if (!sourceEds.TryGetValue(edOutcome.SourceElementKey, out DbElement? sourceEd))
+                {
+                    _logger.LogError($"Source element with key `{edOutcome.SourceElementKey}` not found for element outcome with key `{edOutcome.Key}`");
+                    continue;
+                }
 
-            if (extSd is null)
-            {
-                continue;
+                if (skipElement(sourceEd, skipFirstElement: false))
+                {
+                    continue;
+                }
+
+                if (edOutcome.ExtensionDefinitionIsProhibited)
+                {
+                    continue;
+                }
+
+                List<StructureDefinition.ContextComponent> contexts = edOutcome.GetCombinedContexts()
+                    .Select(c => new StructureDefinition.ContextComponent()
+                    {
+                        Type = StructureDefinition.ExtensionContextType.Element,
+                        Expression = c,
+                    })
+                    .ToList();
+                
+                string purpose = buildPurpose(
+                    igTr,
+                    edComparisons,
+                    sourceEd,
+                    edOutcome);
+
+                StructureDefinition? extSd = buildExtSd(
+                    generatedExtensionIds,
+                    igTr,
+                    sourceEds,
+                    targetEds,
+                    edComparisons,
+                    contentReferenceExtUrlsByEdKey,
+                    edOutcome,
+                    sourceSd,
+                    sourceEd,
+                    purpose,
+                    contexts,
+                    useComponentDefinition: false,
+                    generatingForCardinality: generatingForCardinality);
+
+                if (extSd is null)
+                {
+                    continue;
+                }
+
+                // write the extension to a file
+                string filename = edOutcome.GenFileName ?? throw new ArgumentNullException(nameof(edOutcome.GenFileName));
+                string path = Path.Combine(dir, filename + ".json");
+
+                if (exporterR3 is not null)
+                {
+                    File.WriteAllText(path, exporterR3.ToJson(extSd, new SerializerSettings() { Pretty = true }));
+                }
+                else
+                {
+                    File.WriteAllText(path, extSd.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
+                }
+
+                exported.Add(new()
+                {
+                    FileName = filename + ".json",
+                    FileNameWithoutExtension = filename,
+                    IsPageContentFile = false,
+                    Name = extSd.Name,
+                    Id = extSd.Id,
+                    Url = extSd.Url,
+                    ResourceType = Hl7.Fhir.Model.FHIRAllTypes.StructureDefinition.GetLiteral(),
+                    Version = extSd.Version,
+                    Description = extSd.Description ?? extSd.Title ?? $"Extension: {extSd.Url}",
+                });
             }
-
-            // write the extension to a file
-            string filename = edOutcome.GenFileName ?? throw new ArgumentNullException(nameof(edOutcome.GenFileName));
-            string path = Path.Combine(dir, filename + ".json");
-
-            if (exporterR3 is not null)
-            {
-                File.WriteAllText(path, exporterR3.ToJson(extSd, new SerializerSettings() { Pretty = true }));
-            }
-            else
-            {
-                File.WriteAllText(path, extSd.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
-            }
-
-            exported.Add(new()
-            {
-                FileName = filename + ".json",
-                FileNameWithoutExtension = filename,
-                IsPageContentFile = false,
-                Name = extSd.Name,
-                Id = extSd.Id,
-                Url = extSd.Url,
-                ResourceType = Hl7.Fhir.Model.FHIRAllTypes.StructureDefinition.GetLiteral(),
-                Version = extSd.Version,
-                Description = extSd.Description ?? extSd.Title ?? $"Extension: {extSd.Url}",
-            });
         }
 
         _logger.LogInformation($"Wrote {exported.Count} Extensions for `{igTr.PackageId}`");
@@ -2435,7 +2521,8 @@ public class StructureFhirExporter
         DbElement sourceEd,
         string purpose,
         List<StructureDefinition.ContextComponent> contexts,
-        bool useComponentDefinition)
+        bool useComponentDefinition,
+        bool generatingForCardinality)
     {
         string id = edOutcome.GenShortId!;
 
@@ -2578,7 +2665,8 @@ public class StructureFhirExporter
             edOutcome,
             sourceSd,
             sourceEd,
-            dataTypeNameLiteral: dataTypeNameLiteral);
+            dataTypeNameLiteral: dataTypeNameLiteral,
+            generatingForCardinality: generatingForCardinality);
 
         return extSd;
     }
@@ -2601,7 +2689,8 @@ public class StructureFhirExporter
         List<string>? dtTypeProfiles = null,
         List<string>? dtTargetProfiles = null,
         bool excludeExtensionElement = false,
-        string? elementUrlOverride = null)
+        string? elementUrlOverride = null,
+        bool generatingForCardinality = false)
     {
         if (edOutcome.ExtensionDefinitionIsProhibited)
         {
@@ -2719,7 +2808,8 @@ public class StructureFhirExporter
         }
 
         // check to see if we are using an extension substitution
-        if (edOutcome.ExtensionSubstitutionUrl is not null)
+        if (!generatingForCardinality &&
+            (edOutcome.ExtensionSubstitutionUrl is not null))
         {
             // add the URL element (always required)
             extSd.Differential.Element.Add(new()
@@ -2794,7 +2884,8 @@ public class StructureFhirExporter
         }
 
         // check for needing to add additional alternate exensions
-        if (edOutcome.AlternateCanonicalTargetsLiteral is not null)
+        if (!generatingForCardinality &&
+            (edOutcome.AlternateCanonicalTargetsLiteral is not null))
         {
             mapTargetRecs.Add(new()
             {
@@ -2803,7 +2894,8 @@ public class StructureFhirExporter
             });
         }
 
-        if (edOutcome.AlternateReferenceTargetsLiteral is not null)
+        if (!generatingForCardinality &&
+            (edOutcome.AlternateReferenceTargetsLiteral is not null))
         {
             mapTargetRecs.Add(new()
             {
@@ -2812,15 +2904,15 @@ public class StructureFhirExporter
             });
         }
 
-        // get the child outcomes so we know if there are child elements to process
-        List<DbElementOutcome> childOutcomes = DbElementOutcome.SelectList(
-            _db,
-            ParentElementOutcomeKey: edOutcome.Key,
-            //RequiresXVerDefinition: true,             // TODO: verify, but once we are in an element I think we need to keep the whole tree
-            orderByProperties: [nameof(DbElementOutcome.SourceResourceOrder)]);
-
-        //bool hasChildren = childOutcomes.Count > 0;
         bool hasChildren = sourceEd.ChildElementCount > 0;
+
+        // get the child outcomes so we know if there are child elements to process
+        List<DbElementOutcome> childOutcomes = hasChildren
+            ? DbElementOutcome.SelectList(
+                _db,
+                ParentElementOutcomeKey: edOutcome.Key,
+                orderByProperties: [nameof(DbElementOutcome.SourceResourceOrder)])
+            : [];
 
         // get the unmapped source types so we can determine value[x] types vs. _datatype extension slices
         List<DbElementType> sourceTypes = (hasChildren || edOutcome.UnmappedTypeKeysLiteral is null)
@@ -2830,8 +2922,7 @@ public class StructureFhirExporter
                 KeyValues: edOutcome.UnmappedTypeKeys);
 
         // if there are no unmapped types, we need to account for everything (e.g., we are in an element that is a child of a type)
-        if ((sourceTypes.Count == 0) &&
-            !hasChildren)
+        if ((sourceTypes.Count == 0) && !hasChildren)
         {
             sourceTypes = DbElementType.SelectList(
                 _db,
@@ -2860,7 +2951,8 @@ public class StructureFhirExporter
         bool codeableRefDisableBinding = false;
         bool codeableRefDisableTargets = false;
 
-        // check for a partially-mapped codeablereference
+#if false   // 2026.06.10 - CodeableReference is a single type - we always need to add the entire structure if something is missing
+        // check for a partially-mapped CodeableReference
         if ((distinctSourceTypeNames.Count == 1) &&
             (distinctSourceTypeNames[0] == "CodeableReference") &&
             (edOutcome.MappedChildTypeElementNamesLiteral is not null) &&
@@ -2899,6 +2991,7 @@ public class StructureFhirExporter
             needsValueElement = validValueTypes.Count > 0;
             needsExtensionElement = hasChildren || (invalidValueTypes.Count > 0);
         }
+#endif
 
         ElementDefinition? currentExtensionElement = null;
 
@@ -2987,7 +3080,8 @@ public class StructureFhirExporter
                 childSourceEd,
                 nextId,
                 nextPath,
-                dtValueElements);
+                dtValueElements,
+                generatingForCardinality: generatingForCardinality);
         }
 
         List<string> distinctInvalidTypeNames = invalidValueTypes
@@ -3030,7 +3124,8 @@ public class StructureFhirExporter
                         crEd,
                         extElementId + ".extension:" + crEd.NameClean(),
                         extElementPath + ".extension",
-                        dtValueElements);
+                        dtValueElements,
+                        generatingForCardinality: generatingForCardinality);
 
                     continue;
                 }
@@ -3124,7 +3219,8 @@ public class StructureFhirExporter
                             ietTypeProfiles,
                             ietTargetProfiles,
                             excludeExtensionElement: false,
-                            elementUrlOverride: dtEtEd.NameClean());
+                            elementUrlOverride: dtEtEd.NameClean(),
+                            generatingForCardinality: generatingForCardinality);
                     }
                 }
                 else
@@ -3160,7 +3256,8 @@ public class StructureFhirExporter
                         ietTypeProfiles,
                         ietTargetProfiles,
                         excludeExtensionElement: false,
-                        elementUrlOverride: $"value{distinctTypeName}");
+                        elementUrlOverride: $"value{distinctTypeName}",
+                        generatingForCardinality: generatingForCardinality);
                 }
             }
         }

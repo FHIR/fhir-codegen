@@ -438,6 +438,25 @@ public class StructurePageExporter
                         targetLines.Add($"[{edTarget.TargetElementId}]({targetSpecLink})");
                     }
                 }
+
+                if (edOutcome.RequiresCardinalityDefinition &&
+                    (edTarget.TargetResourceOrder != 0) &&
+                    (edTarget.CardinalityContextElementId is not null) &&
+                    (edTarget.CardinalityContextElementId != edTarget.TargetElementId))
+                {
+                    // check to see if there is a root target and an extension, in which case the element should not be listed
+                    string targetSdName = edTarget.CardinalityContextElementId.Split('.')[0];
+
+                    string targetSpecLink = ExtendedTypeSpecPageLookup.TryGetValue(targetSdName, out string? targetPageUrl)
+                        ? $"{targetBaseUrl}{targetPageUrl}"
+                        : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
+                        ? $"{targetBaseUrl}{targetSdName}.html#resource"
+                        : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+                        ? $"{targetBaseUrl}datatypes.html#{targetSdName}"
+                        : $"{targetBaseUrl}{targetSdName}.html";
+
+                    targetLines.Add($"[{edTarget.TargetElementId}]({targetSpecLink})");
+                }
             }
 
             if (allowedTargets == 0)
@@ -499,8 +518,8 @@ public class StructurePageExporter
             }
 
             // check for exporting this outcome as an extension
-            if ((edOutcome.RequiresExtensionDefinition || edOutcome.RequiresCardinalityDefinition) &&
-                (edOutcome.ExtensionSubstitutionUrl is null))
+            if (edOutcome.RequiresExtensionDefinition ||
+                edOutcome.RequiresCardinalityDefinition)
             {
                 string targetLabel;
                 string targetLink;
