@@ -1866,6 +1866,19 @@ public class IgExporter
             writeScriptFiles(igTr.IgRootDir);
         }
 
+        // write a .gitignore file if there is not one there already
+        if (!string.IsNullOrEmpty(_crossVersionSourcePath) &&
+            (igTr.IgRootDir is not null))
+        {
+            string sourceFile = Path.Combine(_crossVersionSourcePath, "input", "ig-support", "gitignore.txt");
+            string targetFile = Path.Combine(igTr.IgRootDir, ".gitignore");
+            if (File.Exists(sourceFile) &&
+                !File.Exists(targetFile))
+            {
+                File.Copy(sourceFile, targetFile);
+            }
+        }
+
         return igTr;
     }
 
@@ -2149,7 +2162,7 @@ public class IgExporter
             return [];
         }
 
-        // copy the contents of this directory into the target input directory
+        // copy the contents of this directory into the targetFile input directory
         recursiveCopyContents(igSourceDir, inputDir);
 
         if (string.IsNullOrEmpty(pageContentDir) ||
