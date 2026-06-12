@@ -1409,18 +1409,90 @@ public class StructureFhirExporter
             // check to see if we are in the 'Basic.code' target element, which we need to profile
             if ((targetEd.Id == "Basic.code") && (sourceSd.Name != "Basic"))
             {
-                ElementDefinition basicCodeEd = new ElementDefinition()
+                profileSd.Differential.Element.Add(new ElementDefinition()
                 {
-                    ElementId = "Basic.code",
-                    Path = "Basic.code",
-                    Pattern = new CodeableConcept("http://hl7.org/fhir/fhir-types", sourceSd.Id),
+                    ElementId = "Basic.code.coding",
+                    Path = "Basic.code.coding",
                     Base = new ElementDefinition.BaseComponent()
                     {
-                        Path = "Basic.code",
-                        Min = 1,
+                        Path = "Coding",
+                        Min = 0,
                         Max = "*",
-                    }
-                };
+                    },
+                    Slicing = new ElementDefinition.SlicingComponent()
+                    {
+                        Discriminator = new List<ElementDefinition.DiscriminatorComponent>()
+                        {
+                            new ElementDefinition.DiscriminatorComponent()
+                            {
+                                Type = ElementDefinition.DiscriminatorType.Value,
+                                Path = "coding.code",
+                            },
+                            new ElementDefinition.DiscriminatorComponent()
+                            {
+                                Type = ElementDefinition.DiscriminatorType.Value,
+                                Path = "coding.system",
+                            },
+                        },
+                        Rules = ElementDefinition.SlicingRules.Open,
+                    },
+                });
+
+                profileSd.Differential.Element.Add(new ElementDefinition()
+                {
+                    ElementId = "Basic.code.coding:XVerResource",
+                    Path = "Basic.code.coding",
+                    SliceName = "XVerResource",
+                    Base = new ElementDefinition.BaseComponent()
+                    {
+                        Path = "Coding",
+                        Min = 0,
+                        Max = "*",
+                    },
+                });
+
+                profileSd.Differential.Element.Add(new ElementDefinition()
+                {
+                    ElementId = "Basic.code.coding:XVerResource.system",
+                    Path = "Basic.code.coding.system",
+                    Min = 1,
+                    Max = "1",
+                    Fixed = new FhirUri("http://hl7.org/fhir/fhir-types"),
+                    Base = new ElementDefinition.BaseComponent()
+                    {
+                        Path = "Coding.system",
+                        Min = 0,
+                        Max = "1",
+                    },
+                });
+
+                profileSd.Differential.Element.Add(new ElementDefinition()
+                {
+                    ElementId = "Basic.code.coding:XVerResource.code",
+                    Path = "Basic.code.coding.code",
+                    Min = 1,
+                    Max = "1",
+                    Fixed = new Code(sourceSd.Id),
+                    Base = new ElementDefinition.BaseComponent()
+                    {
+                        Path = "Coding.code",
+                        Min = 0,
+                        Max = "1",
+                    },
+                });
+
+                //profileSd.Differential.Element.Add(new ElementDefinition()
+                //{
+                //    ElementId = "Basic.code",
+                //    Path = "Basic.code",
+                //    Pattern = new CodeableConcept("http://hl7.org/fhir/fhir-types", sourceSd.Id),
+                //    Base = new ElementDefinition.BaseComponent()
+                //    {
+                //        Path = "Basic.code",
+                //        Min = 1,
+                //        Max = "*",
+                //    }
+                //});
 
                 // nothing else to do on code in this case
                 continue;
