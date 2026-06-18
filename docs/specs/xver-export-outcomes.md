@@ -108,6 +108,14 @@ glance, each invocation produces, under `_config.OutputDirectory/fhir/`:
   (structures), and markdown page content (`index-vs.md`,
   `lookup-vs-*.md`, `index-resources.md`, `index-types.md`,
   `lookup-{resource|type}-*.md`).
+- Cross-version **cardinality extensions** are a new outcome/emission
+  category carried through this pipeline: when a source element permits more
+  repetitions than its mapped target, a cardinality-only extension is
+  generated alongside the data-type extensions. The outcome data shape is in
+  [`xver-generate-outcomes.md`](./xver-generate-outcomes.md) and the emission
+  (Extension StructureDefinitions, profile constraints, ConceptMap targets,
+  and page content) is in
+  [`xver-exporter-export.md`](./xver-exporter-export.md).
 - One validation IG per allowed package, containing
   `ig.ini` + `ig.json` + `menu.xml` + a validation-example bundle.
 - One log line `"Finished exporting; outputDirectory: \`{OutputDirectory}\`"`
@@ -279,7 +287,11 @@ internals; this spec does not repeat them.
   `hl7.terminology@7.1.0` / `hl7.fhir.uv.extensions@5.3.0` /
   `hl7.fhir.uv.tools@1.1.2` dependency trio at
   `IgExporter.cs:515-543`). Malformed files are caught, logged, and
-  ignored — they do not abort the export.
+  ignored — they do not abort the export. `IgExporter` also seeds a
+  `.gitignore` into each IG root from
+  `<CrossVersionMapSourcePath>/input/ig-support/gitignore.txt` when that file
+  is present and the destination has none — see
+  [`xver-exporter-export.md`](./xver-exporter-export.md) for details.
 - **Filter mismatch with prior pipeline run.** If `GenerateOutcomes`
   ran with `artifactFilter: ValueSet` and `ExportOutcomes` is then
   invoked with `artifactFilter: Resource`, the export step will find
@@ -359,4 +371,4 @@ internals; this spec does not repeat them.
   four `Load*` steps before exporting.
 
 ---
-*Verified against commit `d02100974b2dc1b05ecf1af69c29095e6973f4c8` on `2026-06-04`.*
+*Verified against commit `e36315a1c9d16450ba81457e4f888eff78d4ae42` on `2026-06-12`.*
