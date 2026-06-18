@@ -33,7 +33,7 @@ and page content:
 **File:** `src/Fhir.CodeGen.Comparison/Exporter/XVerExporter.cs:63`
 **Class:** `XVerExporter` (in `Fhir.CodeGen.Comparison.Exporter`)
 **Complexity:** Low for `XVerExporter.Export` itself (~55 lines); the
-delegated component exporters together total ~8,100 lines of code.
+delegated component exporters together total ~8,300 lines of code.
 
 ## Architecture Overview
 
@@ -169,6 +169,9 @@ The body of `XVerExporter.Export` is small enough to quote verbatim
       `PackagePairStructureMappingTracker` from `DbStructureOutcome`
       rows; then emit Extension and Profile StructureDefinitions plus
       the ConceptMaps that capture the structure/type/element mappings.
+      When a non-`Basic` source maps onto the target `Basic.code` element,
+      it also profiles `Basic.code` by emitting `Basic.code.coding` slices
+      (`StructureFhirExporter.cs:1409-1499`).
    2. Construct `StructurePageExporter(this, _db, _loggerFactory)` and
       call `Export(tr)` (`StructurePageExporter.cs:100`). For each
       cross-version IG: emit `index-resources.md`, `index-types.md`,
@@ -199,6 +202,10 @@ resulting pair list (`IgExporter.cs:610-684`):
        *and* (`specificPairs` is null or contains the reverse pair):
        append `FhirPackageComparisonPair(targetPackage, sourcePackage)`.
 4. For each pair in the resulting list, call `createInitialXVerIg(pair, includeScripts)`.
+   Each `createInitialXVerIg` (`IgExporter.cs:1830`) also seeds a per-IG
+   `.gitignore` at the IG root, copied from
+   `<crossVersionSourcePath>/input/ig-support/gitignore.txt` when that file
+   exists and the destination has none (`IgExporter.cs:1869-1880`).
 5. Build `targetFhirVersions` from `specificPairs.t` (filtered by
    `_allowedExportVersions`) if `specificPairs` is non-null.
 6. For each package in `_packages`: skip unless it's in
@@ -422,6 +429,46 @@ algorithm bullets.
 which exporters run; this spec covers what each exporter does given
 those decisions.
 
+## Cross-Version Cardinality Extensions
+
+Alongside the data-type extensions above, the structure exporters emit
+**cardinality-only** extensions: generated extensions that carry the extra
+repetitions a narrower target element cannot hold. These flow from the
+`DbElementOutcome.RequiresCardinalityDefinition` / `RequiresCardinalitySlice`
+flags and the per-target `DbElementOutcomeTarget.CardinalityContext*` fields
+produced by `GenerateOutcomes` (see
+[`xver-generate-outcomes.md`](./xver-generate-outcomes.md) for how those rows
+are computed).
+
+- **Extension emission.** `StructureFhirExporter.exportExtensions`
+  (`StructureFhirExporter.cs:2245-2428`) runs a pass that selects
+  `DbElementOutcome` rows with `RequiresCardinalityDefinition == true`
+  (`StructureFhirExporter.cs:2317-2325`) and emits an Extension
+  StructureDefinition for each, in addition to the `RequiresExtensionDefinition`
+  (data-type) pass. The extension's legal `Context` is built from
+  `DbElementOutcome.GetCombinedContexts()`, which unions the data-type and
+  cardinality contexts (`StructureFhirExporter.cs:2364-2370`;
+  `DbOutcomeClasses.cs:602-630`).
+- **Profile-side constraint.** When an element needs a cardinality extension
+  but *not* a data-type extension
+  (`RequiresCardinalityDefinition && !RequiresExtensionDefinition`), the
+  profile gains an `xvpc-*` warning constraint asserting that the cardinality
+  extension's presence implies the targeted element exists
+  (`StructureFhirExporter.cs:1717-1737`).
+- **Element ConceptMap.** `addMappedElementsToElementCm`
+  (`StructureFhirExporter.cs:463-767`) emits a second ConceptMap target when a
+  target row's `CardinalityContextElementId` differs from its `TargetElementId`
+  (`StructureFhirExporter.cs:582-619`), recording where the cardinality
+  extension attaches relative to the primary mapping.
+- **Page content.** `StructurePageExporter` surfaces the same information in
+  the per-resource/per-type lookup tables: it renders a cardinality target link
+  when `RequiresCardinalityDefinition` and the cardinality context element
+  differs from the target element (`StructurePageExporter.cs:442-459`), lists
+  the cardinality extension in the target column alongside data-type extensions
+  (`StructurePageExporter.cs:520-543`), and treats `RequiresCardinalitySlice`
+  like `RequiresSliceDefinition` when emitting slice rows
+  (`StructurePageExporter.cs:545-547`).
+
 ## Error Handling
 
 `XVerExporter.Export` itself contains no error handling; the component
@@ -510,7 +557,7 @@ when that file is present.
 - `StructureFhirExporter.Export` and `StructurePageExporter.Export` are
   linear in the number of `DbStructureOutcome` rows per IG, with an
   extra pass per IG to cache target-side Extension `value[x]` types and
-  canonical resource names (`StructureFhirExporter.cs:149-202`).
+  canonical resource names (`StructureFhirExporter.cs:182-201`).
 
 ### Caching
 
@@ -548,7 +595,7 @@ Pieces of the export pipeline this spec claims to cover:
 - [x] `IgExporter.CreateInitialXVerIgs` (pair generation + tracking
   record construction) (`IgExporter.cs:610-684`)
 - [x] `IgExporter.FinalizeXVerIgs` (ig.ini / ig.json / menu.xml writes)
-  (`IgExporter.cs:686-715`)
+  (`IgExporter.cs:686-704`)
 - [x] `VocabularyFhirExporter.Export` entry shape
   (`VocabularyFhirExporter.cs:43-57`)
 - [x] `VocabularyPageExporter.Export` entry shape
@@ -556,7 +603,14 @@ Pieces of the export pipeline this spec claims to cover:
 - [x] `StructureFhirExporter.Export` entry shape and per-IG caches
   (`StructureFhirExporter.cs:144-220`)
 - [x] `StructurePageExporter.Export` entry shape and exclusion list
-  (`StructurePageExporter.cs:38-110`)
+  (`StructurePageExporter.cs:100-129`)
+- [x] Cross-version cardinality-extension emission
+  (`StructureFhirExporter.cs:2317-2325, 1717-1737`; `GetCombinedContexts`
+  `DbOutcomeClasses.cs:602-630`)
+- [x] Cardinality-extension page content
+  (`StructurePageExporter.cs:442-459, 520-543, 545-547`)
+- [x] `Basic.code` profiling (`StructureFhirExporter.cs:1409-1499`)
+- [x] Per-IG `.gitignore` seeding (`IgExporter.cs:1869-1880`)
 - [x] Per-IG output directory layout
 - [x] Error sites and known limitations
 - [x] CLI / API entry path
@@ -568,15 +622,15 @@ Pieces of the export pipeline this spec claims to cover:
 - `src/Fhir.CodeGen.Comparison/Exporter/XVerExporter.cs` — orchestrator
   (~120 lines)
 - `src/Fhir.CodeGen.Comparison/Exporter/IgExporter.cs` — IG package
-  builder + tracking record types (~2,290 lines)
+  builder + tracking record types (~2,304 lines)
 - `src/Fhir.CodeGen.Comparison/Exporter/VocabularyFhirExporter.cs` —
   CodeSystem / ValueSet / ConceptMap JSON emission (~1,070 lines)
 - `src/Fhir.CodeGen.Comparison/Exporter/VocabularyPageExporter.cs` —
   value-set lookup markdown emission (~295 lines)
 - `src/Fhir.CodeGen.Comparison/Exporter/StructureFhirExporter.cs` —
-  Extension / Profile / structure-ConceptMap emission (~3,540 lines)
+  Extension / Profile / structure-ConceptMap emission (~3,712 lines)
 - `src/Fhir.CodeGen.Comparison/Exporter/StructurePageExporter.cs` —
-  resource / type lookup markdown emission (~910 lines)
+  resource / type lookup markdown emission (~931 lines)
 - `src/Fhir.CodeGen.Comparison/XVer/XVerProcessor.cs:557-612` —
   `ExportOutcomes` (constructs and dispatches `XVerExporter`)
 
@@ -605,4 +659,4 @@ Pieces of the export pipeline this spec claims to cover:
   `IgExporter`.
 
 ---
-*Verified against commit `d02100974b2dc1b05ecf1af69c29095e6973f4c8` on `2026-06-04`.*
+*Verified against commit `e36315a1c9d16450ba81457e4f888eff78d4ae42` on `2026-06-12`.*
