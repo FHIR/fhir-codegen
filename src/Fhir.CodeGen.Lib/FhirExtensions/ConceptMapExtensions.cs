@@ -43,19 +43,6 @@ public static class ConceptMapExtensions
         return null;
     }
 
-    public static bool? cgIsGenerated(this ConceptMap.TargetElementComponent te)
-    {
-        ConceptMap.MappingPropertyComponent? mpc = te.Property.FirstOrDefault(p => p.Code == CommonDefinitions.ConceptMapPropertyGenerated);
-        return mpc?.Value is FhirBoolean fb ? fb.Value : null;
-    }
-
-    public static bool? cgNeedsReview(this ConceptMap.TargetElementComponent te)
-    {
-        ConceptMap.MappingPropertyComponent? mpc = te.Property.FirstOrDefault(p => p.Code == CommonDefinitions.ConceptMapPropertyNeedsReview);
-        return mpc?.Value is FhirBoolean fb ? fb.Value : null;
-    }
-
-
     /// <summary>
     /// Represents a mapping between source and target elements in a ConceptMap.
     /// </summary>

@@ -965,7 +965,8 @@ public class ElementOutcomeGenerator
             }
 
             // check to see if we are mapping an array onto a non-array
-            if (elementComparisons.Any(ec => ec.SourceAllowsMoreValues == true))
+            if (elementComparisons.Any(ec => ec.SourceAllowsMoreValues == true) &&
+                !sourceIsRootEd)
             {
                 requiresCardDefinition = true;
                 outcomeComments.Add(

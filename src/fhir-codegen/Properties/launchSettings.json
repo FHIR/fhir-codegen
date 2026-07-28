@@ -257,7 +257,7 @@
         },
         "SQLite R6": {
             "commandName": "Project",
-            "commandLineArgs": "generate sqlite --drop-tables --output-file ../../temp/fhir-r6.sqlite --max-expansion-size 8000 --resolve-dependencies false -p hl7.fhir.r6.core@6.0.0-ballot4 --auto-load-expansions false --include-extended-structures true",
+            "commandLineArgs": "generate sqlite --drop-tables --output-file ../../temp/fhir-r6.sqlite --max-expansion-size 8000 --resolve-dependencies false -p hl7.fhir.r6.core@current --auto-load-expansions false --include-extended-structures true",
             "workingDirectory": "$(MSBuildProjectDirectory)"
         },
         "http": {

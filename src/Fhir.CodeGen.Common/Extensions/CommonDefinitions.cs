@@ -76,11 +76,23 @@ public static class CommonDefinitions
     public const string ExtUrlAlternateCanonical = "http://hl7.org/fhir/StructureDefinition/alternate-canonical";
     public const string ExtUrlAlternateReference = "http://hl7.org/fhir/StructureDefinition/alternate-reference";
 
-    public const string ConceptMapPropertiesSystem = "http://ginoc.io/fhir/CodeSystem/conceptmap-properties";
-    public const string ConceptMapPropertyGenerated = "cg-generated";
-    public const string ConceptMapPropertyNeedsReview = "cg-needs-review";
-    public const string ConceptMapPropertyValueDomainRelationship = "value-domain-relationship";
-    public const string ConceptMapPropertyConceptDomainRelationship = "concept-domain-relationship";
+    public const string ConceptMapPropertiesSystem = "http://hl7.org/fhir/uv/xver/CodeSystem/xver-conceptmap-properties";
+
+    /// <summary>
+    /// Boolean value that indicates whether the cardinality of the source element collapses when mapped to
+    /// the target element. E.g., 0..* string values can be concatenated into a single string value.
+    /// </summary>
+    public const string ConceptMapPropertyCardinalityCollapses = "cardinality-collapses";
+
+    /// <summary>
+    /// String value that provides guidance or notes about how the mapping should be interpreted or applied.
+    /// </summary>
+    public const string ConceptMapPropertyMappingGuidance = "mapping-guidance";
+
+    //public const string ConceptMapPropertyGenerated = "cg-generated";
+    //public const string ConceptMapPropertyNeedsReview = "cg-needs-review";
+    //public const string ConceptMapPropertyValueDomainRelationship = "value-domain-relationship";
+    //public const string ConceptMapPropertyConceptDomainRelationship = "concept-domain-relationship";
 
     public const string ConceptMapUsageContextSystem = "http://ginoc.io/fhir/CodeSystem/conceptmap-usage-context";
     public const string ConceptMapUsageContextTarget = "Target";
