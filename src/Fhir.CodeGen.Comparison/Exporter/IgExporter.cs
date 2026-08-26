@@ -407,6 +407,9 @@ public class IgExporter
         [JsonPropertyName("template")]
         public string? Template { get; set; }
 
+        [JsonPropertyName("jekyll-timeout")]
+        public int? JekyllTimeout { get; set; }
+
         [JsonPropertyName("dependencies")]
         public List<XverIgDependencyRec>? Dependencies { get; set; }
     }
@@ -734,7 +737,7 @@ public class IgExporter
                 <a href="index.html">Home</a>
               </li>
               <li class="dropdown">
-                <a data-toggle="dropdown" href="#" class="dropdown-toggle">Support
+                <a data-toggle="dropdown" href="menu.html" class="dropdown-toggle">Support
                   <b class="caret"></b>
                 </a>
                 <ul class="dropdown-menu">
@@ -779,7 +782,7 @@ public class IgExporter
                 <a href="artifacts.html">Artifacts</a>
               </li>
               <li class="dropdown">
-                <a data-toggle="dropdown" href="#" class="dropdown-toggle">Support
+                <a data-toggle="dropdown" href="menu.html" class="dropdown-toggle">Support
                   <b class="caret"></b>
                 </a>
                 <ul class="dropdown-menu">
@@ -1816,6 +1819,7 @@ public class IgExporter
         string contents = $$$"""
                     [IG]
                     ig = input/ig-{{{packageId}}}.json
+                    jekyll-timeout = {{{_xverPackageExportConfig?.JekyllTimeout ?? 60}}}
                     template = {{{template}}}
                     """;
         File.WriteAllText(filename, contents);

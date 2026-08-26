@@ -794,8 +794,12 @@ public class StructureFhirExporter
                 $" to FHIR {igTr.PackagePair.TargetFhirSequence}.",
             Status = PublicationStatus.Active,
             Experimental = false,
-            SourceScope = new Canonical($"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}"),
-            TargetScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}"),
+            SourceScope = new Canonical("http://hl7.org/fhir", igTr.PackagePair.SourcePackage.PackageVersion),
+            //SourceScope = new Canonical($"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}"),
+            //SourceScope = new Canonical($"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirSequence}"),
+            TargetScope = new Canonical("http://hl7.org/fhir", igTr.PackagePair.TargetPackage.PackageVersion),
+            //TargetScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}"),
+            //TargetScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirSequence}"),
         };
 
         return vsCm;
@@ -960,13 +964,17 @@ public class StructureFhirExporter
             Description = $"This ConceptMap represents the cross-version mapping of resource FHIR {igTr.PackagePair.SourceFhirSequence} for use in FHIR {igTr.PackagePair.TargetFhirSequence}.",
             Status = PublicationStatus.Active,
             Experimental = false,
-            SourceScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/ValueSet/resource-types"),
-            TargetScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/ValueSet/resource-types"),
+            SourceScope = new Canonical("http://hl7.org/fhir/ValueSet/resource-types", igTr.PackagePair.SourcePackage.PackageVersion),
+            //SourceScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/ValueSet/resource-types"),
+            TargetScope = new Canonical("http://hl7.org/fhir/ValueSet/resource-types", igTr.PackagePair.TargetPackage.PackageVersion),
+            //TargetScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/ValueSet/resource-types"),
             Group = [
                 new()
                 {
-                    Source = $"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/resource-types",
-                    Target = $"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/resource-types",
+                    SourceElement = new Canonical("http://hl7.org/fhir/resource-types", igTr.PackagePair.SourcePackage.PackageVersion),
+                    //Source = $"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/resource-types",
+                    TargetElement = new Canonical("http://hl7.org/fhir/resource-types", igTr.PackagePair.TargetPackage.PackageVersion),
+                    //Target = $"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/resource-types",
                     Element = [],
                 }
             ],
@@ -997,13 +1005,17 @@ public class StructureFhirExporter
             Description = $"This ConceptMap represents the cross-version mapping of complex types from FHIR {igTr.PackagePair.SourceFhirSequence} for use in FHIR {igTr.PackagePair.TargetFhirSequence}.",
             Status = PublicationStatus.Active,
             Experimental = false,
-            SourceScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/ValueSet/data-types"),
-            TargetScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/ValueSet/data-types"),
+            SourceScope = new Canonical("http://hl7.org/fhir/ValueSet/data-types", igTr.PackagePair.SourcePackage.PackageVersion),
+            //SourceScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/ValueSet/data-types"),
+            TargetScope = new Canonical("http://hl7.org/fhir/ValueSet/data-types", igTr.PackagePair.TargetPackage.PackageVersion),
+            //TargetScope = new FhirUri($"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/ValueSet/data-types"),
             Group = [
                 new()
                 {
-                    Source = $"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/data-types",
-                    Target = $"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/data-types",
+                    SourceElement = new Canonical("http://hl7.org/fhir/data-types", igTr.PackagePair.SourcePackage.PackageVersion),
+                    //Source = $"http://hl7.org/fhir/{igTr.PackagePair.SourceFhirVersionShort}/data-types",
+                    TargetElement = new Canonical("http://hl7.org/fhir/data-types", igTr.PackagePair.TargetPackage.PackageVersion),
+                    //Target = $"http://hl7.org/fhir/{igTr.PackagePair.TargetFhirVersionShort}/data-types",
                     Element = [],
                 }
             ],
