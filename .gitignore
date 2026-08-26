@@ -390,3 +390,10 @@ msbuild.wrn
 /generated/local_*
 
 *.sqlite
+
+# >>> dev-* skills (managed by dev-setup) >>>
+# Local scratch workspace for dev-* skills.
+# NOTE: /scratch is already covered by the pre-existing rule above (line 388),
+# so it is intentionally not repeated here. Removing that rule requires
+# adding /scratch to this block.
+# <<< dev-* skills (managed by dev-setup) <<<
