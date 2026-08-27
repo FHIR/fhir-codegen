@@ -623,8 +623,8 @@ public class ComparisonDatabase : IDisposable
             }
 
             List<string> deps = dc.Manifests.Keys
-                .Where(key => !key.id.StartsWith(dc.MainPackageId, StringComparison.OrdinalIgnoreCase))
-                .Select(key => key.id + "@" + key.version)
+                .Where(key => !key.Id.StartsWith(dc.MainPackageId, StringComparison.OrdinalIgnoreCase))
+                .Select(key => key.Id + "@" + key.Version)
                 .ToList();
 
             // add data about our packages

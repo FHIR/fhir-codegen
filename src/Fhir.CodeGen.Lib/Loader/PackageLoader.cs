@@ -23,6 +23,7 @@ using Microsoft.Extensions.Logging;
 using Fhir.CodeGen.Lib.Configuration;
 using Fhir.CodeGen.Lib.FhirExtensions;
 using Fhir.CodeGen.Lib.Models;
+using Fhir.CodeGen.Lib.Packaging;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Common.Polyfill;
@@ -185,10 +186,51 @@ public partial class PackageLoader : IDisposable
         _jsonModel = opts.JsonModel;
     }
 
+    /// <summary>Projects a package directive and manifest onto the codegen package identity.</summary>
+    /// <remarks>Temporary bridge over the current package backend; removed when the package source lands.</remarks>
+    private static PackageIdentity ProjectIdentity(PackageDirective directive, PackageManifest? manifest = null)
+    {
+        string packageId = directive.PackageId ?? manifest?.Name ?? string.Empty;
+
+        string version = directive.FhirCacheVersion?.ToString()
+            ?? directive.RequestedVersionParsed?.ToString()
+            ?? manifest?.Version
+            ?? directive.ResolvedVersion?.ToString()
+            ?? string.Empty;
+
+        return new PackageIdentity(packageId, version);
+    }
+
+    /// <summary>Projects a package manifest onto the codegen package manifest.</summary>
+    /// <remarks>Temporary bridge over the current package backend; removed when the package source lands.</remarks>
+    private static CodeGenPackageManifest ProjectManifest(PackageManifest manifest) => new()
+    {
+        Name = manifest.Name,
+        Version = manifest.Version,
+        CanonicalUrl = manifest.CanonicalUrl,
+        WebPublicationUrl = manifest.WebPublicationUrl,
+        Title = manifest.Title,
+        Description = manifest.Description,
+        FhirVersions = manifest.AnyFhirVersions ?? [],
+        Dependencies = manifest.Dependencies?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value ?? string.Empty)
+            ?? new Dictionary<string, string>(),
+    };
+
+    /// <summary>Projects a package index onto the codegen content listing.</summary>
+    /// <remarks>Temporary bridge over the current package backend; removed when the package source lands.</remarks>
+    private static CodeGenPackageIndex ProjectIndex(PackageIndex index) => new()
+    {
+        Files = index.Files?.Select(f => new CodeGenPackageIndexEntry
+        {
+            Filename = f.Filename,
+            RelativePath = f.FilePath,
+            ResourceType = f.ResourceType,
+        }).ToList() ?? [],
+    };
+
     /// <summary>Adds all interaction parameters to a core definition collection.</summary>
     /// <param name="dc">The device-context.</param>
-    private void AddAllInteractionParameters(DefinitionCollection dc)
-    {
+    private void AddAllInteractionParameters(DefinitionCollection dc)    {
         dc.AddHttpQueryParameter(new()
         {
             Name = "_format",
@@ -613,7 +655,7 @@ public partial class PackageLoader : IDisposable
                     throw new Exception($"Failed to parse package reference: {inputDirective}");
                 }
 
-                if (definitions?.TryGetManifest(packageDirective, out _) == true)
+                if (definitions?.TryGetManifest(ProjectIdentity(packageDirective), out _) == true)
                 {
                     // we have already loaded this package, just continue
                     continue;
@@ -681,7 +723,7 @@ public partial class PackageLoader : IDisposable
                 packageDirective = cachedPackage.Directive;
 
                 // skip if we have already loaded this package
-                if (definitions.TryGetManifest(packageDirective, out _))
+                if (definitions.TryGetManifest(ProjectIdentity(packageDirective, cachedPackage.Manifest), out _))
                 {
                     _logger.LogSkipMessage($"Skipping already loaded dependency: {packageDirective.NpmDirective}");
                     continue;
@@ -716,7 +758,7 @@ public partial class PackageLoader : IDisposable
                     PackageDirective desiredDirective = new(desiredMoniker);
 
                     await LoadPackages([desiredMoniker], definitions, requestedFhirVersion);
-                    if (definitions.TryGetManifest(desiredDirective, out _))
+                    if (definitions.TryGetManifest(ProjectIdentity(desiredDirective), out _))
                     {
                         _logger.LogPackageSubstitutionSuccess(desiredMoniker, packageDirective.NpmDirective);
                     }
@@ -751,7 +793,7 @@ public partial class PackageLoader : IDisposable
             //}
 
             // flag we are tracking this package
-            definitions.AddManifest(packageDirective, manifest);
+            definitions.AddManifest(ProjectIdentity(packageDirective, manifest), ProjectManifest(manifest));
 
             if (string.IsNullOrEmpty(definitions.MainPackageId) || (definitions.Name == manifest.Name))
             {
@@ -822,7 +864,7 @@ public partial class PackageLoader : IDisposable
 
             string packageRootDirectory = Path.Combine(packageDirectory, "..");
 
-            definitions.AddContentListing(packageDirective, packageIndex);
+            definitions.AddContentListing(ProjectIdentity(packageDirective, manifest), ProjectIndex(packageIndex));
 
             // create an dictionary of indexes we are going to load - note that we are essentially traversing twice, but that is better than projecting each time
             List<int>[] sortedFileIndexes = new List<int>[_sortedLoadOrder.Length];

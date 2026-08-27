@@ -39,7 +39,7 @@ using Fhir.CodeGen.Common.FhirExtensions;
 using Fhir.Metrics;
 using static Fhir.CodeGen.Lib.Language.Firely.CSharpFirely2;
 using Fhir.CodeGen.Common.Models;
-using Fhir.CodeGen.Packages.Models;
+using Fhir.CodeGen.Lib.Packaging;
 
 #if NETSTANDARD2_0
 using Fhir.CodeGen.Common.Polyfill;
@@ -314,8 +314,8 @@ public partial class FirelyNetIG : ILanguage
         }
 
         // check to see if there are multiple versions of FHIR loaded - IG generation can only work with a single one
-        (string id, FhirSemVer version)[] fhirCorePackageIds = info.Manifests.Keys
-            .Where(key => FhirPackageUtils.PackageIsFhirRelease(key.id))
+        PackageIdentity[] fhirCorePackageIds = info.Manifests.Keys
+            .Where(key => FhirPackageUtils.PackageIsFhirRelease(key.Id))
             .ToArray();
         int fhirCoreVersionCount = fhirCorePackageIds
             .Select(d => info.Manifests[d].Version.ToString())

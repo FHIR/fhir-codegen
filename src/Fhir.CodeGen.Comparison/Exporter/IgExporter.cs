@@ -19,7 +19,6 @@ using Hl7.Fhir.Serialization;
 using Hl7.Fhir.Utility;
 using Microsoft.Extensions.Logging;
 using Octokit;
-using static Fhir.CodeGen.Packages.Models.PackageIndex;
 
 namespace Fhir.CodeGen.Comparison.Exporter;
 
