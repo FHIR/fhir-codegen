@@ -27,6 +27,10 @@ jobs:
         lookup-only: true
 
     # If there is no cache, pre-download the packages we need
+    - uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
     - name: Install FHIR packages
       if: ${{ steps.cache-fhir-packages-test.outputs.cache-hit != 'true' }}
       continue-on-error: true
@@ -66,6 +70,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v6
+
+    - uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
 
     # Try to use a cached set of packages for Unit Testing
     - name: Restore FHIR package cache
