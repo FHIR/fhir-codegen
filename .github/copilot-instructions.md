@@ -4,7 +4,7 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 
 ## Toolchain
 
-- **.NET 9 SDK** is required. Despite what `README.md` says, every project targets `net9.0` (see `fhir-codegen.props` and `*.csproj` files). The CI workflow pins `DOTNET_VERSION: '9'`.
+- **.NET 10 SDK** is required. Despite what `README.md` says, every applicable project targets `net10.0` (see `fhir-codegen.props` and `*.csproj` files). The CI workflow pins `DOTNET_VERSION: '10'`.
 - **C# `<LangVersion>14.0</LangVersion>`**, `Nullable enable`, `ImplicitUsings enable` are set globally in `fhir-codegen.props`.
 - Solution file: `fhir-codegen.sln` at the repo root.
 - Style is enforced via `.editorconfig` and `stylecop.json`. Notable: 4-space indent, CRLF, accessibility modifiers required, copyright header on every `.cs` file:
@@ -22,7 +22,7 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 dotnet build fhir-codegen.sln -c Release
 
 # Full test suite (matches CI; skips tests that need external FHIR IG repos)
-dotnet test --configuration Release --framework net9.0 --filter "RequiresExternalRepo!=true"
+dotnet test --configuration Release --framework net10.0 --filter "RequiresExternalRepo!=true"
 
 # Run a single test class or method (xUnit + Shouldly)
 dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName~GenerationTests"
@@ -72,7 +72,7 @@ Different FHIR major versions ship as separate `Hl7.Fhir.*` assemblies whose typ
 ### Coding style preferences (from custom instructions)
 - Prefer **explicit types** in C#; use `var` only when the type is obvious from the right-hand side.
 - Use **collection expressions `[]`** for empty initializers, not `new List<T>()` / `new()`.
-- Prefer C# 14 / .NET 10 features when adding new code (this repo targets .NET 9 today; don't downgrade to older patterns when newer ones are cleaner).
+- Prefer C# 14 / .NET 10 features when adding new code (this repo targets .NET 10 today; don't downgrade to older patterns when newer ones are cleaner).
 - HTTP services (where present) listen on **HTTP only** — no `UseHttpsRedirection`/`UseHsts`; HTTPS is terminated by a reverse proxy.
 - If adding SQLite interaction code, prefer the `cslightdbgen.sqlitegen` NuGet package over hand-rolled ADO.
 

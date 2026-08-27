@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  DOTNET_VERSION: '9'
+  DOTNET_VERSION: '10'
 
 jobs:
   build:

@@ -9,7 +9,7 @@ on:
     - '**.csproj'
 
 env:
-  DOTNET_VERSION: '9'           # The .NET SDK version to use
+  DOTNET_VERSION: '10'           # The .NET SDK version to use
 
 jobs:
   cache-fhir-packages:
@@ -80,22 +80,22 @@ jobs:
       if: runner.arch == 'X86'
       run: |
         dotnet restore -a x86
-        dotnet test --configuration Release --no-restore --framework net9.0 --verbosity detailed --filter "RequiresExternalRepo!=true" -a x86
+        dotnet test --configuration Release --no-restore --framework net10.0 --verbosity detailed --filter "RequiresExternalRepo!=true" -a x86
 
     - name: Restore, build, and test x64
       if: runner.arch == 'X64'
       run: |
         dotnet restore -a x64
-        dotnet test --configuration Release --no-restore --framework net9.0 --verbosity detailed --filter "RequiresExternalRepo!=true" -a x64
+        dotnet test --configuration Release --no-restore --framework net10.0 --verbosity detailed --filter "RequiresExternalRepo!=true" -a x64
 
     - name: Restore, build, and test ARM
       if: runner.arch == 'ARM'
       run: |
         dotnet restore -a arm
-        dotnet test --configuration Release --no-restore --framework net9.0 --verbosity detailed --filter "RequiresExternalRepo!=true" -a arm
+        dotnet test --configuration Release --no-restore --framework net10.0 --verbosity detailed --filter "RequiresExternalRepo!=true" -a arm
 
     - name: Restore, build, and test ARM64
       if: runner.arch == 'ARM64'
       run: |
         dotnet restore -a arm64
-        dotnet test --configuration Release --no-restore --framework net9.0 --verbosity detailed --filter "RequiresExternalRepo!=true" -a arm64
+        dotnet test --configuration Release --no-restore --framework net10.0 --verbosity detailed --filter "RequiresExternalRepo!=true" -a arm64

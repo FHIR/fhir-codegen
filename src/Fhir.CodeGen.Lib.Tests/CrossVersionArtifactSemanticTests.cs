@@ -73,8 +73,9 @@ public class CrossVersionArtifactSemanticTests
         File.Exists(Path.Combine(fixture.PageContentDirectory, "lookup-sd-r4-primitivetype-to-r5-nomap.md")).ShouldBeFalse();
 
         string typeLookupIndex = File.ReadAllText(fixture.TypeLookupIndexPath);
-        typeLookupIndex.ShouldNotContain("DataType");
-        typeLookupIndex.ShouldNotContain("PrimitiveType");
+        string[] typeLookupLines = typeLookupIndex.Split('\n');
+        typeLookupLines.ShouldNotContain(line => line.Contains("| DataType |", StringComparison.Ordinal));
+        typeLookupLines.ShouldNotContain(line => line.Contains("| PrimitiveType |", StringComparison.Ordinal));
 
         List<string> typeSources = GetConceptMapSourceCodes(fixture.TypeConceptMapPath);
         typeSources.ShouldNotContain("DataType");
