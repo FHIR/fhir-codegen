@@ -114,7 +114,7 @@ check exists.
 
 **xUnit 2.9.3** with **Shouldly 4.3.0** for assertions — *not*
 FluentAssertions. The runner is **VSTest**
-(`Microsoft.NET.Test.Sdk 17.14.1` + `xunit.runner.visualstudio 3.1.5`);
+(`Microsoft.NET.Test.Sdk 18.9.0` + `xunit.runner.visualstudio 4.0.0`);
 there is no `global.json` `"runner"` entry and no `OutputType=Exe` test
 project, so **Microsoft.Testing.Platform is not in use**.
 
