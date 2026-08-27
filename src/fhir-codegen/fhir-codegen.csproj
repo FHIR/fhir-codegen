@@ -18,15 +18,14 @@
 
   <ItemGroup>
 	<PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
-	<PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.15" />
-	<PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="9.0.15" />
-	<PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="9.0.15" />
-	<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.15" />
-    <PackageReference Include="System.CommandLine" Version="2.0.7" />
-    <PackageReference Include="System.Text.Json" Version="9.0.15" />
+	<PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.11" />
+	<PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.11" />
+	<PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.11" />
+	<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
+    <PackageReference Include="System.CommandLine" Version="2.0.11" />
   </ItemGroup>
 
   <ItemGroup>

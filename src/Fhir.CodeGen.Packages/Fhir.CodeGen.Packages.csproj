@@ -7,7 +7,6 @@
 
   <ItemGroup>
     <PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
-    <PackageReference Include="System.Text.RegularExpressions" Version="4.3.1" />
   </ItemGroup>
 
   <ItemGroup>

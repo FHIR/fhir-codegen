@@ -15,10 +15,10 @@
 
   <ItemGroup>
     <PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
   </ItemGroup>
 
   <ItemGroup>

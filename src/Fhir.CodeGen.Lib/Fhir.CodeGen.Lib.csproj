@@ -31,12 +31,12 @@
 
   <ItemGroup>
     <PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
     <PackageReference Include="Microsoft.OpenApi" Version="1.6.29" />
-    <PackageReference Include="System.CommandLine" Version="2.0.7" />
+    <PackageReference Include="System.CommandLine" Version="2.0.11" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
@@ -44,7 +44,7 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="System.Text.Json" Version="9.0.6" />
+    <PackageReference Include="System.Text.Json" Version="10.0.11" />
   </ItemGroup>
 
   <ItemGroup>

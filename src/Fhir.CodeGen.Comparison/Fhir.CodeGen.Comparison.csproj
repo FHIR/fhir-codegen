@@ -28,7 +28,7 @@
 
   <ItemGroup>
     <PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
 
     <!--
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.2">
@@ -39,12 +39,12 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.2" />
     -->
 
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.15" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.11" />
     <PackageReference Include="Microsoft.OpenApi" Version="1.6.29" />
     <PackageReference Include="Octokit" Version="14.0.0" />
-    <PackageReference Include="System.CommandLine" Version="2.0.7" />
+    <PackageReference Include="System.CommandLine" Version="2.0.11" />
   </ItemGroup>
 
   <Target Name="AddPackageAliases" BeforeTargets="ResolveReferences" Outputs="%(PackageReference.Identity)">
