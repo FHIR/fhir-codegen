@@ -10,10 +10,6 @@ using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
-using Fhir.CodeGen.Packages;
-using Fhir.CodeGen.Packages.CacheClients;
-using Fhir.CodeGen.Packages.Models;
-using Fhir.CodeGen.Packages.RegistryClients;
 using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Language.Debugging;
 using Hl7.Fhir.Model;
@@ -76,8 +72,7 @@ public partial class PackageLoader : IDisposable
     private const int _packageAccessTimeout = 5 * 60 * 1000;
 
     private readonly HttpClient _httpClient;
-    private readonly IFhirCacheClient _cache;
-    private readonly List<IPackageRegistryClient> _packageClients = [];
+    private readonly ICodeGenPackageSource _packageSource;
 
     private bool _disposedValue = false;
 
@@ -131,6 +126,9 @@ public partial class PackageLoader : IDisposable
         HttpClient? httpClient = null)
     {
         _logger = (config?.LogFactory ?? LoggerFactory.Create(builder => builder.AddConsole())).CreateLogger<PackageLoader>();
+
+        // the package library owns its own HTTP client factory; this one serves the direct
+        // downloads and cross-version fetches that this class still performs itself
         _httpClient = httpClient ?? new();
 
         // use defaults if nothing was specified
@@ -138,42 +136,7 @@ public partial class PackageLoader : IDisposable
 
         _rootConfiguration = config ?? new();
 
-        // check if we are using the official registries
-        if (_rootConfiguration.UseOfficialRegistries == true)
-        {
-            foreach (RegistryEndpointRecord endpoint in RegistryEndpointRecord.DefaultEndpoints)
-            {
-                _packageClients.Add(IPackageRegistryClient.Create(endpoint, _httpClient));
-            }
-        }
-
-        if (_rootConfiguration.AdditionalFhirRegistryUrls.Length != 0)
-        {
-            foreach (string url in _rootConfiguration.AdditionalFhirRegistryUrls)
-            {
-                RegistryEndpointRecord endpoint = new()
-                {
-                    RegistryType = RegistryEndpointRecord.RegistryTypeCodes.FhirNpm,
-                    Url = url,
-                };
-                _packageClients.Add(IPackageRegistryClient.Create(endpoint, _httpClient));
-            }
-        }
-
-        if (_rootConfiguration.AdditionalNpmRegistryUrls.Length != 0)
-        {
-            foreach (string url in _rootConfiguration.AdditionalNpmRegistryUrls)
-            {
-                RegistryEndpointRecord endpoint = new()
-                {
-                    RegistryType = RegistryEndpointRecord.RegistryTypeCodes.Npm,
-                    Url = url,
-                };
-                _packageClients.Add(IPackageRegistryClient.Create(endpoint, _httpClient));
-            }
-        }
-
-        _cache = new DiskCacheClient(_rootConfiguration.FhirCacheDirectory, registryClients: _packageClients, httpClient: _httpClient);
+        _packageSource = new FhirPkgPackageSource(_rootConfiguration, _rootConfiguration.LogFactory);
 
         _defaultFhirVersion = FhirReleases.FhirVersionToSequence(_rootConfiguration.FhirVersion);
 
@@ -185,48 +148,6 @@ public partial class PackageLoader : IDisposable
 #endif
         _jsonModel = opts.JsonModel;
     }
-
-    /// <summary>Projects a package directive and manifest onto the codegen package identity.</summary>
-    /// <remarks>Temporary bridge over the current package backend; removed when the package source lands.</remarks>
-    private static PackageIdentity ProjectIdentity(PackageDirective directive, PackageManifest? manifest = null)
-    {
-        string packageId = directive.PackageId ?? manifest?.Name ?? string.Empty;
-
-        string version = directive.FhirCacheVersion?.ToString()
-            ?? directive.RequestedVersionParsed?.ToString()
-            ?? manifest?.Version
-            ?? directive.ResolvedVersion?.ToString()
-            ?? string.Empty;
-
-        return new PackageIdentity(packageId, version);
-    }
-
-    /// <summary>Projects a package manifest onto the codegen package manifest.</summary>
-    /// <remarks>Temporary bridge over the current package backend; removed when the package source lands.</remarks>
-    private static CodeGenPackageManifest ProjectManifest(PackageManifest manifest) => new()
-    {
-        Name = manifest.Name,
-        Version = manifest.Version,
-        CanonicalUrl = manifest.CanonicalUrl,
-        WebPublicationUrl = manifest.WebPublicationUrl,
-        Title = manifest.Title,
-        Description = manifest.Description,
-        FhirVersions = manifest.AnyFhirVersions ?? [],
-        Dependencies = manifest.Dependencies?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value ?? string.Empty)
-            ?? new Dictionary<string, string>(),
-    };
-
-    /// <summary>Projects a package index onto the codegen content listing.</summary>
-    /// <remarks>Temporary bridge over the current package backend; removed when the package source lands.</remarks>
-    private static CodeGenPackageIndex ProjectIndex(PackageIndex index) => new()
-    {
-        Files = index.Files?.Select(f => new CodeGenPackageIndexEntry
-        {
-            Filename = f.Filename,
-            RelativePath = f.FilePath,
-            ResourceType = f.ResourceType,
-        }).ToList() ?? [],
-    };
 
     /// <summary>Adds all interaction parameters to a core definition collection.</summary>
     /// <param name="dc">The device-context.</param>
@@ -634,28 +555,27 @@ public partial class PackageLoader : IDisposable
                 }
             }
 
-            PackageDirective packageDirective = new(inputDirective);
+            CodeGenPackageDirective packageDirective = _packageSource.Parse(inputDirective);
 
-            if ((packageDirective is null) ||
-                (packageDirective.PackageId is null))
+            if (packageDirective.PackageId is null)
             {
                 throw new Exception($"Failed to parse package reference: {inputDirective}");
             }
 
             // check to see if this is an explicit request for a FHIR release that is no longer available
             if (FhirPackageUtils.PackageIsFhirRelease(packageDirective.PackageId) &&
-                (packageDirective.VersionType == PackageDirective.DirectiveVersionCodes.Exact) &&
+                packageDirective.IsExactVersion &&
                 FhirReleases.VersionIsUnavailable(packageDirective.RequestedVersion ?? string.Empty))
             {
-                packageDirective = new(packageDirective.PackageId, FhirReleases.GetCurrentPatch(packageDirective.RequestedVersion ?? string.Empty));
+                packageDirective = _packageSource.Parse(
+                    packageDirective.PackageId + "@" + FhirReleases.GetCurrentPatch(packageDirective.RequestedVersion ?? string.Empty));
 
-                if ((packageDirective is null) ||
-                    (packageDirective.PackageId is null))
+                if (packageDirective.PackageId is null)
                 {
                     throw new Exception($"Failed to parse package reference: {inputDirective}");
                 }
 
-                if (definitions?.TryGetManifest(ProjectIdentity(packageDirective), out _) == true)
+                if (definitions?.TryGetManifest(packageDirective.PackageId, packageDirective.RequestedVersion ?? string.Empty, out _) == true)
                 {
                     // we have already loaded this package, just continue
                     continue;
@@ -677,94 +597,106 @@ public partial class PackageLoader : IDisposable
                 }
             }
 
-            CachedPackageRecord? cachedPackage = null;
-
-            using Mutex packageAccessMutex = new Mutex(true, "fcg-" + packageDirective.RequestedDirective, out bool mutexCreated);
+            // check if we are flagged to load expansions and this is a core package
+            if (autoLoadExpansions &&
+                (
+                    FhirPackageUtils.PackageIsFhirCore(packageDirective.PackageId) ||
+                    FhirPackageUtils.PackageIsFhirCorePartial(packageDirective.PackageId)
+                ) &&
+                (packageDirective.PackageId != "hl7.fhir.r2.core"))
             {
-                // if we did not create the mutex, we need to wait for it
-                if (!mutexCreated &&
-                    !packageAccessMutex.WaitOne(_packageAccessTimeout))
-                {
-                    _logger.LogSynchronizationFailed(packageDirective.RequestedDirective);
-                    throw new Exception($"Failed to access the synchronization object for {packageDirective.RequestedDirective}");
-                }
+                string expansionPackageName = packageDirective.PackageId.Replace(".core", ".expansions");
+                string expansionDirective = expansionPackageName +
+                    "@" +
+                    (packageDirective.RequestedVersion ?? "latest");
 
-                // check if we are flagged to load expansions and this is a core package
-                if (autoLoadExpansions &&
-                    (
-                        FhirPackageUtils.PackageIsFhirCore(packageDirective.PackageId) ||
-                        FhirPackageUtils.PackageIsFhirCorePartial(packageDirective.PackageId)
-                    ) &&
-                    (packageDirective.PackageId != "hl7.fhir.r2.core"))
-                {
-                    string expansionPackageName = packageDirective.PackageId.Replace(".core", ".expansions");
-                    string expansionDirective = expansionPackageName +
-                        "@" +
-                        (packageDirective.FhirCacheVersion?.ToString() ?? packageDirective.RequestedVersion ?? "latest");
+                _logger.LogAutoExpansionMessage($"Auto-loading core expansions: {expansionDirective}...");
 
-                    _logger.LogAutoExpansionMessage($"Auto-loading core expansions: {expansionDirective}...");
-
-                    await LoadPackages([expansionDirective], definitions, requestedFhirVersion);
-                }
-
-                _logger.LogProcessingStartMessage(packageDirective.AnyDirective);
-
-                //cachedPackage = await _cache.GetOrInstallAsync(packageDirective.RequestedDirective, false).ConfigureAwait(true);
-                cachedPackage = _cache.GetOrInstallAsync(packageDirective.RequestedDirective, false).Result;
-                if ((cachedPackage is null) ||
-                    (cachedPackage.Directive is null) ||
-                    (cachedPackage.Directive.PackageId is null) ||
-                    (cachedPackage.Directive.NpmDirective is null))
-                {
-                    // failed to install
-                    throw new Exception($"Failed to install package {packageDirective.RequestedDirective} as requested by {inputDirective}");
-                }
-
-                packageDirective = cachedPackage.Directive;
-
-                // skip if we have already loaded this package
-                if (definitions.TryGetManifest(ProjectIdentity(packageDirective, cachedPackage.Manifest), out _))
-                {
-                    _logger.LogSkipMessage($"Skipping already loaded dependency: {packageDirective.NpmDirective}");
-                    continue;
-                }
-
-                // release our mutex
-                packageAccessMutex.ReleaseMutex();
+                await LoadPackages([expansionDirective], definitions, requestedFhirVersion);
             }
 
-            if (cachedPackage.Manifest is null)
+            _logger.LogProcessingStartMessage(packageDirective.AnyDirective);
+
+            string installDirective = packageDirective.RawDirective;
+
+            // the cross-process guard is a named Mutex, which may only be released by the thread
+            // that took it - so the wait, the install, and the release all run on one dedicated thread
+            CodeGenPackage? cachedPackage = await Tasks.Task.Factory.StartNew(
+                () =>
+                {
+                    using Mutex packageAccessMutex = new Mutex(true, "fcg-" + installDirective, out bool mutexCreated);
+
+                    // if we did not create the mutex, we need to wait for it
+                    if (!mutexCreated &&
+                        !packageAccessMutex.WaitOne(_packageAccessTimeout))
+                    {
+                        _logger.LogSynchronizationFailed(installDirective);
+                        throw new Exception($"Failed to access the synchronization object for {installDirective}");
+                    }
+
+                    try
+                    {
+                        return _packageSource.GetOrInstallAsync(installDirective).GetAwaiter().GetResult();
+                    }
+                    finally
+                    {
+                        packageAccessMutex.ReleaseMutex();
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default).ConfigureAwait(false);
+
+            if ((cachedPackage is null) ||
+                string.IsNullOrEmpty(cachedPackage.Identity.Id) ||
+                string.IsNullOrEmpty(cachedPackage.Identity.Version))
             {
-                throw new Exception("Failed to load package manifest");
+                // failed to install
+                throw new Exception($"Failed to install package {installDirective} as requested by {inputDirective}");
             }
 
-            PackageManifest manifest = cachedPackage.Manifest;
+            packageDirective = packageDirective with
+            {
+                PackageId = cachedPackage.Identity.Id,
+                ResolvedVersion = cachedPackage.Identity.Version,
+            };
+
+            // skip if we have already loaded this package
+            if (definitions.TryGetManifest(cachedPackage.Identity, out _))
+            {
+                _logger.LogSkipMessage($"Skipping already loaded dependency: {packageDirective.NpmDirective}");
+                continue;
+            }
+
+            string resolvedDirective = cachedPackage.Identity.Id + "@" + cachedPackage.Identity.Version;
+
+            CodeGenPackageManifest manifest = cachedPackage.Manifest;
 
             // check to see if we have a restricted FHIR version and need to filter
             if ((!string.IsNullOrEmpty(requestedFhirVersion)) &&
                 (definitions.FhirSequence != FhirReleases.FhirSequenceCodes.Unknown) &&
-                (manifest.AnyFhirVersions?.FirstOrDefault() is string manifestFhirVersion) &&
+                (manifest.FhirVersions.FirstOrDefault() is string manifestFhirVersion) &&
                 !string.IsNullOrEmpty(manifestFhirVersion) &&
                 (definitions.FhirSequence != FhirReleases.FhirVersionToSequence(manifestFhirVersion)))
             {
                 _logger.LogPackageFhirMismatch(packageDirective.AnyDirective, manifestFhirVersion, fhirVersion);
 
                 // check for NOT having a version already specified
-                if (packageDirective.NameType != PackageDirective.DirectiveNameTypeCodes.GuideWithSuffix)
+                if (!packageDirective.IsGuideWithFhirSuffix)
                 {
                     string requiredRLiteral = definitions.FhirSequence.ToRLiteral().ToLowerInvariant();
                     string desiredMoniker = $"{packageDirective.PackageId}.{requiredRLiteral}@{packageDirective.ResolvedVersion}";
 
-                    PackageDirective desiredDirective = new(desiredMoniker);
+                    CodeGenPackageDirective desiredDirective = _packageSource.Parse(desiredMoniker);
 
                     await LoadPackages([desiredMoniker], definitions, requestedFhirVersion);
-                    if (definitions.TryGetManifest(ProjectIdentity(desiredDirective), out _))
+                    if (definitions.TryGetManifest(desiredDirective.PackageId ?? string.Empty, desiredDirective.RequestedVersion ?? string.Empty, out _))
                     {
-                        _logger.LogPackageSubstitutionSuccess(desiredMoniker, packageDirective.NpmDirective);
+                        _logger.LogPackageSubstitutionSuccess(desiredMoniker, resolvedDirective);
                     }
                     else
                     {
-                        _logger.LogPackageSubstitutionFailure(packageDirective.NpmDirective);
+                        _logger.LogPackageSubstitutionFailure(resolvedDirective);
                     }
                 }
 
@@ -793,17 +725,17 @@ public partial class PackageLoader : IDisposable
             //}
 
             // flag we are tracking this package
-            definitions.AddManifest(ProjectIdentity(packageDirective, manifest), ProjectManifest(manifest));
+            definitions.AddManifest(cachedPackage.Identity, manifest);
 
             if (string.IsNullOrEmpty(definitions.MainPackageId) || (definitions.Name == manifest.Name))
             {
                 definitions.MainPackageId = manifest.Name;
                 definitions.MainPackageVersion = manifest.Version;
                 definitions.MainPackageCanonical = manifest.CanonicalUrl
-                    ?? throw new Exception($"Package manifest for {packageDirective.NpmDirective} does not contain a canonical URL");
+                    ?? throw new Exception($"Package manifest for {resolvedDirective} does not contain a canonical URL");
             }
 
-            string? packageFhirVersionLiteral = manifest.AnyFhirVersions?.FirstOrDefault();
+            string? packageFhirVersionLiteral = manifest.FhirVersions.FirstOrDefault();
 
             // update the collection FHIR version based on the first package we come across with one
             if (string.IsNullOrEmpty(definitions.FhirVersionLiteral) && (!string.IsNullOrEmpty(packageFhirVersionLiteral)))
@@ -832,20 +764,19 @@ public partial class PackageLoader : IDisposable
             CreateConverterIfRequired(definitions.FhirSequence);
 
             // if we are resolving dependencies, check them now
-            if (resolveDependencies && (manifest.Dependencies?.Any() ?? false))
+            if (resolveDependencies && manifest.Dependencies.Any())
             {
                 await LoadPackages(manifest.Dependencies.Select(kvp => $"{kvp.Key}@{kvp.Value}"), definitions, requestedFhirVersion);
-                _logger.LogPackageDependenciesResolved(packageDirective.NpmDirective);
+                _logger.LogPackageDependenciesResolved(resolvedDirective);
             }
             else
             {
-                _logger.LogPackageLoading(packageDirective.NpmDirective);
+                _logger.LogPackageLoading(resolvedDirective);
             }
 
             // grab the contents of our package
-            PackageIndex packageIndex = cachedPackage.FileIndex
-                ?? throw new Exception($"Package {packageDirective.NpmDirective} did not parse a package index!");
-            string packageDirectory = cachedPackage.GetContentPath();
+            CodeGenPackageIndex packageIndex = cachedPackage.Index;
+            string packageDirectory = cachedPackage.ContentPath;
 
             if (!Directory.Exists(packageDirectory))
             {
@@ -864,7 +795,7 @@ public partial class PackageLoader : IDisposable
 
             string packageRootDirectory = Path.Combine(packageDirectory, "..");
 
-            definitions.AddContentListing(ProjectIdentity(packageDirective, manifest), ProjectIndex(packageIndex));
+            definitions.AddContentListing(cachedPackage.Identity, packageIndex);
 
             // create an dictionary of indexes we are going to load - note that we are essentially traversing twice, but that is better than projecting each time
             List<int>[] sortedFileIndexes = new List<int>[_sortedLoadOrder.Length];
@@ -876,7 +807,7 @@ public partial class PackageLoader : IDisposable
 
             // traverse our files
             int fileIndex = 0;
-            foreach (PackageIndex.IndexFile resourceListing in packageIndex.Files)
+            foreach (CodeGenPackageIndexEntry resourceListing in packageIndex.Files)
             {
                 int loadIndex = Array.IndexOf(_sortedLoadOrder, resourceListing.ResourceType);
                 if (loadIndex < 0)
@@ -978,7 +909,7 @@ public partial class PackageLoader : IDisposable
 
                 foreach (int fi in sortedFileIndexes[i])
                 {
-                    PackageIndex.IndexFile pFile = packageIndex.Files[fi];
+                    CodeGenPackageIndexEntry pFile = packageIndex.Files[fi];
 
                     if (pFile.Filename is null)
                     {
@@ -986,8 +917,8 @@ public partial class PackageLoader : IDisposable
                     }
 
                     // load the file
-                    string path = pFile.FilePath is not null
-                        ? Path.Combine(packageRootDirectory, pFile.FilePath)
+                    string path = pFile.RelativePath is not null
+                        ? Path.Combine(packageRootDirectory, pFile.RelativePath)
                         : Path.Combine(packageDirectory, pFile.Filename);
 
                     if (!File.Exists(path))
@@ -1115,8 +1046,8 @@ public partial class PackageLoader : IDisposable
             }
 
             // check to see if this package is a 'core' FHIR package to add missing contents
-            if ((manifest.Type == "core") ||
-                (manifest.Type == "fhir.core") ||
+            if ((manifest.PackageType == "core") ||
+                (manifest.PackageType == "fhir.core") ||
                 FhirPackageUtils.PackageIsFhirRelease(packageDirective.PackageId))
             {
                 AddMissingCoreSearchParameters(definitions!, manifest.Name, manifest.Version);
@@ -1597,6 +1528,8 @@ public partial class PackageLoader : IDisposable
                         _converter_20_50 = null;
                     }
                 }
+
+                _packageSource.Dispose();
             }
 
             // TODO: free unmanaged resources (unmanaged objects) and override finalizer

@@ -17,6 +17,11 @@ namespace Fhir.CodeGen.Lib.Packaging;
 /// </remarks>
 internal interface ICodeGenPackageSource : IDisposable
 {
+    /// <summary>Parses a package directive into its component parts.</summary>
+    /// <param name="directive">The package directive to parse, for example <c>hl7.fhir.r4.core#4.0.1</c>.</param>
+    /// <returns>The parsed directive; <see cref="CodeGenPackageDirective.PackageId"/> is null when the directive could not be understood.</returns>
+    CodeGenPackageDirective Parse(string directive);
+
     /// <summary>Resolves a package directive, installing the package if it is not already present.</summary>
     /// <param name="directive">The package directive to resolve, for example <c>hl7.fhir.r4.core#4.0.1</c>.</param>
     /// <param name="cancellationToken">A token that may be used to cancel the operation.</param>

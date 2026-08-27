@@ -29,6 +29,9 @@ public record class CodeGenPackageManifest
     /// <summary>Gets the package description.</summary>
     public string? Description { get; init; } = null;
 
+    /// <summary>Gets the declared package type, for example <c>fhir.core</c> or <c>fhir.ig</c>.</summary>
+    public string? PackageType { get; init; } = null;
+
     /// <summary>Gets the FHIR versions this package targets.</summary>
     public IReadOnlyList<string> FhirVersions { get; init; } = [];
 

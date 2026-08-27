@@ -4,6 +4,7 @@
 // </copyright>
 
 using System;
+using FhirPkg.Models;
 
 namespace Fhir.CodeGen.Lib.Packaging;
 
@@ -16,7 +17,29 @@ internal static class PackageVersionMatcher
     /// <returns>True when the candidate satisfies the request; otherwise false. Never throws.</returns>
     public static bool Satisfies(string candidateVersion, string requestedVersion)
     {
-        // TODO: delegate range and wildcard matching to the package library's version parser.
-        return string.Equals(candidateVersion, requestedVersion, StringComparison.Ordinal);
+        if (string.IsNullOrEmpty(candidateVersion) || string.IsNullOrEmpty(requestedVersion))
+        {
+            return false;
+        }
+
+        if (string.Equals(candidateVersion, requestedVersion, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (!FhirSemVer.TryParse(candidateVersion, out FhirSemVer? candidate) || (candidate is null))
+        {
+            return false;
+        }
+
+        try
+        {
+            return candidate.Satisfies(requestedVersion);
+        }
+        catch (Exception)
+        {
+            // moving tokens (`latest`, `current`, `dev`) and unorderable wildcards are not a match
+            return false;
+        }
     }
 }
