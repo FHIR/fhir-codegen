@@ -76,6 +76,7 @@ public API changes in `Fhir.CodeGen.*` are breaking changes.
   (the `Hl7.Fhir.*` family is currently `5.13.3` everywhere).
 - **Warnings are not errors.** No project sets `TreatWarningsAsErrors`,
   `EnforceCodeStyleInBuild`, `AnalysisLevel`, or `AnalysisMode`.
+- Accepted framework-adjacent package baselines after the .NET 10 upgrade: `Microsoft.Extensions.*` and `Microsoft.Data.Sqlite` are `10.0.11`, `System.CommandLine` is `2.0.11`, retained `System.Text.Json` references are `10.0.11`, and SQLite generator Roslyn packages are `5.9.0`. The FHIR family remains deferred at `5.13.3`, and `Microsoft.OpenApi` remains deferred at `1.6.29`.
 - Tests need the **FHIR package cache** populated — see "Test" below.
 
 ---

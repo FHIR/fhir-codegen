@@ -6,6 +6,7 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 
 - **.NET 10 SDK** is required. Despite what `README.md` says, every applicable project targets `net10.0` (see `fhir-codegen.props` and `*.csproj` files). The CI workflow pins `DOTNET_VERSION: '10'`.
 - **C# `<LangVersion>14.0</LangVersion>`**, `Nullable enable`, `ImplicitUsings enable` are set globally in `fhir-codegen.props`.
+- Current package baselines after the .NET 10 upgrade: `Microsoft.Extensions.*`, `Microsoft.Data.Sqlite`, and retained `System.Text.Json` references are `10.0.11`; `System.CommandLine` is `2.0.11`; test infrastructure is `Microsoft.NET.Test.Sdk 18.9.0`, `xunit.runner.visualstudio 4.0.0`, and `coverlet.collector 10.0.1`; SQLite generator Roslyn packages are `5.9.0`. FHIR packages stay on `5.13.3`, and `Microsoft.OpenApi` stays on `1.6.29`, until their deferred migration plans are done.
 - Solution file: `fhir-codegen.sln` at the repo root.
 - Style is enforced via `.editorconfig` and `stylecop.json`. Notable: 4-space indent, CRLF, accessibility modifiers required, copyright header on every `.cs` file:
   ```csharp
