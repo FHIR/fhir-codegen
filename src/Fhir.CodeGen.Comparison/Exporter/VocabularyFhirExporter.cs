@@ -357,8 +357,10 @@ public class VocabularyFhirExporter
             Description = $"This ConceptMap represents the cross-version mapping of concepts from ValueSet `{sourceVs.VersionedUrl}` for use in FHIR {igTr.PackagePair.TargetFhirSequence}.",
             Status = PublicationStatus.Active,
             Experimental = false,
-            SourceScope = new FhirUri(sourceVs.VersionedUrl),
-            TargetScope = new FhirUri(targetVs.VersionedUrl),
+            SourceScope = new Canonical(sourceVs.VersionedUrl),
+            //SourceScope = new FhirUri(sourceVs.VersionedUrl),
+            TargetScope = new Canonical(targetVs.VersionedUrl),
+            //TargetScope = new FhirUri(targetVs.VersionedUrl),
         };
 
         return vsCm;

@@ -1,4 +1,4 @@
-﻿// <copyright file="ConfigSql.cs" company="Microsoft Corporation">
+// <copyright file="ConfigSql.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -24,10 +24,11 @@ public class ConfigSql : ConfigRoot
     {
         Name = "View_Definition_Directory",
         DefaultValue = "",
-        CliOption = new System.CommandLine.Option<string>("--view-definition-directory", "Local path to a source for view definitions to load.")
+        CliOption = new System.CommandLine.Option<string>("--view-definition-directory")
         {
+            Description = "Local path to a source for view definitions to load.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -42,10 +43,11 @@ public class ConfigSql : ConfigRoot
     {
         Name = "Export_Database_Name",
         DefaultValue = "export.sqlite",
-        CliOption = new System.CommandLine.Option<string>("--export-db-name", "Name of the database to generate.")
+        CliOption = new System.CommandLine.Option<string>("--export-db-name")
         {
+            Description = "Name of the database to generate.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -64,7 +66,7 @@ public class ConfigSql : ConfigRoot
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

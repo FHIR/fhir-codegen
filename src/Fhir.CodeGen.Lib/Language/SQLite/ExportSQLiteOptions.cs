@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Text;
 using Fhir.CodeGen.Lib.Configuration;
@@ -17,10 +17,11 @@ public class ExportSQLiteOptions : ConfigGenerate
     {
         Name = "IncludeExtendedStructures",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--include-extended-structures", "If extended structures (e.g., profiles, extensions) should be included.")
+        CliOption = new System.CommandLine.Option<bool>("--include-extended-structures")
         {
+            Description = "If extended structures (e.g., profiles, extensions) should be included.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -33,10 +34,11 @@ public class ExportSQLiteOptions : ConfigGenerate
     {
         Name = "DropTables",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--drop-tables", "If tables should be dropped before processing")
+        CliOption = new System.CommandLine.Option<bool>("--drop-tables")
         {
+            Description = "If tables should be dropped before processing",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -50,7 +52,7 @@ public class ExportSQLiteOptions : ConfigGenerate
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

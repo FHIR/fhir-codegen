@@ -1,6 +1,6 @@
 ---
 name: dev-review
-description: "Performs a two-track code-quality and QA review in the role of a staff-level Engineering Lead and a staff-level QA Lead, then synthesizes both critiques into a single `analysis.md` suitable to hand back to the engineering team. USE FOR: pre-PR self-review, post-`dev-do` quality gates, ad-hoc deep reviews of a change set. Accepts either a full path to the analysis file or a short slot number that expands to `scratch/[MMDD]-[##]/analysis.md`. Optional `max_subagents` (default 3) caps parallel sub-agent fan-out. Engineering review covers antipatterns, unoptimized hot paths, consistency errors, dead code, and design issues; QA review covers test coverage, edge cases, regression risk, and verifiability. Read-only with respect to the codebase — never modifies source, never commits, never pushes."
+description: "Performs a two-track code-quality and QA review in the roles of a staff-level Engineering Lead and QA Lead, then synthesizes both critiques into a single `analysis.md`. USE FOR: pre-PR self-review, post-`dev-do` quality gates, ad-hoc deep reviews of a change set. Accepts either a full path to the analysis file or a short slot number that expands to `scratch/[MMDD]-[##]/analysis.md`. Optional `max_subagents` (default 3) caps parallel sub-agent fan-out. Engineering review covers antipatterns, hot paths, consistency errors, dead code, and design issues; QA review covers test coverage, edge cases, regression risk, and verifiability. Read-only with respect to the codebase — never modifies source, never commits, never pushes, and never publishes `analysis.md` to GitHub. Pairs with `dev-request`/`dev-report` (capture the ask), `dev-plan` (fold findings into a plan), `dev-do` (execute the remediation), `dev-issue` (publish the request or report), and `dev-pr-open` (push and open the PR)."
 ---
 
 # Dev Review Skill
@@ -36,18 +36,23 @@ Your concerns:
   blocking I/O on hot threads, repeated work that could be cached,
   algorithmic complexity that doesn't match the data shape.
 - **Consistency** — does this change follow the patterns already
-  established in this repo? Naming, error handling, logging, DI
-  registration, project layout, the documented conventions
-  (e.g., explicit C# types, `[]` for empty collections,
-  `dotnet build fhir-augury.slnx` as the canonical build).
+  established in this repository? Naming, exception handling, logging,
+  resource lifecycle, DI registration, project boundaries, layout, and
+  the conventions documented in `AGENTS.md` (including its
+  architectural invariants). Do **not** invent a convention: if
+  `AGENTS.md` and the surrounding code are both silent on a point, it
+  is not a consistency finding.
 - **Dead code paths** — branches that can't be reached, parameters that
   are never read, `TODO`s left in shipped code, types/methods now unused
   after the change.
 - **Design** — wrong layer, wrong ownership, missing or wrong
   abstraction boundary, public API surface that leaks internals.
-- **Correctness smells** — off-by-one, null-handling, boundary
-  conditions, race conditions, misuse of `IDisposable`/`IAsyncDisposable`,
-  cancellation propagation, transaction scoping.
+- **Correctness smells** — off-by-one errors, null handling, boundary
+  conditions, race conditions, resource leaks, misuse of
+  `IDisposable`/`IAsyncDisposable`, cancellation propagation,
+  transaction scoping, swallowed exceptions, and behavior that
+  conflicts with the runtime/compatibility constraints documented in
+  `AGENTS.md`.
 
 ### Role 2 — Staff-level QA Lead (test & verifiability review)
 
@@ -98,7 +103,7 @@ engineer writing the analysis the team will actually read. You:
 1. **Target** *(required)* — where to write the analysis. One of:
    - A **full path** (absolute or repo-relative) to a `.md` file. Used
      verbatim. Example: `scratch/0423-02/analysis.md`,
-     `C:\ai\git\fhir-augury\scratch\0501-04\analysis.md`.
+     `C:\path\to\repo\scratch\0501-04\analysis.md`.
    - A **slot number** (one or more digits, e.g. `2`, `02`, `14`).
      Expands to `scratch/<MMDD>-<##>/analysis.md`, where:
      - `<MMDD>` is **today's local date** (zero-padded month + day).
@@ -145,13 +150,19 @@ This is the order of operations:
 1. **Detect a sibling `plan.md`.** If the resolved analysis path is
    `scratch/<MMDD>-<##>/analysis.md` and a `plan.md` exists in the
    same directory, attempt **`plan-slot`** scope:
-   - Read `plan.md`'s `## Progress Log` and any per-phase commit SHAs.
-   - The review scope is the **union of those commits** (a multi-SHA
-     git range, oldest-parent..newest). Echo the resolved scope to
-     the user.
-   - If the plan exists but no commits are recorded yet (e.g., the
-     plan is `Draft` or `Ready-to-execute` with no `Progress Log`),
-     fall through to step 2.
+   - Read `plan.md`'s `## Progress Log` and collect the SHA from every
+     `COMMIT` entry. Ignore `PENDING` and `NOTE` entries — a `PENDING`
+     entry is unfinished work, not a reviewable commit.
+   - The review scope is exactly **that set of commits**. Do not
+     collapse it into an `oldest-parent..newest` range unless you have
+     verified the commits are contiguous (each one's parent is the
+     previous), because an unverified range silently pulls in unrelated
+     intervening commits. Otherwise inspect each SHA individually with
+     `git show <sha>` and union the results.
+   - Echo the resolved commit list and file set to the user.
+   - If the plan exists but no `COMMIT` entries are recorded yet (e.g.
+     the plan is `Draft` or `Ready-to-execute`), fall through to
+     step 2.
 2. **No plan, or plan with no commits:** stop and ask the user to
    choose. Offer these options exactly:
    - `full` — review all code in the repo.
@@ -176,10 +187,14 @@ mis-scoping before any expensive work happens.
 3. **Pre-flight.**
    - Confirm the working tree state with `git status` so you know
      whether `working-tree` scope would actually contain anything.
-   - Confirm the build/test commands referenced by the repo (e.g.,
-     `dotnet build fhir-augury.slnx`, `dotnet test fhir-augury.slnx`)
-     are available — you will *not* run them, but you will reference
-     them in the QA review.
+   - Read `AGENTS.md` at the repository root for the canonical build
+     and test commands, code style, and architectural invariants. If it
+     is absent, fall back to `README.md` / `CONTRIBUTING.md` and note in
+     the report which source you used. You will *not* run these
+     commands, but you will reference them in the QA review, so they
+     must be real. Never invent one.
+   - Identify the affected project(s) so the commands you cite are
+     correctly scoped.
 4. **Run the two review passes.** Prefer running them in parallel as
    sub-agents (one `general-purpose` or `code-review` agent per role)
    so they can't anchor on each other. Each sub-agent:
@@ -193,11 +208,13 @@ mis-scoping before any expensive work happens.
 5. **Synthesize.** Put on the synthesizer hat. Merge duplicates,
    re-rank by severity, drop noise, write the final report using
    the format below.
-6. **Sanity-check** the final report against the rubber-duck agent if
-   it contains any Blocker or High finding, or any
-   architecture-level recommendation. Adopt critique findings that
-   prevent miscommunication; set aside findings that bloat the
-   report. Briefly note in your reply what (if anything) changed.
+6. **Sanity-check** a report containing any Blocker, High, or
+   architecture-level recommendation with a registered review
+   specialist when available. Otherwise use a fresh `general-purpose`
+   sub-agent explicitly prompted to act as an adversarial/rubber-duck
+   reviewer. Adopt critique findings that prevent miscommunication;
+   set aside findings that bloat the report. Briefly note in your reply
+   what (if anything) changed.
 7. **Write `analysis.md`.** Overwrite if present.
 8. **Report back** with: the resolved analysis path, the resolved
    scope, finding counts by severity, and the top 3 findings (one
@@ -211,6 +228,7 @@ mis-scoping before any expensive work happens.
 | | |
 |-|-|
 | Slot | `scratch/<MMDD>-<##>/` (or full path) |
+| Issue | [#N](<url>) — or `not published` |
 | Scope | {label + concrete description, e.g., `plan-slot` (3 commits, 14 files)} |
 | Status | Draft / Ready-for-team |
 | Created | {YYYY-MM-DD} |
@@ -238,7 +256,7 @@ Each finding is independently actionable.
 
 #### B1. {Short title}
 
-- **Where:** `path/to/file.cs:120-138` (or symbol name)
+- **Where:** `<path/to/source-file>:120-138` (or symbol name)
 - **Source:** Engineering / QA / Both
 - **What:** {1–3 sentences. The problem, in observable terms.}
 - **Why it matters:** {1–2 sentences. Concrete risk if shipped as-is.}
@@ -273,14 +291,40 @@ Each finding is independently actionable.
 
 ## Verification Steps the Team Should Run
 
-- {Specific commands. E.g.,
-  `dotnet test fhir-augury.slnx --filter FullyQualifiedName~Foo`}
+- {Specific commands, taken verbatim from `AGENTS.md`. Prefer the
+  scoped command for the affected project, or the focused filter for a
+  single test class/method.}
+- {Any sanctioned verification that could **not** be cited as runnable
+  without setup `AGENTS.md` documents as a prerequisite, and why.}
 - {Manual steps if applicable}
 
 ## Out of Scope / Deferred
 
 - {Things the reviewers noticed but consciously did not chase, with
   why. Useful follow-ups go here.}
+
+## Next Steps
+
+How these findings re-enter the loop:
+
+- **Blocker / High** — when this review has a sibling slot containing a
+  `plan.md` (and its source request), re-invoke `dev-plan` on that slot
+  with this analysis as input; it folds them in as new remediation
+  phases and `dev-do` executes them. For an ad-hoc review with no such
+  slot, say so and recommend the user open one with
+  `dev-request` / `dev-report` first. Do not hand-patch them outside
+  the loop.
+- **Medium** — fix now if the change is still in flight, otherwise
+  record as a follow-up.
+- **Low / Nit** — record and move on. Do not block on these.
+- **Never to GitHub.** This analysis is an internal artifact and is
+  never published as an issue, a comment, or a quotation. Findings
+  re-enter the loop as a new `dev-request` / `dev-report`, which get
+  their own issue.
+- **After a clean analysis**, `dev-pr-open` is the recommended next
+  step — a recommendation, not a gate.
+- {Name the concrete next action here, e.g., "Run `dev-plan` on
+  `scratch/0423-02/` to add remediation phases for B1 and H2."}
 
 ## Notes
 
@@ -330,6 +374,16 @@ against a slot whose `analysis.md` already exists:
 - **Read-only.** This skill never modifies source, never stages,
   never commits, never pushes. The only file it writes is
   `analysis.md` (and the parent directory if missing).
+- **`analysis.md` is never published to GitHub.** Not as an issue, not
+  as a comment, not as a quotation in a PR body. It is an internal
+  artifact. Findings re-enter the loop as a new `dev-request` /
+  `dev-report`, which get their own issue via `dev-issue`.
+- **Populate the `Issue` row, never invent it.** Read it from the
+  sibling `plan.md`, or from the source artifact when no plan exists,
+  under the same **no-downgrade ratchet** the other skills use: never
+  replace an existing `#N` with `not published`. Report a disagreement
+  rather than resolving it — that belongs to `dev-issue` under its
+  § *The Issue Binding*. This skill never calls a writing `gh` command.
 - **Two independent passes, then synthesize.** Do not skip a pass
   because "the other one will catch it". Do not let one pass see
   the other's draft before synthesis.
@@ -343,13 +397,14 @@ against a slot whose `analysis.md` already exists:
 - **Drop noise.** Anything a formatter, linter, or trivial rename
   would catch does not deserve a finding number. Mention it once
   in a single Nit line at most, or omit it entirely.
-- **Honor repo conventions and stored memories.** Use them as the
-  baseline for "consistency" findings — explicit C# types, `[]` for
-  empty collections, `dotnet build fhir-augury.slnx` and
-  `dotnet test fhir-augury.slnx` as the canonical build/test
-  commands, and any other documented preferences. A change that
-  violates a documented convention is at least a Medium finding
-  unless explicitly justified.
+- **Honor repo conventions.** Use `AGENTS.md` at the repository root as
+  the baseline for "consistency" findings, falling back to `README.md`
+  / `CONTRIBUTING.md` if it is absent. Verify any applicable stored
+  memory against the repository before using it. A change that violates
+  a **documented** convention or architectural invariant is at least a
+  Medium finding unless explicitly justified. A change that merely
+  differs from your personal preference is **not a finding at all** —
+  do not import conventions from other repositories.
 - **Severity is the synthesizer's call.** Do not pass through the
   reviewers' severities verbatim if you disagree. The team reads
   *your* synthesized ranking.

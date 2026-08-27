@@ -210,7 +210,7 @@ public class VocabularyPageExporter
         string targetBaseUrl = igTr.PackagePair.TargetFhirSequence.ToWebUrlRoot();
 
         // create the lookup file
-        string filename = Path.Combine(dir, "lookup-vs.md");
+        string filename = Path.Combine(dir, "index-vs.md");
         using ExportStreamWriter mdWriter = createMarkdownWriter(filename);
 
         mdWriter.WriteLine($"### FHIR {igTr.PackageId} Cross-Version Value Set Lookup");

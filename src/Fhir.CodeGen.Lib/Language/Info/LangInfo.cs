@@ -1,4 +1,4 @@
-﻿// <copyright file="LangInfo.cs" company="Microsoft Corporation">
+// <copyright file="LangInfo.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -48,10 +48,11 @@ public class LangInfo : ILanguage
         {
             Name = "FileFormat",
             DefaultValue = LangInfo.InfoFormat.Text,
-            CliOption = new System.CommandLine.Option<LangInfo.InfoFormat>("--format", "File format to export.")
+            CliOption = new System.CommandLine.Option<LangInfo.InfoFormat>("--format")
             {
+                Description = "File format to export.",
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-                IsRequired = false,
+                Required = false,
             },
         };
 
@@ -69,7 +70,7 @@ public class LangInfo : ILanguage
             return [.. base.GetOptions(), .. _options];
         }
 
-        public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+        public override void Parse(System.CommandLine.ParseResult parseResult)
         {
             // parse base properties
             base.Parse(parseResult);

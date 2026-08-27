@@ -1,4 +1,4 @@
-﻿// <copyright file="FirelyNetIG.cs" company="Microsoft Corporation">
+// <copyright file="FirelyNetIG.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -235,10 +235,11 @@ public partial class FirelyNetIG : ILanguage
         {
             Name = "ExtensionAccessorExport",
             DefaultValue = ExtensionAccessorExportCodes.RecordAccessors,
-            CliOption = new System.CommandLine.Option<ExtensionAccessorExportCodes>("--extension-accessors", "Style to export extension accessors with.")
+            CliOption = new System.CommandLine.Option<ExtensionAccessorExportCodes>("--extension-accessors")
             {
+                Description = "Style to export extension accessors with.",
                 Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-                IsRequired = false,
+                Required = false,
             },
         };
 
@@ -252,7 +253,7 @@ public partial class FirelyNetIG : ILanguage
             return [.. base.GetOptions(), .. _options];
         }
 
-        public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+        public override void Parse(System.CommandLine.ParseResult parseResult)
         {
             // parse base properties
             base.Parse(parseResult);

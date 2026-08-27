@@ -192,6 +192,10 @@ public class StructureOutcomeGenerator
             .Where(c => c.TargetContentKey is not null)
             .ToLookup(c => c.TargetContentKey!.Value);
 
+        //ILookup<int, DbStructureComparison> sdNoMapComparisons = sdComparisons
+        //    .Where(c => (c.NotMapped == true) || (c.TargetContentKey is null))
+        //    .ToLookup(c => c.SourceContentKey);
+
         // iterate over our source structures
         foreach (DbStructureDefinition sourceSd in allSourceStructures.Values)
         {

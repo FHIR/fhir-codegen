@@ -1,4 +1,4 @@
-﻿// <copyright file="ConfigXVer.cs" company="Microsoft Corporation">
+// <copyright file="ConfigXVer.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -28,10 +28,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Compare_Package",
         EnvVarName = "Compare_Package",
         DefaultValue = Array.Empty<string>(),
-        CliOption = new System.CommandLine.Option<string[]>(["--compare", "--compare-package", "-c"], "Comparison packages to load, as directives ([name][#|@][version/literal])")
+        CliOption = new System.CommandLine.Option<string[]>("--compare", "--compare-package", "-c")
         {
+            Description = "Comparison packages to load, as directives ([name][#|@][version/literal])",
             Arity = System.CommandLine.ArgumentArity.OneOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -47,10 +48,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Map_Source_Path",
         EnvVarName = "Map_Source_Path",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string?>("--map-source-path", "Path to FHIR maps to load (e.g., clone of HL7/fhir-cross-version).")
+        CliOption = new System.CommandLine.Option<string?>("--map-source-path")
         {
+            Description = "Path to FHIR maps to load (e.g., clone of HL7/fhir-cross-version).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -67,10 +69,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Comparison_Database_Path",
         EnvVarName = "Comparison_Database_Path",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string?>("--db", "Path or filename for the comparison database FHIR maps to load or export.")
+        CliOption = new System.CommandLine.Option<string?>("--db")
         {
+            Description = "Path or filename for the comparison database FHIR maps to load or export.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -86,10 +89,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Reload_Comparison_Database",
         EnvVarName = "Reload_Comparison_Database",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--reload-db", "Set to force reloading of the comparison database from definitions.")
+        CliOption = new System.CommandLine.Option<bool>("--reload-db")
         {
+            Description = "Set to force reloading of the comparison database from definitions.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -105,10 +109,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Comparison_Source_Database",
         EnvVarName = "Comparison_Source_Database",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string?>("--source-db", "Fully specified filename for a source database to use for comparison processing.")
+        CliOption = new System.CommandLine.Option<string?>("--source-db")
         {
+            Description = "Fully specified filename for a source database to use for comparison processing.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -124,10 +129,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Comparison_Pair_Filter_Key",
         EnvVarName = "Comparison_Pair_Filter_Key",
         DefaultValue = new HashSet<int>(),
-        CliOption = new System.CommandLine.Option<string?>("--comparison-pair-filter-key", "Set of Package Comparison Pair keys to process (used to reduce comparisons).")
+        CliOption = new System.CommandLine.Option<string?>("--comparison-pair-filter-key")
         {
+            Description = "Set of Package Comparison Pair keys to process (used to reduce comparisons).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -143,10 +149,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Export_R2",
         EnvVarName = "Export_R2",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--export-r2", "Set to export DSTU2 artifacts from the comparison database.")
+        CliOption = new System.CommandLine.Option<bool>("--export-r2")
         {
+            Description = "Set to export DSTU2 artifacts from the comparison database.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -162,10 +169,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Export_R3",
         EnvVarName = "Export_R3",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--export-r3", "Set to export STU3 artifacts from the comparison database.")
+        CliOption = new System.CommandLine.Option<bool>("--export-r3")
         {
+            Description = "Set to export STU3 artifacts from the comparison database.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -181,10 +189,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Export_R4",
         EnvVarName = "Export_R4",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--export-r4", "Set to export R4 artifacts from the comparison database.")
+        CliOption = new System.CommandLine.Option<bool>("--export-r4")
         {
+            Description = "Set to export R4 artifacts from the comparison database.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -200,10 +209,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Export_R4B",
         EnvVarName = "Export_R4B",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--export-r4b", "Set to export R4B artifacts from the comparison database.")
+        CliOption = new System.CommandLine.Option<bool>("--export-r4b")
         {
+            Description = "Set to export R4B artifacts from the comparison database.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -219,10 +229,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Export_R5",
         EnvVarName = "Export_R5",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--export-r5", "Set to export R5 artifacts from the comparison database.")
+        CliOption = new System.CommandLine.Option<bool>("--export-r5")
         {
+            Description = "Set to export R5 artifacts from the comparison database.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -238,10 +249,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Export_R6",
         EnvVarName = "Export_R6",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--export-r6", "Set to export R6 artifacts from the comparison database.")
+        CliOption = new System.CommandLine.Option<bool>("--export-r6")
         {
+            Description = "Set to export R6 artifacts from the comparison database.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -257,10 +269,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Xver_Artifact_Version",
         EnvVarName = "Xver_Artifact_Version",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string?>("--xver-version", "The version number to use when exporting XVer artifacts.")
+        CliOption = new System.CommandLine.Option<string?>("--xver-version")
         {
+            Description = "The version number to use when exporting XVer artifacts.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -276,10 +289,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Xver_Generate_Npms",
         EnvVarName = "Xver_Generate_Npms",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--xver-generate-npms", "Set to generate NPMs for XVer artifacts.")
+        CliOption = new System.CommandLine.Option<bool>("--xver-generate-npms")
         {
+            Description = "Set to generate NPMs for XVer artifacts.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -295,10 +309,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Xver_Generate_Snapshots",
         EnvVarName = "Xver_Generate_Snapshots",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--xver-generate-snapshots", "Set to generate snapshots for XVer artifacts.")
+        CliOption = new System.CommandLine.Option<bool>("--xver-generate-snapshots")
         {
+            Description = "Set to generate snapshots for XVer artifacts.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -314,10 +329,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Xver_Allow_Comparison_Updates",
         EnvVarName = "Xver_Allow_Comparison_Updates",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--xver-allow-comparison-updates", "Whether or not to allow updates to the comparison database during processing.")
+        CliOption = new System.CommandLine.Option<bool>("--xver-allow-comparison-updates")
         {
+            Description = "Whether or not to allow updates to the comparison database during processing.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -332,10 +348,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Xver_Export_For_Publisher",
         EnvVarName = "Xver_Export_For_Publisher",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--xver-export-for-publisher", "Set to export XVer artifacts for publisher.")
+        CliOption = new System.CommandLine.Option<bool>("--xver-export-for-publisher")
         {
+            Description = "Set to export XVer artifacts for publisher.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -350,10 +367,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Xver_Include_Scripts",
         EnvVarName = "Xver_Include_Scripts",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--xver-include-scripts", "Set to include scripts in the XVer artifacts.")
+        CliOption = new System.CommandLine.Option<bool>("--xver-include-scripts")
         {
+            Description = "Set to include scripts in the XVer artifacts.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -370,10 +388,11 @@ public class ConfigXVer : ConfigRoot
         Name = "No_Output",
         EnvVarName = "No_Output",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--no-output", "Do not output the comparison result.")
+        CliOption = new System.CommandLine.Option<bool>("--no-output")
         {
+            Description = "Do not output the comparison result.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -387,10 +406,11 @@ public class ConfigXVer : ConfigRoot
     {
         Name = "Save_Comparison_Result",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--save-comparison-result", "Save the comparison result to a file.")
+        CliOption = new System.CommandLine.Option<bool>("--save-comparison-result")
         {
+            Description = "Save the comparison result to a file.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -406,10 +426,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Map_Destination_Path",
         EnvVarName = "Map_Destination_Path",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string?>("--map-destination-path", "Path to directory to save FHIR maps to (e.g., clone of HL7/fhir-cross-version).")
+        CliOption = new System.CommandLine.Option<string?>("--map-destination-path")
         {
+            Description = "Path to directory to save FHIR maps to (e.g., clone of HL7/fhir-cross-version).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -424,10 +445,11 @@ public class ConfigXVer : ConfigRoot
         Name = "Use_Internal_Type_Maps",
         EnvVarName = "Use_Internal_Type_Maps",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--use-internal-type-maps", "Set to use internal type maps for comparison processing.")
+        CliOption = new System.CommandLine.Option<bool>("--use-internal-type-maps")
         {
+            Description = "Set to use internal type maps for comparison processing.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -465,7 +487,7 @@ public class ConfigXVer : ConfigRoot
         return [.. base.GetOptions(), .. _options];
     }
 
-    public override void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public override void Parse(System.CommandLine.ParseResult parseResult)
     {
         // parse base properties
         base.Parse(parseResult);

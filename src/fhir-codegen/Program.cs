@@ -14,7 +14,6 @@ using System.Reflection;
 using Fhir.CodeGen.Common.Models;
 using System.CommandLine;
 using Fhir.CodeGen.Lib.Extensions;
-using System.CommandLine.Builder;
 using System.Text;
 using Microsoft.Extensions.Primitives;
 using System.CommandLine.Parsing;
@@ -53,25 +52,36 @@ public class Program
     /// </returns>
     public static async Task<int> Main(string[] args)
     {
-        // setup our configuration defaults (environment > appsettings.json) - args will supersede
+        // Configuration precedence (lowest to highest):
+        //   ConfigurationOption.DefaultValue < environment variable < CLI argument.
+        // The IConfiguration below is currently used only by LaunchUtils.BuildCli for
+        // construction-time wiring; runtime defaults flow through ConfigRoot.GetOpt,
+        // which honors Environment.GetEnvironmentVariable(opt.EnvVarName) as a
+        // fallback and then ConfigurationOption.DefaultValue.
+        // (appsettings.json is loaded for forward-compatibility but is not yet
+        // surfaced into Option<T> defaults under the System.CommandLine 2.0 D1(b)
+        // shape. See plan.md, Phase 5 deviation.)
         IConfiguration envConfig = new ConfigurationBuilder()
             .AddJsonFile("appsettings.json", optional: true)
             .AddEnvironmentVariables()
             .Build();
 
-        // in order to process help correctly we have to build a parser independent of the command
-        Parser parser = BuildParser(envConfig);
+        // Build the System.CommandLine 2.0 GA surface: root command + per-parser config
+        // + per-invocation config. Help-customization is wired up inside BuildCli.
+        (RootCommand rootCommand,
+         ParserConfiguration parserConfig,
+         InvocationConfiguration invocationConfig) = BuildCli(envConfig);
 
         // attempt a parse
-        ParseResult pr = parser.Parse(args);
+        System.CommandLine.ParseResult pr = rootCommand.Parse(args, parserConfig);
 
         string command;
         string? subCommand;
 
-        if ((pr.CommandResult.Parent != null) &&
-            (pr.CommandResult.Parent?.Symbol.Name != pr.RootCommandResult.Symbol.Name))
+        if ((pr.CommandResult.Parent is CommandResult parentCmd) &&
+            (parentCmd.Command.Name != pr.RootCommandResult.Command.Name))
         {
-            command = pr.CommandResult.Parent!.Symbol.Name;
+            command = parentCmd.Command.Name;
             subCommand = pr.CommandResult.Command.Name;
         }
         else
@@ -90,7 +100,7 @@ public class Program
             pr.Tokens.Any(t => t.Value.Equals("help", StringComparison.Ordinal)) ||
             ((command == "generate") && (subCommand == null)))
         {
-            return await parser.InvokeAsync(args);
+            return await InvokeWithHandler(rootCommand, parserConfig, invocationConfig, args);
         }
 
         // check for a generate command with no packages
@@ -99,7 +109,7 @@ public class Program
         {
             Console.WriteLine("Error: generate command requires at least one package to process.");
 
-            return await parser.InvokeAsync(args.Append("--help").ToArray());
+            return await InvokeWithHandler(rootCommand, parserConfig, invocationConfig, [.. args, "--help"]);
         }
 
         return command switch
@@ -112,8 +122,31 @@ public class Program
             //"web" => await DoWeb(pr, command, subCommand);
             "sql" => await DoSql(pr, command, subCommand),
             "docs" => await DoDocs(pr, command, subCommand),
-            _ => await parser.InvokeAsync(args),
+            _ => await InvokeWithHandler(rootCommand, parserConfig, invocationConfig, args),
         };
+    }
+
+    /// <summary>
+    /// Parses the supplied args and invokes the resulting <see cref="System.CommandLine.ParseResult"/>,
+    /// catching any exception and reporting it to stderr with exit code 1 — preserving the
+    /// beta4 <c>UseExceptionHandler</c> UX under the System.CommandLine 2.0 GA pipeline.
+    /// </summary>
+    private static async Task<int> InvokeWithHandler(
+        RootCommand rootCommand,
+        ParserConfiguration parserConfig,
+        InvocationConfiguration invocationConfig,
+        string[] args)
+    {
+        try
+        {
+            System.CommandLine.ParseResult pr = rootCommand.Parse(args, parserConfig);
+            return await pr.InvokeAsync(invocationConfig);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
     }
 
     /// <summary>Executes the <c>docs</c> command.</summary>
@@ -163,7 +196,7 @@ public class Program
         }
     }
 
-    public static async Task<int> DoGenerate(ParseResult pr, string command, string? subCommand)
+    public static async Task<int> DoGenerate(System.CommandLine.ParseResult pr, string command, string? subCommand)
     {
         try
         {
@@ -246,7 +279,7 @@ public class Program
         return 0;
     }
 
-    public static async Task<int> DoCompare(ParseResult pr, string command, string? subCommand)
+    public static async Task<int> DoCompare(System.CommandLine.ParseResult pr, string command, string? subCommand)
     {
         try
         {
@@ -309,7 +342,7 @@ public class Program
         return 0;
     }
 
-    public static Task<int> DoXVer(ParseResult pr, string command, string? subCommand)
+    public static Task<int> DoXVer(System.CommandLine.ParseResult pr, string command, string? subCommand)
     {
         try
         {
@@ -338,7 +371,7 @@ public class Program
     }
 
 
-    public static async Task<int> DoSql(ParseResult pr, string command, string? subCommand)
+    public static async Task<int> DoSql(System.CommandLine.ParseResult pr, string command, string? subCommand)
     {
         try
         {

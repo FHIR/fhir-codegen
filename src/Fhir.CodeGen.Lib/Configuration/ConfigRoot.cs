@@ -1,4 +1,4 @@
-﻿// <copyright file="ConfigRoot.cs" company="Microsoft Corporation">
+// <copyright file="ConfigRoot.cs" company="Microsoft Corporation">
 //     Copyright (c) Microsoft Corporation. All rights reserved.
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
@@ -48,10 +48,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "FhirCache",
         EnvVarName = "Fhir_Cache",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string?>("--fhir-cache", "Location of the FHIR cache (none specified defaults to user .fhir directory).")
+        CliOption = new System.CommandLine.Option<string?>("--fhir-cache")
         {
+            Description = "Location of the FHIR cache (none specified defaults to user .fhir directory).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -66,10 +67,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "UseOfficialRegistries",
         EnvVarName = "Use_Official_Registries",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--use-official-registries", "Use official FHIR registries to resolve packages.")
+        CliOption = new System.CommandLine.Option<bool>("--use-official-registries")
         {
+            Description = "Use official FHIR registries to resolve packages.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -85,10 +87,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "AdditionalFhirRegistryUrls",
         EnvVarName = "Additional_FHIR_Registry_Urls",
         DefaultValue = Array.Empty<string>(),
-        CliOption = new System.CommandLine.Option<string[]>("--additional-fhir-registry-urls", "Additional FHIR registry URLs to use.")
+        CliOption = new System.CommandLine.Option<string[]>("--additional-fhir-registry-urls")
         {
+            Description = "Additional FHIR registry URLs to use.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -104,10 +107,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "AdditionalNpmRegistryUrls",
         EnvVarName = "Additional_NPM_Registry_Urls",
         DefaultValue = Array.Empty<string>(),
-        CliOption = new System.CommandLine.Option<string[]>("--additional-npm-registry-urls", "Additional NPM registry URLs to use.")
+        CliOption = new System.CommandLine.Option<string[]>("--additional-npm-registry-urls")
         {
+            Description = "Additional NPM registry URLs to use.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -128,10 +132,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "OutputPath",
         EnvVarName = "Output_Path",
         DefaultValue = ".",
-        CliOption = new System.CommandLine.Option<string>(["--output-path", "--output-directory", "--output-dir"], "File or directory to write output.")
+        CliOption = new System.CommandLine.Option<string>("--output-path", "--output-directory", "--output-dir")
         {
+            Description = "File or directory to write output.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -147,10 +152,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "OutputFilename",
         EnvVarName = "Output_Filename",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string>(["--output-filename", "--output-file"], "Filename to write output.")
+        CliOption = new System.CommandLine.Option<string>("--output-filename", "--output-file")
         {
+            Description = "Filename to write output.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -171,10 +177,11 @@ public class ConfigRoot : ICodeGenConfig
     {
         Name = "Packages",
         DefaultValue = Array.Empty<string>(),
-        CliOption = new System.CommandLine.Option<string[]>(["--package", "--load-package", "-p"], "Package to load, either as directive ([name]#[version/literal]) or URL.")
+        CliOption = new System.CommandLine.Option<string[]>("--package", "--load-package", "-p")
         {
+            Description = "Package to load, either as directive ([name]#[version/literal]) or URL.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -189,10 +196,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "AutoLoadExpansions",
         EnvVarName = "Auto_Load_Expansions",
         DefaultValue = true,
-        CliOption = new System.CommandLine.Option<bool>("--auto-load-expansions", "When loading core packages, load the expansions packages automatically.")
+        CliOption = new System.CommandLine.Option<bool>("--auto-load-expansions")
         {
+            Description = "When loading core packages, load the expansions packages automatically.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -207,10 +215,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "ResolvePackageDependencies",
         EnvVarName = "Resolve_Dependencies",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--resolve-dependencies", "Resolve package dependencies.")
+        CliOption = new System.CommandLine.Option<bool>("--resolve-dependencies")
         {
+            Description = "Resolve package dependencies.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -224,10 +233,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "MaxExpansionSize",
         EnvVarName = "Max_Expansion_Size",
         DefaultValue = DefaultMaxExpansionSize,
-        CliOption = new System.CommandLine.Option<int>("--max-expansion-size", "Maximum number of concepts to include in a value set expansion before limiting.")
+        CliOption = new System.CommandLine.Option<int>("--max-expansion-size")
         {
+            Description = "Maximum number of concepts to include in a value set expansion before limiting.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -265,10 +275,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "LoadStructures",
         EnvVarName = "Load_Structures",
         DefaultValue = _defaultLoadStructures,
-        CliOption = new System.CommandLine.Option<FhirArtifactClassEnum[]>("--load-structures", "Types of FHIR structures to load.")
+        CliOption = new System.CommandLine.Option<FhirArtifactClassEnum[]>("--load-structures")
         {
+            Description = "Types of FHIR structures to load.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -303,10 +314,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "ExportStructures",
         EnvVarName = "Export_Structures",
         DefaultValue = _defaultExportStructures,
-        CliOption = new System.CommandLine.Option<FhirArtifactClassEnum[]>("--export-structures", "Types of FHIR structures to export.")
+        CliOption = new System.CommandLine.Option<FhirArtifactClassEnum[]>("--export-structures")
         {
+            Description = "Types of FHIR structures to export.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -323,10 +335,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "ExportKeys",
         EnvVarName = "Export_Keys",
         DefaultValue = new HashSet<string>(),
-        CliOption = new System.CommandLine.Option<HashSet<string>>("--export-keys", "Keys of FHIR structures to export (e.g., Patient), empty means all.")
+        CliOption = new System.CommandLine.Option<HashSet<string>>("--export-keys")
         {
+            Description = "Keys of FHIR structures to export (e.g., Patient), empty means all.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrMore,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -342,10 +355,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "LoadCanonicalExamples",
         EnvVarName = "Load_Canonical_Examples",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--load-canonical-examples", "Load canonical examples from packages.")
+        CliOption = new System.CommandLine.Option<bool>("--load-canonical-examples")
         {
+            Description = "Load canonical examples from packages.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -366,10 +380,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "OfflineMode",
         EnvVarName = "Offline",
         DefaultValue = false,
-        CliOption = new System.CommandLine.Option<bool>("--offline", "Offline mode (will not download missing packages).")
+        CliOption = new System.CommandLine.Option<bool>("--offline")
         {
+            Description = "Offline mode (will not download missing packages).",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -384,10 +399,11 @@ public class ConfigRoot : ICodeGenConfig
         Name = "FhirVersion",
         EnvVarName = "Fhir_Version",
         DefaultValue = string.Empty,
-        CliOption = new System.CommandLine.Option<string>("--fhir-version", "FHIR version to use.")
+        CliOption = new System.CommandLine.Option<string>("--fhir-version")
         {
+            Description = "FHIR version to use.",
             Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-            IsRequired = false,
+            Required = false,
         },
     };
 
@@ -419,16 +435,17 @@ public class ConfigRoot : ICodeGenConfig
     public virtual ConfigurationOption[] GetOptions() => _options;
 
     internal T GetOpt<T>(
-        System.CommandLine.Parsing.ParseResult parseResult,
+        System.CommandLine.ParseResult parseResult,
         ConfigurationOption opt,
         T defaultValue)
     {
-        if (!parseResult.HasOption(opt.CliOption))
+        System.CommandLine.Parsing.OptionResult? optResult = parseResult.GetResult(opt.CliOption);
+        if (optResult is null || optResult.Implicit)
         {
-            return defaultValue;
+            return GetEnvValueOrDefault(opt.EnvVarName, defaultValue);
         }
 
-        object? parsed = parseResult.GetValueForOption(opt.CliOption);
+        object? parsed = optResult.GetValueOrDefault<object>();
 
         if (typeof(T).IsEnum == true)
         {
@@ -499,26 +516,56 @@ public class ConfigRoot : ICodeGenConfig
                 break;
         }
 
-        string? envValue = Environment.GetEnvironmentVariable(opt.EnvVarName);
-        if (envValue != null)
-        {
-            return (T)Convert.ChangeType(envValue, typeof(T));
-        }
-
         return defaultValue;
     }
 
-    internal T[] GetOptArray<T>(
-        System.CommandLine.Parsing.ParseResult parseResult,
-        ConfigurationOption opt,
-        T[] defaultValue)
+    /// <summary>
+    /// Resolves an environment variable into <typeparamref name="T"/>, falling back to
+    /// <paramref name="defaultValue"/> when the variable is unset, empty, or unconvertible.
+    /// Centralizes the env-var path used by <see cref="GetOpt{T}"/> on the implicit/no-arg
+    /// branch under the System.CommandLine 2.0 GA + D1(b) shape, where Option&lt;T&gt; defaults
+    /// are no longer seeded with env-config values.
+    /// </summary>
+    private static T GetEnvValueOrDefault<T>(string envVarName, T defaultValue)
     {
-        if (!parseResult.HasOption(opt.CliOption))
+        if (string.IsNullOrEmpty(envVarName))
         {
             return defaultValue;
         }
 
-        object? parsed = parseResult.GetValueForOption(opt.CliOption);
+        string? envValue = Environment.GetEnvironmentVariable(envVarName);
+        if (string.IsNullOrEmpty(envValue))
+        {
+            return defaultValue;
+        }
+
+        try
+        {
+            if (typeof(T).IsEnum)
+            {
+                return (T)Enum.Parse(typeof(T), envValue, ignoreCase: true);
+            }
+
+            return (T)Convert.ChangeType(envValue, typeof(T));
+        }
+        catch
+        {
+            return defaultValue;
+        }
+    }
+
+    internal T[] GetOptArray<T>(
+        System.CommandLine.ParseResult parseResult,
+        ConfigurationOption opt,
+        T[] defaultValue)
+    {
+        System.CommandLine.Parsing.OptionResult? optResult = parseResult.GetResult(opt.CliOption);
+        if (optResult is null || optResult.Implicit)
+        {
+            return GetEnvValueArrayOrDefault(opt.EnvVarName, defaultValue);
+        }
+
+        object? parsed = optResult.GetValueOrDefault<object>();
 
         if (parsed != null)
         {
@@ -562,34 +609,68 @@ public class ConfigRoot : ICodeGenConfig
             }
         }
 
-        string? envValue = Environment.GetEnvironmentVariable(opt.EnvVarName);
-        if (envValue != null)
-        {
-            List<T> values = [];
-
-            string[] envValues = envValue.Split(',');
-            foreach (string ev in envValues)
-            {
-                values.Add((T)Convert.ChangeType(envValue, typeof(T)));
-            }
-
-            return [.. values];
-        }
-
         return defaultValue;
     }
 
-    internal HashSet<T> GetOptHash<T>(
-        System.CommandLine.Parsing.ParseResult parseResult,
-        System.CommandLine.Option opt,
-        HashSet<T> defaultValue)
+    /// <summary>
+    /// Resolves a comma-separated environment variable into <typeparamref name="T"/>[],
+    /// falling back to <paramref name="defaultValue"/> when the variable is unset, empty,
+    /// or contains any unconvertible token.
+    /// </summary>
+    private static T[] GetEnvValueArrayOrDefault<T>(string envVarName, T[] defaultValue)
     {
-        if (!parseResult.HasOption(opt))
+        if (string.IsNullOrEmpty(envVarName))
         {
             return defaultValue;
         }
 
-        object? parsed = parseResult.GetValueForOption(opt);
+        string? envValue = Environment.GetEnvironmentVariable(envVarName);
+        if (string.IsNullOrEmpty(envValue))
+        {
+            return defaultValue;
+        }
+
+        string[] tokens = envValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Length == 0)
+        {
+            return defaultValue;
+        }
+
+        List<T> values = [];
+        try
+        {
+            foreach (string token in tokens)
+            {
+                if (typeof(T).IsEnum)
+                {
+                    values.Add((T)Enum.Parse(typeof(T), token, ignoreCase: true));
+                }
+                else
+                {
+                    values.Add((T)Convert.ChangeType(token, typeof(T)));
+                }
+            }
+        }
+        catch
+        {
+            return defaultValue;
+        }
+
+        return [.. values];
+    }
+
+    internal HashSet<T> GetOptHash<T>(
+        System.CommandLine.ParseResult parseResult,
+        System.CommandLine.Option opt,
+        HashSet<T> defaultValue)
+    {
+        System.CommandLine.Parsing.OptionResult? optResult = parseResult.GetResult(opt);
+        if (optResult is null || optResult.Implicit)
+        {
+            return defaultValue;
+        }
+
+        object? parsed = optResult.GetValueOrDefault<object>();
 
         if (parsed == null)
         {
@@ -643,7 +724,7 @@ public class ConfigRoot : ICodeGenConfig
 
     /// <summary>Parses the given parse result.</summary>
     /// <param name="parseResult">The parse result.</param>
-    public virtual void Parse(System.CommandLine.Parsing.ParseResult parseResult)
+    public virtual void Parse(System.CommandLine.ParseResult parseResult)
     {
         foreach (ConfigurationOption opt in _options)
         {

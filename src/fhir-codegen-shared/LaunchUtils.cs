@@ -4,10 +4,6 @@
 // </copyright>
 
 using System.CommandLine;
-using System.CommandLine.Builder;
-using System.CommandLine.Help;
-using System.CommandLine.Invocation;
-using System.CommandLine.Parsing;
 using System.Reflection;
 using System.Text;
 using Fhir.CodeGen.Lib.Configuration;
@@ -34,7 +30,8 @@ internal static class LaunchUtils
 {
     internal static Dictionary<string, LanguageOptionInfo> _configMapsByLang = [];
 
-    private static List<Option> _optsWithEnums = [];
+    private static readonly HashSet<Option> _enumDescriptionsAugmented = new(ReferenceEqualityComparer.Instance);
+    private static readonly object _enumDescriptionsAugmentedLock = new();
 
     internal record class LanguageOptionInfo
     {
@@ -142,7 +139,7 @@ internal static class LaunchUtils
     /// An instance of <see cref="ICodeGenConfig"/> representing the parsed configuration.
     /// </returns>
     internal static ICodeGenConfig ParseConfig(
-        ParseResult pr,
+        System.CommandLine.ParseResult pr,
         string command,
         string? subCommand,
         ILoggerFactory? loggerFactory = null)
@@ -238,65 +235,30 @@ internal static class LaunchUtils
         return config;
     }
 
-    internal static Parser BuildParser(IConfiguration envConfig, RootCommand? rc = null)
+    /// <summary>
+    /// Builds the CLI surface for the application: returns the configured
+    /// <see cref="RootCommand"/> together with the per-parser and per-invocation
+    /// configurations expected by System.CommandLine 2.0 GA.
+    /// </summary>
+    /// <param name="envConfig">The environment configuration.</param>
+    /// <param name="rc">Optional pre-built root command (used by tests).</param>
+    /// <returns>Tuple of root, parser configuration, invocation configuration.</returns>
+    internal static (RootCommand Root, ParserConfiguration ParserConfig, InvocationConfiguration InvocationConfig) BuildCli(
+        IConfiguration envConfig,
+        RootCommand? rc = null)
     {
         RootCommand command = rc ?? BuildCommand(envConfig);
 
-        Parser parser = new CommandLineBuilder(command)
-            .UseExceptionHandler((ex, ctx) =>
-            {
-                Console.WriteLine($"Error: {ex.Message}");
-                ctx.ExitCode = 1;
-            })
-            .UseDefaults()
-            .UseHelp(ctx =>
-            {
-                foreach (Option option in _optsWithEnums)
-                {
-                    StringBuilder sb = new();
-                    if (option.Aliases.Count != 0)
-                    {
-                        sb.AppendLine(string.Join(", ", option.Aliases));
-                    }
-                    else
-                    {
-                        sb.AppendLine(option.Name);
-                    }
+        ParserConfiguration parserConfig = new();
+        InvocationConfiguration invocationConfig = new()
+        {
+            // We catch and report exceptions ourselves in Program.Main to match the
+            // beta4 UX (single-line "Error: ..." with exit code 1).
+            EnableDefaultExceptionHandler = false,
+        };
 
-                    Type et = option.ValueType;
-
-                    if (option.ValueType.IsGenericType)
-                    {
-                        et = option.ValueType.GenericTypeArguments.First();
-                    }
-
-                    if (option.ValueType.IsArray)
-                    {
-                        et = option.ValueType.GetElementType()!;
-                    }
-
-                    foreach (MemberInfo mem in et.GetMembers(BindingFlags.Public | BindingFlags.Static).Where(m => m.DeclaringType == et).OrderBy(m => m.Name))
-                    {
-                        IEnumerable<DescriptionAttribute> attributes = mem.GetCustomAttributes<DescriptionAttribute>(false);
-
-                        sb.AppendLine($"  opt: {mem.Name}");
-                        if (attributes.Any())
-                        {
-                            sb.AppendLine($"       {attributes.First().Description}");
-                        }
-                    }
-
-                    ctx.HelpBuilder.CustomizeSymbol(
-                        option,
-                        firstColumnText: (ctx) => sb.ToString());
-                    //secondColumnText: (ctx) => option.Description);
-                }
-            })
-            .Build();
-
-        return parser;
+        return (command, parserConfig, invocationConfig);
     }
-
 
     /// <summary>Builds command parser.</summary>
     /// <param name="envConfig">  The environment configuration.</param>
@@ -309,7 +271,8 @@ internal static class LaunchUtils
         foreach (Option option in BuildCliOptions(typeof(ConfigRoot), envConfig: envConfig))
         {
             // note that 'global' here is just recursive DOWNWARD
-            rootCommand.AddGlobalOption(option);
+            option.Recursive = true;
+            rootCommand.Options.Add(option);
             TrackIfEnum(option);
         }
 
@@ -328,7 +291,8 @@ internal static class LaunchUtils
             foreach (Option option in BuildCliOptions(rec.ConfigurationType, rec.ExcludedConfigurationType, envConfig))
             {
                 // note that 'global' here is just recursive DOWNWARD
-                cmd.AddGlobalOption(option);
+                option.Recursive = true;
+                cmd.Options.Add(option);
                 TrackIfEnum(option);
             }
 
@@ -340,22 +304,19 @@ internal static class LaunchUtils
                     Command languageCommand = new(language.Name, $"{rec.Literal} {language.Name}");
                     if (language.Name.Any(char.IsUpper))
                     {
-                        languageCommand.AddAlias(language.Name.ToLowerInvariant());
+                        languageCommand.Aliases.Add(language.Name.ToLowerInvariant());
                     }
 
-                    foreach (Option option in BuildCliOptions(LanguageManager.ConfigTypeForLanguage(language.Name), envConfig: envConfig))
+                    foreach (Option option in BuildCliOptions(
+                        LanguageManager.ConfigTypeForLanguage(language.Name),
+                        excludeFromType: typeof(ConfigGenerate),
+                        envConfig: envConfig))
                     {
-                        languageCommand.AddOption(option);
+                        languageCommand.Options.Add(option);
                         TrackIfEnum(option);
                     }
 
-                    foreach (Option option in BuildCliOptions(rec.ConfigurationType, rec.ExcludedConfigurationType, envConfig))
-                    {
-                        languageCommand.AddOption(option);
-                        TrackIfEnum(option);
-                    }
-
-                    cmd.AddCommand(languageCommand);
+                    cmd.Subcommands.Add(languageCommand);
                 }
             }
 
@@ -365,14 +326,14 @@ internal static class LaunchUtils
                 Command subCommand = new(literal, description);
                 if (literal.Any(char.IsUpper))
                 {
-                    subCommand.AddAlias(literal.ToLowerInvariant());
+                    subCommand.Aliases.Add(literal.ToLowerInvariant());
                 }
 
-                cmd.AddCommand(subCommand);
+                cmd.Subcommands.Add(subCommand);
             }
 
             // add this command to our root command
-            rootCommand.AddCommand(cmd);
+            rootCommand.Subcommands.Add(cmd);
         }
 
         //// create our generate command
@@ -493,59 +454,161 @@ internal static class LaunchUtils
         return rootCommand;
     }
 
+    /// <summary>
+    /// If <paramref name="option"/> is an enum (or <see cref="Nullable{T}"/> /
+    /// collection of enum), append its allowed values, and any
+    /// <see cref="DescriptionAttribute"/>-annotated per-value descriptions, to
+    /// <see cref="Option.Description"/>.
+    /// </summary>
+    /// <remarks>
+    /// Idempotent: the same <see cref="Option"/> instance is mutated at most once
+    /// even though <see cref="BuildCommand"/> may call <c>TrackIfEnum</c> on it
+    /// from multiple call sites (root, generate, language subcommands all share
+    /// the same static <see cref="Option{T}"/> instances). The standard
+    /// <c>HelpAction</c> then renders the inlined values as part of the option's
+    /// description column without any custom help action.
+    /// </remarks>
+    /// <param name="option">The option whose description may be augmented.</param>
     internal static void TrackIfEnum(Option option)
     {
-        if (option.ValueType.IsEnum)
+        Type? enumType = ResolveEnumType(option.ValueType);
+        if (enumType == null)
         {
-            _optsWithEnums.Add(option);
             return;
         }
 
-        if (option.ValueType.IsGenericType)
+        lock (_enumDescriptionsAugmentedLock)
         {
-            if (option.ValueType.GenericTypeArguments.First().IsEnum)
+            if (!_enumDescriptionsAugmented.Add(option))
             {
-                _optsWithEnums.Add(option);
+                return;
             }
 
-            return;
-        }
-
-        if (option.ValueType.IsArray)
-        {
-            if (option.ValueType.GetElementType()!.IsEnum)
+            string augmentation = BuildEnumDescription(enumType);
+            if (string.IsNullOrEmpty(augmentation))
             {
-                _optsWithEnums.Add(option);
+                return;
             }
 
-            return;
+            option.Description = string.IsNullOrEmpty(option.Description)
+                ? augmentation
+                : option.Description + "\n" + augmentation;
         }
     }
 
+    private static Type? ResolveEnumType(Type valueType)
+    {
+        if (valueType.IsEnum)
+        {
+            return valueType;
+        }
 
+        if (valueType.IsArray)
+        {
+            Type? elem = valueType.GetElementType();
+            return (elem != null && elem.IsEnum) ? elem : null;
+        }
+
+        if (valueType.IsGenericType)
+        {
+            Type first = valueType.GenericTypeArguments[0];
+            return first.IsEnum ? first : null;
+        }
+
+        return null;
+    }
+
+    private static string BuildEnumDescription(Type enumType)
+    {
+        List<MemberInfo> members = [.. enumType
+            .GetMembers(BindingFlags.Public | BindingFlags.Static)
+            .Where(m => m.DeclaringType == enumType)
+            .OrderBy(m => m.Name)];
+
+        if (members.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        StringBuilder sb = new();
+        sb.Append("Allowed values: ");
+        sb.Append(string.Join(", ", members.Select(m => m.Name)));
+
+        foreach (MemberInfo mem in members)
+        {
+            DescriptionAttribute? desc = mem.GetCustomAttributes<DescriptionAttribute>(false).FirstOrDefault();
+            if (desc != null && !string.IsNullOrEmpty(desc.Description))
+            {
+                sb.Append('\n');
+                sb.Append("  ");
+                sb.Append(mem.Name);
+                sb.Append(": ");
+                sb.Append(desc.Description);
+            }
+        }
+
+        return sb.ToString();
+    }
+
+
+    /// <summary>
+    /// Returns the <see cref="Option"/> instances defined by <paramref name="forType"/>'s
+    /// <see cref="ICodeGenConfig.GetOptions"/>, optionally filtered to exclude any option
+    /// whose CLI name or alias is also exposed by <paramref name="excludeFromType"/>.
+    /// </summary>
+    /// <remarks>
+    /// Each <see cref="ICodeGenConfig"/> layer's <c>GetOptions()</c> walks
+    /// <c>base.GetOptions()</c> and concatenates its own options, so passing
+    /// <paramref name="excludeFromType"/> = <c>typeof(ConfigGenerate)</c> when
+    /// <paramref name="forType"/> is a language config (e.g. <c>TypeScriptOptions</c>)
+    /// transitively excludes <see cref="ConfigRoot"/> options as well, leaving only
+    /// the language-local options. Exclusion is by CLI alias <em>string</em> (not
+    /// <see cref="Option"/> reference), so it remains correct even if a future
+    /// option is constructed dynamically per call rather than via a shared static
+    /// instance. The <paramref name="envConfig"/> parameter is intentionally
+    /// unused: env-default resolution now lives in <c>ConfigRoot.GetOpt</c>.
+    /// </remarks>
+    /// <param name="forType">The <see cref="ICodeGenConfig"/> type whose options to enumerate.</param>
+    /// <param name="excludeFromType">Optional config type whose options should be filtered out.</param>
+    /// <param name="envConfig">Unused. Retained because <c>Program.cs</c> still passes it.</param>
     internal static IEnumerable<Option> BuildCliOptions(
         Type forType,
         Type? excludeFromType = null,
         IConfiguration? envConfig = null)
     {
-        HashSet<string> inheritedPropNames = [];
+        _ = envConfig;
+
+        HashSet<string> excludedAliases = new(StringComparer.Ordinal);
 
         if (excludeFromType != null)
         {
-            PropertyInfo[] exProps = excludeFromType.GetProperties();
-            foreach (PropertyInfo exProp in exProps)
+            if (excludeFromType.IsAbstract)
             {
-                inheritedPropNames.Add(exProp.Name);
+                throw new Exception($"excludeFromType cannot be abstract! {excludeFromType.Name}");
+            }
+
+            object? excludeInstance = Activator.CreateInstance(excludeFromType);
+            if (excludeInstance is not ICodeGenConfig excludeConfig)
+            {
+                throw new Exception($"excludeFromType must implement ICodeGenConfig: {excludeFromType.Name}");
+            }
+
+            foreach (ConfigurationOption exOpt in excludeConfig.GetOptions())
+            {
+                excludedAliases.Add(exOpt.CliOption.Name);
+                foreach (string alias in exOpt.CliOption.Aliases)
+                {
+                    excludedAliases.Add(alias);
+                }
             }
         }
 
-        object? configDefault = null;
         if (forType.IsAbstract)
         {
             throw new Exception($"Config type cannot be abstract! {forType.Name}");
         }
 
-        configDefault = Activator.CreateInstance(forType);
+        object? configDefault = Activator.CreateInstance(forType);
 
         if (configDefault is not ICodeGenConfig config)
         {
@@ -554,17 +617,36 @@ internal static class LaunchUtils
 
         foreach (ConfigurationOption opt in config.GetOptions())
         {
-            // need to configure default values
-            if ((envConfig != null) &&
-                (!string.IsNullOrEmpty(opt.EnvVarName)))
+            if (excludedAliases.Count != 0)
             {
-                opt.CliOption.SetDefaultValueFactory(() => envConfig.GetSection(opt.EnvVarName).GetChildren().Select(c => c.Value));
-            }
-            else
-            {
-                opt.CliOption.SetDefaultValue(opt.DefaultValue);
+                if (excludedAliases.Contains(opt.CliOption.Name))
+                {
+                    continue;
+                }
+
+                bool aliasExcluded = false;
+                foreach (string alias in opt.CliOption.Aliases)
+                {
+                    if (excludedAliases.Contains(alias))
+                    {
+                        aliasExcluded = true;
+                        break;
+                    }
+                }
+
+                if (aliasExcluded)
+                {
+                    continue;
+                }
             }
 
+            // Defaults are no longer surfaced through Option<T>.DefaultValueFactory
+            // (System.CommandLine 2.0 GA + D1(b)). Runtime resolution is centralized
+            // in ConfigRoot.GetOpt/GetOptArray, which honors:
+            //   parsed CLI value > Environment.GetEnvironmentVariable(opt.EnvVarName)
+            //   > opt.DefaultValue.
+            // The only observable change is that --help no longer prints "[default: ...]"
+            // for these options.
             yield return opt.CliOption;
         }
     }

@@ -30,13 +30,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Hl7.Fhir.R5" Version="5.13.1" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.11" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.11" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.11" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.11" />
-    <PackageReference Include="Microsoft.OpenApi" Version="1.6.28" />
-    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+    <PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.15" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.15" />
+    <PackageReference Include="Microsoft.OpenApi" Version="1.6.29" />
+    <PackageReference Include="System.CommandLine" Version="2.0.7" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">

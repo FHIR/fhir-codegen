@@ -184,7 +184,7 @@ public class FhirPackageTestsR4 : FhirPackageTestBase
     private int _countComplexTypesByName = 41;
     private int _countResourcesByName = 148;
     private int _countLogicalModelsByName = 5;
-    private int _countExtensionsByUrl = TestCommon.EntriesR4.Length == 1 ? 393 : 561;
+    private int _countExtensionsByUrl = TestCommon.EntriesR4.Length == 1 ? 396 : 561;
     private int _countProfilesByUrl = 48;
     private int _countSearchParametersByUrl = TestCommon.EntriesR4.Length == 1 ? 1405 : 1410;
     private int _countOperationsByUrl = 47;

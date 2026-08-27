@@ -435,6 +435,9 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
     public required bool RequiresSliceDefinition { get; set; }
     public required string? GenSliceName { get; set; }
 
+    public required bool RequiresCardinalityDefinition { get; set; }
+    public required bool RequiresCardinalitySlice { get; set; }
+
     public required int SourceResourceOrder { get; set; }
     public required int SourceComponentOrder { get; set; }
     public required int SourceMinCardinality { get; set; }
@@ -536,6 +539,9 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
     public required string? BasicElementBaseId { get; set; }
     public required string? BasicElementId { get; set; }
 
+    public required string? ExtensionElementBaseId { get; set; }
+    public required string? ExtensionElementId { get; set; }
+
     [CgSQLiteForeignKey(referenceTable: "ElementOutcomes", referenceColumn: nameof(Key), modelTypeName: nameof(DbElementOutcome))]
     public required int? ContentReferenceOutcomeKey { get; set; }
     public required string? ContentReferenceExtensionUrl { get; set; }
@@ -571,6 +577,56 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
 
             ExtensionContextsLiteral = string.Join(',', value);
         }
+    }
+
+    public string? CardinalityExtensionContextsLiteral { get; set; } = null;
+    [CgSQLiteIgnore]
+    public List<string> CardinalityExtensionContexts
+    {
+        get => CardinalityExtensionContextsLiteral is null
+            ? []
+            : CardinalityExtensionContextsLiteral.Split(',').ToList();
+
+        set
+        {
+            if (value.Count == 0)
+            {
+                CardinalityExtensionContextsLiteral = null;
+                return;
+            }
+
+            CardinalityExtensionContextsLiteral = string.Join(',', value);
+        }
+    }
+
+    public List<string> GetCombinedContexts()
+    {
+        HashSet<string> contextSources = [];
+
+        if (ExtensionContextsLiteral is not null)
+        {
+            if (RequiresExtensionDefinition ||
+                (ExtensionSubstitutionUrl is not null) ||
+                (AlternateCanonicalTargetsLiteral is not null) ||
+                (AlternateReferenceTargetsLiteral is not null))
+            {
+                foreach (string c in ExtensionContexts)
+                {
+                    contextSources.Add(c);
+                }
+            }
+        }
+
+        if ((CardinalityExtensionContextsLiteral is not null) &&
+            RequiresCardinalityDefinition)
+        {
+            foreach (string c in CardinalityExtensionContexts)
+            {
+                contextSources.Add(c);
+            }
+        }
+
+        return contextSources.Order().ToList();
     }
 
     public string? MappedTypeKeysLiteral { get; set; } = null;
@@ -716,34 +772,6 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
             UnmappedChildTypeElementNamesLiteral = string.Join(',', value);
         }
     }
-
-    //public bool NeedsExtensionDefinition()
-    //{
-    //    if (BasicElementBaseId is not null)
-    //    {
-    //        return false;
-    //    }
-
-    //    if (RequiresXVerDefinition &&
-    //        (ExtensionSubstitutionKey is null) &&
-    //        (ContentReferenceExtensionUrl is null) &&
-    //        (ParentRequiresXverDefinition != true))
-    //    {
-    //        return true;
-    //    }
-
-    //    if (RequiresDefinitionAsContentReference == true)
-    //    {
-    //        return true;
-    //    }
-
-    //    if (RequiresDefinitionForGroupRepetitions == true)
-    //    {
-    //        return true;
-    //    }
-
-    //    return false;
-    //}
 }
 
 [CgSQLiteTable(tableName: "ElementOutcomeTargets")]
@@ -792,6 +820,13 @@ public partial class DbElementOutcomeTarget : DbRecordBase
     public required string? ContextElementId { get; set; }
     public required string? ContextRootExtensionUrl { get; set; }
     public required string? ContextParentExtensionUrl { get; set; }
+
+    [CgSQLiteForeignKey(referenceTable: "Elements", referenceColumn: nameof(DbElement.Key))]
+    public required int? CardinalityContextElementKey { get; set; }
+    public required string? CardinalityContextElementId { get; set; }
+    public required string? CardinalityContextRootExtensionUrl { get; set; }
+    public required string? CardinalityContextParentExtensionUrl { get; set; }
+
 
     public required string? Comments { get; set; }
 }

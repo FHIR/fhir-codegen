@@ -256,13 +256,24 @@ public class IgExporter
         };
     }
 
-    private readonly record struct XverIgDependencyRec
+    internal readonly record struct XverIgDependencyRec
     {
+        [JsonPropertyName("packageId")]
         public required string PackageId { get; init; }
+
+        [JsonPropertyName("packageVersion")]
         public required string PackageVersion { get; init; }
+
+        [JsonPropertyName("canonicalUrl")]
         public required string CanonicalUrl { get; init; }
+
+        [JsonPropertyName("versionSpecificPackages")]
         public required bool VersionSpecificPackages { get; init; }
+
+        [JsonPropertyName("hasR4B")]
         public required bool HasR4B { get; init; }
+
+        [JsonPropertyName("neededForPublisher")]
         public required bool NeededForPublisher { get; init; }
 
         public string AsYamlProp(FhirReleases.FhirSequenceCodes fhirSequence)
@@ -378,35 +389,7 @@ public class IgExporter
         }
     }
 
-    private static readonly List<XverIgDependencyRec> _xverDependencies = [
-        new()
-        {
-            PackageId = "hl7.terminology",
-            PackageVersion = "7.0.1",
-            CanonicalUrl = "http://terminology.hl7.org/ImplementationGuide/hl7.terminology",                // "http://terminology.hl7.org"
-            VersionSpecificPackages = true,
-            HasR4B = false,
-            NeededForPublisher = false,
-        },
-        new()
-        {
-            PackageId = "hl7.fhir.uv.extensions",
-            PackageVersion = "5.3.0-ballot-tc",
-            CanonicalUrl = "http://hl7.org/fhir/extensions/ImplementationGuide/hl7.fhir.uv.extensions",     // "http://hl7.org/fhir/extensions"
-            VersionSpecificPackages = true,
-            HasR4B = true,
-            NeededForPublisher = false,
-        },
-        new()
-        {
-            PackageId = "hl7.fhir.uv.tools",
-            PackageVersion = "1.0.0",
-            CanonicalUrl = "http://hl7.org/fhir/tools/ImplementationGuide/hl7.fhir.uv.tools",                // "http://hl7.org/fhir/tools"
-            VersionSpecificPackages = true,
-            HasR4B = false,
-            NeededForPublisher = false,
-        }
-    ];
+    private List<XverIgDependencyRec> _xverDependencies = [];
 
     private class IgParameterValue
     {
@@ -416,118 +399,26 @@ public class IgExporter
         public string? Value { get; set; }
     }
 
+    internal class XverPackageExportConfig
+    {
+        [JsonPropertyName("packageVersion")]
+        public string? PackageVersion { get; set; }
+
+        [JsonPropertyName("template")]
+        public string? Template { get; set; }
+
+        [JsonPropertyName("jekyll-timeout")]
+        public int? JekyllTimeout { get; set; }
+
+        [JsonPropertyName("dependencies")]
+        public List<XverIgDependencyRec>? Dependencies { get; set; }
+    }
 
 
     // codes described at: https://build.fhir.org/ig/FHIR/fhir-tools-ig/branches/master/CodeSystem-ig-parameters.html
     private List<IgParameterValue> _xverIgParameters = [];
-    //    // apply-contact: if true, overwrite all canonical resource contact details with that found in the IG.
-    //    ("apply-contact", "false"),
 
-    //    // apply-context: if true, overwrite all canonical resource context details with that found in the IG.
-    //    ("apply-context", "false"),
-
-    //    // apply-copyright: if true, overwrite all canonical resource copyright details with that found in the IG.
-    //    ("apply-copyright", "true"),
-
-    //    // apply-jurisdiction: if true, overwrite all canonical resource jurisdiction details with that found in the IG.
-    //    ("apply-jurisdiction", "false"),
-
-    //    // apply-publisher: if true, overwrite all canonical resource publisher details with that found in the IG.
-    //    ("apply-publisher", "false"),
-
-    //    // apply-version: if true, overwrite all canonical resource version details with that found in the IG.
-    //    ("apply-version", "false"),
-
-    //    // apply-wg: if true, overwrite all canonical resource WG details with that found in the IG.
-    //    ("apply-wg", "false"),
-
-    //    // copyrightyear: The copyright year text to include in the implementation guide footer
-    //    ("copyrightyear", "2025+"),
-
-    //    // default-contact: if true, populate all canonical resources that don't specify their own contact details with that found in the IG. Ignored if apply-contact is true.
-    //    ("default-contact", "true"),
-
-    //    // default-context: if true, populate all canonical resources that don't specify their own context details with that found in the IG. Ignored if apply-context is true.
-    //    ("default-context", "false"),
-
-    //    // default-copyright: if true, populate all canonical resources that don't specify their own copyright details with that found in the IG. Ignored if apply-copyright is true.
-    //    //("default-copyright", "true"),
-
-    //    // default-jurisdiction: f true, populate all canonical resources that don't specify their own jurisdiction details with that found in the IG. Ignored if apply-jurisdiction is true.
-    //    ("default-jurisdiction", "true"),
-
-    //    // default-publisher: if true, populate all canonical resources that don't specify their own publisher details with that found in the IG. Ignored if apply-publisher is true.
-    //    ("default-publisher", "false"),
-
-    //    // default-version: if true, populate all canonical resources that don't specify their own version details with that found in the IG. Ignored if apply-version is true.
-    //    ("default-version", "true"),
-
-    //    // default-wg: if true, populate all canonical resources that don't specify their own WG details with that found in the IG. Ignored if apply-contact is true.
-    //    ("default-wg", "true"),
-
-    //    // excludemap: If true, causes the mapping tab to be excluded from all StructureDefinition artifact pages
-    //    ("excludemap", "true"),
-
-    //    // i18n-default-lang: The default language (e.g. Resource.language) to assume in the IG when the resource and/or the element context doesn't specify a language
-    //    //("i18n-default-lang", "US-en"),
-    //    //("i18n-default-lang", "en-US"),
-    //    //("i18n-default-lang", "en"),
-
-    //    // jira-code: If your IG is published via HL7 and should your package ID diverge from the file name in the JIRA-Spec-Artifacts repository, this parameter will help point to the right file.
-    //    //("jira-code", ""),
-
-    //    // no-check-usage: No Warning in QA if there are extensions/profiles that are not used in this IG
-    //    ("no-check-usage", "true"),
-
-    //    // no-expansions-files: Do not create the 'expansions.*' files
-    //    ("no-expansions-files", "true"),
-
-    //    // no-ig-database: Do not create the package.db file
-    //    ("no-ig-database", "true"),
-
-    //    // path-resource: Additional directories for source content
-    //    //("path-resource", "input/elementmaps"),
-    //    //("path-resource", "input/resourcemaps"),
-    //    //("path-resource", "input/vocabularymaps"),
-
-    //    /* pin-canonicals: Defines how the IG publisher treats unversioned canonical references. Possible values:
-    //     *   pin-none: no action is taken (default)
-    //     *   pin-all: any unversioned canonical references that can be resolved through the package dependencies will have |(version) appended to the canonical, where (version) is the latest available within the package dependencies
-    //     *   pin-multiples: pinning the canonical reference will only happen if there is multiple versions found in the package dependencies
-    //     */
-    //    ("pin-canonicals", "pin-all"),
-
-    //    // releaselabel: The release label at the top of the page. This is a text label with no fixed set of values that describes the status of the publication to users. Typical values might be 'STU X' or 'Normative Standard' or '2024 Edition'
-    //    ("releaselabel", "STU"),
-
-    //    // show-inherited-invariants: if true, render inherited constraints in the full details and invariants view
-    //    ("show-inherited-invariants", "false"),
-
-    //    // shownav: Determines whether the next/previous navigation tabs are shown in the header and footer
-    //    ("shownav", "true"),
-
-    //    // special-url: If a canonical resource in the IG should actually have a URL that isn't the one implied by the canonical URL for the IG itself, it must be listed here explicitly (as well as defined in the resource itself). It must be listed here to stop it accidentally being different. Each canonical url must be listed in full as present on the resource; it is not possible to specify a pattern.
-    //    //("special-url", "http://terminology.hl7.org/CodeSystem/designation-usage"),
-    //    //("special-url", "http://terminology.hl7.org/ValueSet/designation-usage"),
-
-    //    // special-url-base: A common alternative base URL for multiple canonical resources in the IG. The entire Canonical URL must exactly match {special-url-base}/{type}/{id}
-    //    ("special-url-base", "http://terminology.hl7.org"),
-
-    //    // suppress-mappings: By default, snapshots inherit mappings, and the mappings are carried through. But many of them aren't useful, or desired, and can be suppressed by adding this parameter. The value is the URI found in StructureDefinition.mapping.uri. The special value '*' suppresses most of the mappings in the main specification
-    //    ("suppress-mappings", "true"),
-
-    //    // usage-stats-opt-out: If true, usage stats (information about extensions, value sets, and invariants being used) is not sent to fhir.org (see e.g. http://clinfhir.com/igAnalysis.html).
-    //    ("usage-stats-opt-out", "true"),
-
-    //    /* version-comparison:
-    //     * Control how the IG publisher does a comparison with a previously published version (see qa.html). Possible values:
-    //     *   {last} - compare with the last published version (whatever it's status) - this is the default if the parameter doesn't appear
-    //     *   {current} - compare with the last full published version
-    //     *   n/a - don't do any comparison
-    //     *   [v] - a previous version where [v] is the version
-    //     */
-    //    ("version-comparison", "n/a"),
-    //];
+    private XverPackageExportConfig? _xverPackageExportConfig = null;
 
     private readonly XVerExporter _exporter;
 
@@ -601,6 +492,89 @@ public class IgExporter
 
         // load any support files
         loadIgParams();
+
+        // load the export package config
+        loadPackageExportConfig();
+
+        // update our export version (if necessary)
+        if (_xverPackageExportConfig?.PackageVersion is not null)
+        {
+            if (string.IsNullOrEmpty(config.XverArtifactVersion))
+            {
+                _exporter._crossDefinitionVersion = _xverPackageExportConfig.PackageVersion;
+                _logger.LogInformation("Setting cross-version export version to {Version} based on package export config", _exporter._crossDefinitionVersion);
+            }
+        }
+
+        // set dependencies
+        if (_xverDependencies.Count == 0)
+        {
+            if (_xverPackageExportConfig?.Dependencies != null)
+            {
+                _xverDependencies = _xverPackageExportConfig.Dependencies;
+            }
+            else
+            {
+                _xverDependencies = [
+                    new()
+                    {
+                        PackageId = "hl7.terminology",
+                        PackageVersion = "7.1.0",
+                        CanonicalUrl = "http://terminology.hl7.org/ImplementationGuide/hl7.terminology",                // "http://terminology.hl7.org"
+                        VersionSpecificPackages = true,
+                        HasR4B = false,
+                        NeededForPublisher = false,
+                    },
+                    new()
+                    {
+                        PackageId = "hl7.fhir.uv.extensions",
+                        PackageVersion = "5.3.0",
+                        CanonicalUrl = "http://hl7.org/fhir/extensions/ImplementationGuide/hl7.fhir.uv.extensions",     // "http://hl7.org/fhir/extensions"
+                        VersionSpecificPackages = true,
+                        HasR4B = true,
+                        NeededForPublisher = false,
+                    },
+                    new()
+                    {
+                        PackageId = "hl7.fhir.uv.tools",
+                        PackageVersion = "1.1.2",
+                        CanonicalUrl = "http://hl7.org/fhir/tools/ImplementationGuide/hl7.fhir.uv.tools",                // "http://hl7.org/fhir/tools"
+                        VersionSpecificPackages = true,
+                        HasR4B = false,
+                        NeededForPublisher = false,
+                    }
+                ];
+            }
+        }
+    }
+
+    private void loadPackageExportConfig()
+    {
+        if (_crossVersionSourcePath is null)
+        {
+            return;
+        }
+
+        string filename = Path.Combine(_crossVersionSourcePath, "input", "ig-support", "xver-package-config.json");
+        if (!File.Exists(filename))
+        {
+            return;
+        }
+
+        try
+        {
+            string json = File.ReadAllText(filename);
+            var config = JsonSerializer.Deserialize<XverPackageExportConfig>(json);
+            if (config is not null)
+            {
+                _xverPackageExportConfig = config;
+            }
+
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error loading package export config from {Filename}", filename);
+        }
     }
 
     private void loadIgParams()
@@ -763,7 +737,7 @@ public class IgExporter
                 <a href="index.html">Home</a>
               </li>
               <li class="dropdown">
-                <a data-toggle="dropdown" href="#" class="dropdown-toggle">Support
+                <a data-toggle="dropdown" href="menu.html" class="dropdown-toggle">Support
                   <b class="caret"></b>
                 </a>
                 <ul class="dropdown-menu">
@@ -796,19 +770,19 @@ public class IgExporter
                 <a href="index.html">Home</a>
               </li>
               <li>
-                <a href="lookup-sd.html">Resource Lookup</a>
+                <a href="index-resources.html">Resource Lookup</a>
               </li>
               <li>
-                <a href="lookup-sd-types.html">Type Lookup</a>
+                <a href="index-types.html">Type Lookup</a>
               </li>
               <li>
-                <a href="lookup-vs.html">ValueSet Lookup</a>
+                <a href="index-vs.html">ValueSet Lookup</a>
               </li>
               <li>
                 <a href="artifacts.html">Artifacts</a>
               </li>
               <li class="dropdown">
-                <a data-toggle="dropdown" href="#" class="dropdown-toggle">Support
+                <a data-toggle="dropdown" href="menu.html" class="dropdown-toggle">Support
                   <b class="caret"></b>
                 </a>
                 <ul class="dropdown-menu">
@@ -852,9 +826,9 @@ public class IgExporter
     {
         HashSet<string> skipPages = [
             "index",
-            "lookup-sd",
-            "lookup-sd-types",
-            "lookup-vs",
+            "index-resources",
+            "index-types",
+            "index-vs",
             "downloads",
             "changelog",
         ];
@@ -993,9 +967,9 @@ public class IgExporter
 
         HashSet<string> skipPages = [
             "index",
-            "lookup-sd",
-            "lookup-sd-types",
-            "lookup-vs",
+            "index-resources",
+            "index-types",
+            "index-vs",
             "downloads",
             "changelog",
         ];
@@ -1284,9 +1258,9 @@ public class IgExporter
 
         HashSet<string> skipPages = [
             "index",
-            "lookup-sd",
-            "lookup-sd-types",
-            "lookup-vs",
+            "index-resources",
+            "index-types",
+            "index-vs",
             "downloads",
             "changelog",
         ];
@@ -1464,9 +1438,9 @@ public class IgExporter
 
         HashSet<string> skipPages = [
             "index",
-            "lookup-sd",
-            "lookup-sd-types",
-            "lookup-vs",
+            "index-resources",
+            "index-types",
+            "index-vs",
             "downloads",
             "changelog",
         ];
@@ -1839,11 +1813,14 @@ public class IgExporter
 
     private void writeIgIni(string dir, string packageId)
     {
+        string template = _xverPackageExportConfig?.Template ?? "hl7.fhir.template#current";
+
         string filename = Path.Combine(dir, "ig.ini");
         string contents = $$$"""
                     [IG]
                     ig = input/ig-{{{packageId}}}.json
-                    template = hl7.fhir.template
+                    jekyll-timeout = {{{_xverPackageExportConfig?.JekyllTimeout ?? 60}}}
+                    template = {{{template}}}
                     """;
         File.WriteAllText(filename, contents);
     }
@@ -1882,6 +1859,8 @@ public class IgExporter
             Description = $"Extensions for Using Data Elements from FHIR {igTr.PackagePair.SourceFhirSequence} in FHIR {igTr.PackagePair.TargetFhirSequence}",
         };
 
+        _logger.LogInformation($"Creating XVer IG Directories, output path: {_outputPath}...");
+
         createXVerIgDirectories(igTr);
         igTr.XVerSourcePageContentFiles = copyIgSourceContent(igTr.InputDir!, igTr.PageContentDir!);
 
@@ -1889,6 +1868,19 @@ public class IgExporter
             (igTr.IgRootDir is not null))
         {
             writeScriptFiles(igTr.IgRootDir);
+        }
+
+        // write a .gitignore file if there is not one there already
+        if (!string.IsNullOrEmpty(_crossVersionSourcePath) &&
+            (igTr.IgRootDir is not null))
+        {
+            string sourceFile = Path.Combine(_crossVersionSourcePath, "input", "ig-support", "gitignore.txt");
+            string targetFile = Path.Combine(igTr.IgRootDir, ".gitignore");
+            if (File.Exists(sourceFile) &&
+                !File.Exists(targetFile))
+            {
+                File.Copy(sourceFile, targetFile);
+            }
         }
 
         return igTr;
@@ -2174,7 +2166,7 @@ public class IgExporter
             return [];
         }
 
-        // copy the contents of this directory into the target input directory
+        // copy the contents of this directory into the targetFile input directory
         recursiveCopyContents(igSourceDir, inputDir);
 
         if (string.IsNullOrEmpty(pageContentDir) ||

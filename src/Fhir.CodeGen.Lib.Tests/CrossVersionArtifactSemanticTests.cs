@@ -62,28 +62,45 @@ public class CrossVersionArtifactSemanticTests
     }
 
     [Fact]
-    public void XVerComplexTypeProfilesUseComplexTypeKind()
+    public void XVerExcludesDataTypeAndPrimitiveTypeFromTypeIndex()
     {
         using SemanticFixture fixture = SemanticFixture.Create();
-        using JsonDocument document = JsonDocument.Parse(File.ReadAllText(fixture.AddressProfilePath));
 
-        document.RootElement.GetProperty("kind").GetString().ShouldBe("complex-type");
-        document.RootElement.GetProperty("type").GetString().ShouldBe("Address");
-        document.RootElement.GetProperty("baseDefinition").GetString().ShouldEndWith("/Address");
+        File.Exists(Path.Combine(fixture.ResourceDirectory, "StructureDefinition-r4-datatype-to-r5-nomap.json")).ShouldBeFalse();
+        File.Exists(Path.Combine(fixture.ResourceDirectory, "StructureDefinition-r4-primitivetype-to-r5-nomap.json")).ShouldBeFalse();
+
+        File.Exists(Path.Combine(fixture.PageContentDirectory, "lookup-sd-r4-datatype-to-r5-nomap.md")).ShouldBeFalse();
+        File.Exists(Path.Combine(fixture.PageContentDirectory, "lookup-sd-r4-primitivetype-to-r5-nomap.md")).ShouldBeFalse();
+
+        string typeLookupIndex = File.ReadAllText(fixture.TypeLookupIndexPath);
+        typeLookupIndex.ShouldNotContain("DataType");
+        typeLookupIndex.ShouldNotContain("PrimitiveType");
+
+        List<string> typeSources = GetConceptMapSourceCodes(fixture.TypeConceptMapPath);
+        typeSources.ShouldNotContain("DataType");
+        typeSources.ShouldNotContain("PrimitiveType");
     }
 
     [Fact]
-    public void XVerUnmappedComplexTypeProfileDoesNotUseBasic()
+    public void XVerComplexTypeProfilesAreNotEmitted()
     {
         using SemanticFixture fixture = SemanticFixture.Create();
-        string profileJson = File.ReadAllText(fixture.UnmappedTypeProfilePath);
-        using JsonDocument document = JsonDocument.Parse(profileJson);
 
-        document.RootElement.GetProperty("kind").GetString().ShouldBe("complex-type");
-        document.RootElement.GetProperty("type").GetString().ShouldBe("Element");
-        document.RootElement.GetProperty("baseDefinition").GetString().ShouldEndWith("/Element");
-        profileJson.ShouldNotContain("StructureDefinition/Basic");
-        profileJson.ShouldNotContain("\"type\": \"Basic\"");
+        File.Exists(fixture.AddressProfilePath).ShouldBeFalse();
+        File.Exists(fixture.UnmappedTypeProfilePath).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void XVerTypeLookupIndexHasNoProfileColumn()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+
+        string typeLookupIndex = File.ReadAllText(fixture.TypeLookupIndexPath);
+
+        string[] lines = typeLookupIndex.Split('\n');
+        string? headerLine = lines.FirstOrDefault(l => l.TrimStart().StartsWith("| R4 Type", StringComparison.Ordinal));
+        headerLine.ShouldNotBeNull("Expected a `| R4 Type` header row in the type lookup index.");
+        headerLine!.ShouldNotContain("Profile");
     }
 
     [Fact]
@@ -124,7 +141,7 @@ public class CrossVersionArtifactSemanticTests
     }
 
     [Fact]
-    public void XVerUnmappedTypeLookupDoesNotLinkBasic()
+    public void XVerUnmappedTypeLookupLinksExtension()
     {
         using SemanticFixture fixture = SemanticFixture.Create();
 
@@ -132,7 +149,23 @@ public class CrossVersionArtifactSemanticTests
 
         lookupPage.ShouldNotContain("Basic.html");
         lookupPage.ShouldNotContain("Basic resource");
-        lookupPage.ShouldContain("no direct target type");
+        lookupPage.ShouldContain("Extension");
+        lookupPage.ShouldContain("extensibility.html#Extension");
+    }
+
+    [Fact]
+    public void XVerTypeLookupIndexLinksExtensionForUnmapped()
+    {
+        using SemanticFixture fixture = SemanticFixture.Create();
+
+        string typeLookupIndex = File.ReadAllText(fixture.TypeLookupIndexPath);
+
+        string[] lines = typeLookupIndex.Split('\n');
+        string? unmappedRow = lines.FirstOrDefault(l => l.Contains("UnmappedType", StringComparison.Ordinal));
+        unmappedRow.ShouldNotBeNull("Expected an UnmappedType row in the type lookup index.");
+        unmappedRow!.ShouldContain("Extension");
+        unmappedRow.ShouldContain("extensibility.html#Extension");
+        unmappedRow.ShouldNotContain("No direct target type");
     }
 
     private static List<string> GetConceptMapSourceCodes(string path)
@@ -197,7 +230,7 @@ public class CrossVersionArtifactSemanticTests
 
         public string UnmappedTypeElementMapPath => Path.Combine(ResourceDirectory, $"{SourceShortName}-UnmappedType-elements-for-{TargetShortName}-NoMap.json");
 
-        public string TypeLookupIndexPath => Path.Combine(PageContentDirectory, "lookup-sd-types.md");
+        public string TypeLookupIndexPath => Path.Combine(PageContentDirectory, "index-types.md");
 
         public string AddressTypeLookupPath => Path.Combine(PageContentDirectory, "lookup-sd-r4-address-to-r5-address.md");
 
@@ -262,11 +295,15 @@ public class CrossVersionArtifactSemanticTests
             DbStructureDefinition sourceAddress = InsertStructure(connection, sourcePackage, "Address", FhirArtifactClassEnum.ComplexType);
             DbStructureDefinition sourceUnmappedType = InsertStructure(connection, sourcePackage, "UnmappedType", FhirArtifactClassEnum.ComplexType);
             DbStructureDefinition sourceUnmappedResource = InsertStructure(connection, sourcePackage, "UnmappedResource", FhirArtifactClassEnum.Resource);
+            DbStructureDefinition sourceDataType = InsertStructure(connection, sourcePackage, "DataType", FhirArtifactClassEnum.ComplexType);
+            DbStructureDefinition sourcePrimitiveType = InsertStructure(connection, sourcePackage, "PrimitiveType", FhirArtifactClassEnum.ComplexType);
 
             InsertRootElement(connection, sourcePackage, sourcePatient);
             InsertRootElement(connection, sourcePackage, sourceAddress);
             InsertRootElement(connection, sourcePackage, sourceUnmappedType);
             InsertRootElement(connection, sourcePackage, sourceUnmappedResource);
+            InsertRootElement(connection, sourcePackage, sourceDataType);
+            InsertRootElement(connection, sourcePackage, sourcePrimitiveType);
 
             DbStructureDefinition targetPatient = InsertStructure(connection, targetPackage, "Patient", FhirArtifactClassEnum.Resource);
             DbStructureDefinition targetAddress = InsertStructure(connection, targetPackage, "Address", FhirArtifactClassEnum.ComplexType);
@@ -288,6 +325,8 @@ public class CrossVersionArtifactSemanticTests
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceAddress, targetAddress);
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceUnmappedType, null);
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceUnmappedResource, null);
+            InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceDataType, null);
+            InsertStructureOutcome(connection, sourcePackage, targetPackage, sourcePrimitiveType, null);
         }
 
         private static DbFhirPackage InsertPackage(

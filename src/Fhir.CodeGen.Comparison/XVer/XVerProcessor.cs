@@ -147,7 +147,6 @@ public partial class XVerProcessor
     private ILogger _logger;
     private DefinitionCollection[] _definitions = [];
     private Dictionary<string, int> _definitionIndexes = [];
-    private Dictionary<(string left, string right), FhirCoreComparer> _comparisonCache;
     private ComparisonDatabase? _db = null;
     private Dictionary<string, HashSet<string>> _vsUrlsToInclude = [];
 
@@ -178,8 +177,6 @@ public partial class XVerProcessor
             _dbPath = path;
             _dbName = null;
         }
-
-        _comparisonCache = [];
     }
 
     /// <summary>
@@ -203,7 +200,6 @@ public partial class XVerProcessor
         _dbPath = db.DbFilePath;
         _dbName = db.DbFileName;
 
-        _comparisonCache = [];
         _db = db;
     }
 
@@ -300,10 +296,10 @@ public partial class XVerProcessor
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, includeIgScripts: false);
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, maxStepSize: 1, includeIgScripts: false, specificPairs: specificPairs);
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, includeIgScripts: false, specificPairs: specificPairs);
-            ExportOutcomes(includeIgScripts: false, specificPairs: specificPairs);
+                //ExportOutcomes(includeIgScripts: true, specificPairs: specificPairs);
                 //ExportOutcomes(includeIgScripts: true, specificPairs: specificPairs);
                 //ExportOutcomes(includeIgScripts: false);
-                //ExportOutcomes();
+                ExportOutcomes();
 
                 break;
 
@@ -928,55 +924,6 @@ public partial class XVerProcessor
             : FhirSanitizationUtils.SanitizeForProperty(sourceName, convertToConvention: FhirNameConventionExtensions.NamingConvention.PascalCase) + ".md";
     }
 
-    private (string overviewTo, string artifactTo, string overviewFrom, string artifactFrom) getConceptMapMdLinks(
-        StructureDefinitionGraphCell cell,
-        ComparisonDirection direction,
-        FhirArtifactClassEnum artifactClass)
-    {
-        StructureDefinitionGraphCell? targetCell = direction == ComparisonDirection.Up ? cell.RightCell : cell.LeftCell;
-
-        if (targetCell == null)
-        {
-            return ("*no map*", "*no map*", "*no map*", "*no map*");
-        }
-
-        string overviewRoot = artifactClass == FhirArtifactClassEnum.Resource ? "resources" : "types";
-
-        StructureDefinitionGraphEdge? edge = direction == ComparisonDirection.Up ? cell.RightEdge : cell.LeftEdge;
-        ConceptMap? overviewMapTo = direction == ComparisonDirection.Up ? edge?.OverviewUp : edge?.OverviewDown;
-        ConceptMap? mapTo = direction == ComparisonDirection.Up ? edge?.Up : edge?.Down;
-        ConceptMap? overviewMapFrom = direction == ComparisonDirection.Up ? edge?.OverviewDown : edge?.OverviewUp;
-        ConceptMap? mapFrom = direction == ComparisonDirection.Up ? edge?.Down : edge?.Up;
-
-        return (
-            getOverviewLink(overviewMapTo, targetCell),
-            getArtifactLink(mapTo, targetCell),
-            getOverviewLink(overviewMapFrom, targetCell),
-            getArtifactLink(mapFrom, targetCell));
-
-        string getOverviewLink(ConceptMap? map, StructureDefinitionGraphCell? target)
-        {
-            if ((map == null) || (target == null))
-            {
-                return "*no map*";
-            }
-
-            return $"[{map.Name.ForMdTable()}]" +
-                $"(/input/{overviewRoot}_v2/ConceptMap-{map.Name}.json)";
-        }
-
-        string getArtifactLink(ConceptMap? map, StructureDefinitionGraphCell? target)
-        {
-            if ((map == null) || (target == null))
-            {
-                return "*no map*";
-            }
-
-            return $"[{map.Name.ForMdTable()}]" +
-                $"(/input/{overviewRoot}_v2/{cell.DC.FhirSequence.ToRLiteral()}to{target.DC.FhirSequence.ToRLiteral()}/ConceptMap-{map.Name}.json)";
-        }
-    }
-
     private string getVsFilename(string sourceVsName, bool includeRelativeDir = true)
     {
         return includeRelativeDir
@@ -987,63 +934,6 @@ public partial class XVerProcessor
         //    ? $"ValueSets/{sourceVsName}_{cd.TargetDefinition.FhirSequence.ToRLiteral()}_{cd.Target?.Name.ToPascalCase()}"
         //    : $"{sourceVsName}_{cd.TargetDefinition.FhirSequence.ToRLiteral()}_{cd.Target?.Name.ToPascalCase()}";
     }
-
-    private (string to, string from) getConceptMapMdLinks(ValueSetGraphCell cell, ComparisonDirection direction)
-    {
-        ValueSetGraphCell? targetCell = direction == ComparisonDirection.Up ? cell.RightCell : cell.LeftCell;
-
-        if (targetCell == null)
-        {
-            return ("*no map*", "*no map*");
-        }
-
-        ValueSetGraphEdge? edge = direction == ComparisonDirection.Up ? cell.RightEdge : cell.LeftEdge;
-        ConceptMap? mapTo = direction == ComparisonDirection.Up ? edge?.Up : edge?.Down;
-        ConceptMap? mapFrom = direction == ComparisonDirection.Up ? edge?.Down : edge?.Up;
-
-        return (getLink(mapTo, targetCell), getLink(mapFrom, targetCell));
-
-        //if (direction == ComparisonDirection.Up)
-        //{
-        //    if ((cell.RightCell == null) ||
-        //        (cell.RightEdge?.Up == null) ||
-        //        (cell.RightEdge?.Down == null))
-        //    {
-        //        return ("*no map*", "*no map*");
-        //    }
-
-        //    return (
-        //        $"[{cell.RightEdge.Up.Name.ForMdTable()}]" +
-        //        $"(/input/codes_v2/{cell.DC.FhirSequence.ToRLiteral()}to{cell.RightCell.DC.FhirSequence.ToRLiteral()}/ConceptMap-{cell.RightEdge.Up.Name}.json)",
-        //        $"[{cell.RightEdge.Down.Name.ForMdTable()}]" +
-        //        $"(/input/codes_v2/{cell.RightCell.DC.FhirSequence.ToRLiteral()}to{cell.DC.FhirSequence.ToRLiteral()}/ConceptMap-{cell.RightEdge.Down.Name}.json)");
-        //}
-
-        //if ((cell.LeftCell == null) ||
-        //    (cell.LeftEdge?.Up == null) ||
-        //    (cell.LeftEdge?.Down == null))
-        //{
-        //    return ("*no map*", "*no map*");
-        //}
-
-        //return (
-        //    $"[{cell.LeftEdge.Down.Name.ForMdTable()}]" +
-        //    $"(/input/codes_v2/{cell.DC.FhirSequence.ToRLiteral()}to{cell.LeftCell.DC.FhirSequence.ToRLiteral()}/ConceptMap-{cell.LeftEdge.Down.Name}.json)",
-        //    $"[{cell.LeftEdge.Up.Name.ForMdTable()}]" +
-        //    $"(/input/codes_v2/{cell.LeftCell.DC.FhirSequence.ToRLiteral()}to{cell.DC.FhirSequence.ToRLiteral()}/ConceptMap-{cell.LeftEdge.Up.Name}.json)");
-
-        string getLink(ConceptMap? map, ValueSetGraphCell? target)
-        {
-            if ((map == null) || (target == null))
-            {
-                return "*no map*";
-            }
-
-            return $"[{map.Name.ForMdTable()}]" +
-                $"(/input/codes_v2/{cell.DC.FhirSequence.ToRLiteral()}to{target.DC.FhirSequence.ToRLiteral()}/ConceptMap-{map.Name}.json)";
-        }
-    }
-
 
     private ExportStreamWriter createMarkdownWriter(string filename, bool writeGenerationHeader = true, bool includeGenerationTime = false)
     {

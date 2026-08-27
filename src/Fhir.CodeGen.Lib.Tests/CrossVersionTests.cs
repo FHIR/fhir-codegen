@@ -724,13 +724,11 @@ public class CrossVersionTests
 
             string[] allResourceFiles = Directory.GetFiles(resourcesDir, "*.json", SearchOption.TopDirectoryOnly);
 
-            // Sentinel complex types must each produce at least one profile + one extension.
+            // Sentinel complex types must each produce at least one extension SD.
+            // Per-complex-type profiles are no longer emitted; the type ConceptMap
+            // plus per-element extension definitions carry the representation.
             foreach (string sentinel in sentinelTypes)
             {
-                allResourceFiles.Any(f => Path.GetFileName(f).Contains(sentinel, StringComparison.OrdinalIgnoreCase) &&
-                                          Path.GetFileName(f).StartsWith("StructureDefinition-", StringComparison.OrdinalIgnoreCase))
-                    .ShouldBeTrue($"Expected at least one StructureDefinition profile for complex type {sentinel} under {resourcesDir}");
-
                 allResourceFiles.Any(f => Path.GetFileName(f).Contains(sentinel, StringComparison.OrdinalIgnoreCase) &&
                                           Path.GetFileName(f).Contains("extension", StringComparison.OrdinalIgnoreCase))
                     .ShouldBeTrue($"Expected at least one extension StructureDefinition for complex type {sentinel} under {resourcesDir}");
@@ -741,12 +739,12 @@ public class CrossVersionTests
                 .ShouldBeTrue($"Expected a *-type-map-to-* ConceptMap under {resourcesDir}");
 
             // Type lookup page index.
-            File.Exists(Path.Combine(pageContentDir, "lookup-sd-types.md"))
-                .ShouldBeTrue($"Expected lookup-sd-types.md under {pageContentDir}");
+            File.Exists(Path.Combine(pageContentDir, "index-types.md"))
+                .ShouldBeTrue($"Expected index-types.md under {pageContentDir}");
 
             // Resource lookup page index, with the renamed title.
-            string lookupSdPath = Path.Combine(pageContentDir, "lookup-sd.md");
-            File.Exists(lookupSdPath).ShouldBeTrue($"Expected lookup-sd.md under {pageContentDir}");
+            string lookupSdPath = Path.Combine(pageContentDir, "index-resources.md");
+            File.Exists(lookupSdPath).ShouldBeTrue($"Expected index-resources.md under {pageContentDir}");
 
             // Exclusion guard: no artifacts for the abstract bases.
             string[] excludedRoots = ["Base", "Element", "BackboneElement", "BackboneType"];

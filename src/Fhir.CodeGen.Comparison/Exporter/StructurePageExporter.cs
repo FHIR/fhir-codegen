@@ -39,8 +39,52 @@ public class StructurePageExporter
         "Base",
         "BackboneType",
         "BackboneElement",
+        "DataType",
         "Element",
+        "PrimitiveType",
         ];
+
+    internal static readonly Dictionary<string, string> ExtendedTypeSpecPageLookup = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // type framework types
+        { "Base", "types.html#Base" },
+        { "Element", "types.html#Element" },
+        { "BackboneElement", "types.html#BackboneElement" },
+        { "BackboneType", "types.html#BackboneType" },
+        { "DataType", "types.html#DataType" },
+        { "PrimitiveType", "types.html#PrimitiveType" },
+        { "Resource", "resource.html#Resource" },
+        { "DomainResource", "domainresource.html#DomainResource" },
+        { "CanonicalResource", "canonicalresource.html#CanonicalResource" },
+        { "MetadataResource", "metadataresource.html#MetadataResource" },
+
+        // metadata types
+        { "Availability", "metadatatypes.html#Availability" },
+        { "ContactDetail", "metadatatypes.html#ContactDetail"},
+        { "Contributor", "metadatatypes.html#Contributor"},
+        { "DataRequirement", "metadatatypes.html#DataRequirement"},
+        { "Expression", "metadatatypes.html#Expression"},
+        { "ExtendedContactDetail", "metadatatypes.html#ExtendedContactDetail" },
+        { "MonetaryComponent", "metadatatypes.html#MonetaryComponent" },
+        { "ParameterDefinition", "metadatatypes.html#ParameterDefinition"},
+        { "RelatedArtifact", "metadatatypes.html#RelatedArtifact"},
+        { "TriggerDefinition", "metadatatypes.html#TriggerDefinition" },
+        { "UsageContext", "metadatatypes.html#UsageContext"},
+        { "VirtualServiceDetail", "metadatatypes.html#VirtualServiceDetail" },
+
+        // special-purpose types
+        { "CodeableReference", "references.html#CodeableReference" },
+        { "Meta", "resource.html#Meta" },
+        { "Reference", "references.html#Reference" },
+        { "Dosage", "dosage.html#Dosage" },
+        { "DosageSafety", "dosage.html#DosageSafety" },
+        { "DosageCondition", "dosage.html#DosageCondition" },
+        { "DosageDetails", "dosage.html#DosageDetails" },
+        { "ElementDefinition", "elementdefinition.html#ElementDefinition" },
+        { "Extension", "extensibility.html#Extension" },
+        { "Narrative", "narrative.html#Narrative" },
+        { "xhtml", "narrative.html#xhtml" },
+    };
 
     public StructurePageExporter(
         XVerExporter exporter,
@@ -62,7 +106,7 @@ public class StructurePageExporter
             exportLookupIndexPage(
                 igTr,
                 FhirArtifactClassEnum.Resource,
-                "lookup-sd.md",
+                "index-resources.md",
                 "Resource Lookup",
                 igTr.ResourceLookupFiles);
             exportLookupPages(
@@ -74,7 +118,7 @@ public class StructurePageExporter
             exportLookupIndexPage(
                 igTr,
                 FhirArtifactClassEnum.ComplexType,
-                "lookup-sd-types.md",
+                "index-types.md",
                 "Type Lookup",
                 igTr.TypeLookupFiles);
             exportLookupPages(
@@ -185,21 +229,25 @@ public class StructurePageExporter
             {
                 mdWriter.WriteLine(
                    $"The FHIR {igTr.PackagePair.SourceFhirSequence} complex type has no direct target type" +
-                   $" in FHIR {igTr.PackagePair.TargetFhirSequence}; use the generated profile and extension representation instead.");
+                   $" in FHIR {igTr.PackagePair.TargetFhirSequence}; use the generated" +
+                   $" [`Extension`]({targetBaseUrl}extensibility.html#Extension) representation linked below.");
             }
             mdWriter.WriteLine();
 
-            if (sdOutcome.GenFileName is not null)
+            if (isResourceLookup)
             {
-                mdWriter.WriteLine(
-                   $"Note that there is a profile defined to simplify use of this cross-version {sourceArtifactLabel} representation:" +
-                   $"[Profile: {id}]({sdOutcome.GenFileName}.html)");
+                if (sdOutcome.GenFileName is not null)
+                {
+                    mdWriter.WriteLine(
+                       $"Note that there is a profile defined to simplify use of this cross-version {sourceArtifactLabel} representation:" +
+                       $"[Profile: {id}]({sdOutcome.GenFileName}.html)");
+                }
+                else
+                {
+                    mdWriter.WriteLine($"No profile generated for this cross-version {sourceArtifactLabel} representation.");
+                }
+                mdWriter.WriteLine();
             }
-            else
-            {
-                mdWriter.WriteLine($"No profile generated for this cross-version {sourceArtifactLabel} representation.");
-            }
-            mdWriter.WriteLine();
 
             bool hasElementConceptMap = (sdOutcome.ElementConceptMapFileName is not null) &&
                 igTr.ElementMapFiles.Any(file => file.FileNameWithoutExtension == sdOutcome.ElementConceptMapFileName);
@@ -295,23 +343,50 @@ public class StructurePageExporter
             : [];
         Dictionary<int, List<(string label, string link)>> outcomeAccumulator = [];
 
+        string rootSourceSpecLink = ExtendedTypeSpecPageLookup.TryGetValue(sdOutcome.SourceId, out string? pageUrl)
+            ? $"{sourceBaseUrl}{pageUrl}"
+            : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
+            ? $"{sourceBaseUrl}{sdOutcome.SourceName}.html#resource"
+            : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+            ? $"{sourceBaseUrl}datatypes.html#{sdOutcome.SourceName}"
+            : $"{sourceBaseUrl}{sdOutcome.SourceName}.html";
+
         // iterate over the element outcomes that target this structure
         foreach (DbElementOutcome edOutcome in edOutcomes)
         {
-            if (edOutcome.SourceResourceOrder == 0)
+            if ((edOutcome.SourceResourceOrder == 0) &&
+                (sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.ComplexType))
             {
-                mdWriter.WriteLine(
-                    $"| [`{edOutcome.SourceId}`]({sourceBaseUrl}{sdOutcome.SourceName}.html#resource)" +
-                    $" | " +
-                    $" | " +
-                    $" |");
+                //if (sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType)
+                //{
+                //    if (!outcomeAccumulator.TryGetValue(edOutcome.Key, out List<(string label, string link)>? outcomeLines))
+                //    {
+                //        outcomeLines = [];
+                //        outcomeAccumulator[edOutcome.Key] = outcomeLines;
+                //    }
+
+                //    mdWriter.WriteLine(
+                //        $"| [`{edOutcome.SourceId}`]({rootSourceSpecLink})" +
+                //        $" | " +
+                //        $" | " +
+                //        $" |");
+                //}
+                //else
+                //{
+                    mdWriter.WriteLine(
+                        $"| [`{edOutcome.SourceId}`]({rootSourceSpecLink})" +
+                        $" | " +
+                        $" | " +
+                        $" |");
+                //}
+
                 continue;
             }
 
             if (edOutcome.ExtensionDefinitionIsProhibited)
             {
                 mdWriter.WriteLine(
-                    $"| [`{edOutcome.SourceId}`]({sourceBaseUrl}{sdOutcome.SourceName}.html#resource)" +
+                    $"| [`{edOutcome.SourceId}`]({rootSourceSpecLink})" +
                     $" | <i>Not Available</i>" +
                     $" | {edOutcome.ExtensionProhibitionReason?.ForMdTable()}" +
                     $" |");
@@ -350,15 +425,44 @@ public class StructurePageExporter
                     if ((!edOutcome.RequiresExtensionDefinition) ||
                         (edOutcome.RequiresExtensionDefinition && (edTarget.TargetResourceOrder != 0)))
                     {
-                        targetLines.Add($"[{edTarget.TargetElementId}]({targetBaseUrl}{edTarget.TargetElementId.Split('.')[0]}.html#resource)");
+                        string targetSdName = edTarget.TargetElementId.Split('.')[0];
+
+                        string targetSpecLink = ExtendedTypeSpecPageLookup.TryGetValue(targetSdName, out string? targetPageUrl)
+                            ? $"{targetBaseUrl}{targetPageUrl}"
+                            : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
+                            ? $"{targetBaseUrl}{targetSdName}.html#resource"
+                            : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+                            ? $"{targetBaseUrl}datatypes.html#{targetSdName}"
+                            : $"{targetBaseUrl}{targetSdName}.html";
+
+                        targetLines.Add($"[{edTarget.TargetElementId}]({targetSpecLink})");
                     }
+                }
+
+                if (edOutcome.RequiresCardinalityDefinition &&
+                    (edTarget.TargetResourceOrder != 0) &&
+                    (edTarget.CardinalityContextElementId is not null) &&
+                    (edTarget.CardinalityContextElementId != edTarget.TargetElementId))
+                {
+                    // check to see if there is a root target and an extension, in which case the element should not be listed
+                    string targetSdName = edTarget.CardinalityContextElementId.Split('.')[0];
+
+                    string targetSpecLink = ExtendedTypeSpecPageLookup.TryGetValue(targetSdName, out string? targetPageUrl)
+                        ? $"{targetBaseUrl}{targetPageUrl}"
+                        : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
+                        ? $"{targetBaseUrl}{targetSdName}.html#resource"
+                        : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+                        ? $"{targetBaseUrl}datatypes.html#{targetSdName}"
+                        : $"{targetBaseUrl}{targetSdName}.html";
+
+                    targetLines.Add($"[{edTarget.TargetElementId}]({targetSpecLink})");
                 }
             }
 
             if (allowedTargets == 0)
             {
                 mdWriter.WriteLine(
-                    $"| [`{edOutcome.SourceId}`]({sourceBaseUrl}{sdOutcome.SourceName}.html#resource)" +
+                    $"| [`{edOutcome.SourceId}`]({rootSourceSpecLink})" +
                     $" | <i>Not Available</i>" +
                     $" | " +
                     $" |");
@@ -394,8 +498,28 @@ public class StructurePageExporter
                 targetLines.Add($"[{targetLabel}]({targetLink})");
             }
 
+            // check for mapping to an Extension element
+            if (edOutcome.ExtensionElementId is not null)
+            {
+                string targetLabel;
+                string targetLink;
+
+                targetLabel = edOutcome.ExtensionElementId;
+                targetLink = $"{targetBaseUrl}extensibility.html#Extension";
+
+                if (!outcomeAccumulator.TryGetValue(edOutcome.Key, out List<(string label, string link)>? outcomeLines))
+                {
+                    outcomeLines = [];
+                    outcomeAccumulator[edOutcome.Key] = outcomeLines;
+                }
+
+                outcomeLines.Add((targetLabel, targetLink));
+                targetLines.Add($"[{targetLabel}]({targetLink})");
+            }
+
             // check for exporting this outcome as an extension
-            if (edOutcome.RequiresExtensionDefinition)
+            if (edOutcome.RequiresExtensionDefinition ||
+                edOutcome.RequiresCardinalityDefinition)
             {
                 string targetLabel;
                 string targetLink;
@@ -419,7 +543,7 @@ public class StructurePageExporter
             }
 
             // check for exporting as a slice
-            if (edOutcome.RequiresSliceDefinition)
+            if (edOutcome.RequiresSliceDefinition || edOutcome.RequiresCardinalitySlice)
             {
                 // check to see if we have a slice definition
                 if ((edOutcome.ParentElementOutcomeKey is not null) &&
@@ -618,7 +742,7 @@ public class StructurePageExporter
             }
 
             mdWriter.WriteLine(
-                $"| [`{edOutcome.SourceId}`]({sourceBaseUrl}{sdOutcome.SourceName}.html#resource)" +
+                $"| [`{edOutcome.SourceId}`]({rootSourceSpecLink})" +
                 $" | {string.Join("<br/>", targetLines.Distinct())}" +
                 $" | {edOutcome.Comments.ForMdTable()}" +
                 $" |");
@@ -686,13 +810,25 @@ public class StructurePageExporter
             mdWriter.WriteLine($"No computable {sourceArtifactLabel} ConceptMap was generated.");
         }
         mdWriter.WriteLine();
-        mdWriter.WriteLine(
-            $"| {igTr.PackagePair.SourceFhirSequence} {sourceColumnLabel}" +
-            $" | {igTr.PackagePair.TargetFhirSequence} {targetColumnLabel}" +
-            $" | Lookup File" +
-            $" | Profile" +
-            $" |");
-        mdWriter.WriteLine("| --------- | ----------- | ----------- | ----------- |");
+        if (isResourceLookup)
+        {
+            mdWriter.WriteLine(
+                $"| {igTr.PackagePair.SourceFhirSequence} {sourceColumnLabel}" +
+                $" | {igTr.PackagePair.TargetFhirSequence} {targetColumnLabel}" +
+                $" | Lookup File" +
+                $" | Profile" +
+                $" |");
+            mdWriter.WriteLine("| --------- | ----------- | ----------- | ----------- |");
+        }
+        else
+        {
+            mdWriter.WriteLine(
+                $"| {igTr.PackagePair.SourceFhirSequence} {sourceColumnLabel}" +
+                $" | {igTr.PackagePair.TargetFhirSequence} {targetColumnLabel}" +
+                $" | Lookup File" +
+                $" |");
+            mdWriter.WriteLine("| --------- | ----------- | ----------- |");
+        }
 
         // get the structure outcomes for this pair
         List<DbStructureOutcome> sdOutcomes = DbStructureOutcome.SelectList(
@@ -711,24 +847,63 @@ public class StructurePageExporter
                 continue;
             }
 
-            bool hasDirectTargetStructure = hasDirectTarget(sdOutcome, sourceArtifactClass);
-            string targetMarkdown = hasDirectTargetStructure
-                ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetId}]({targetBaseUrl}{sdOutcome.TargetId}.html)"
-                : isResourceLookup
+
+            string sourceSpecLink = ExtendedTypeSpecPageLookup.TryGetValue(sdOutcome.SourceId, out string? sourcePageUrl)
+                ? $"{sourceBaseUrl}{sourcePageUrl}"
+                : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
+                ? $"{sourceBaseUrl}{sdOutcome.SourceName}.html#resource"
+                : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+                ? $"{sourceBaseUrl}datatypes.html#{sdOutcome.SourceName}"
+                : $"{sourceBaseUrl}{sdOutcome.SourceName}.html";
+
+            string targetMarkdown;
+            if (sdOutcome.TargetId is null)
+            {
+                targetMarkdown = isResourceLookup
                 ? $"[{igTr.PackagePair.TargetFhirSequence} Basic]({targetBaseUrl}Basic.html)"
-                : "No direct target type";
-            string profileMarkdown = sdOutcome.GenFileName is null
-                ? "No profile generated"
-                : $"[XVer Profile: {getLookupId(sdOutcome)}]({sdOutcome.GenFileName}.html)";
+                : $"[{igTr.PackagePair.TargetFhirSequence} Extension]({targetBaseUrl}extensibility.html#Extension)";
+            }
+            else
+            {
+                targetMarkdown = ExtendedTypeSpecPageLookup.TryGetValue(sdOutcome.TargetId, out string? targetPageUrl)
+                                ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetName}]({targetBaseUrl}{targetPageUrl})"
+                                : sdOutcome.TargetArtifactClass == FhirArtifactClassEnum.Resource
+                                ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetName}]({targetBaseUrl}{sdOutcome.TargetName}.html#resource)"
+                                : sdOutcome.TargetArtifactClass == FhirArtifactClassEnum.ComplexType
+                                ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetName}]({targetBaseUrl}datatypes.html#{sdOutcome.TargetName})"
+                                : $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetName}]({targetBaseUrl}{sdOutcome.TargetName}.html)";
+            }
+
+            //bool hasDirectTargetStructure = hasDirectTarget(sdOutcome, sourceArtifactClass);
+            //string targetMarkdown = hasDirectTargetStructure
+            //    ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetId}]({targetBaseUrl}{sdOutcome.TargetId}.html)"
+            //    : isResourceLookup
+            //    ? $"[{igTr.PackagePair.TargetFhirSequence} Basic]({targetBaseUrl}Basic.html)"
+            //    : $"[{igTr.PackagePair.TargetFhirSequence} Extension]({targetBaseUrl}extensibility.html#Extension)";
 
             string id = getLookupId(sdOutcome);
 
-            mdWriter.WriteLine(
-                $"| [{igTr.PackagePair.SourceFhirSequence} {sdOutcome.SourceName}]({sourceBaseUrl}{sdOutcome.SourceId}.html)" +
-                $" | {targetMarkdown}" +
-                $" | [XVer Lookup: {id}](lookup-sd-{id}.html)" +
-                $" | {profileMarkdown}" +
-                $" |");
+            if (isResourceLookup)
+            {
+                string profileMarkdown = sdOutcome.GenFileName is null
+                    ? "No profile generated"
+                    : $"[XVer Profile: {id}]({sdOutcome.GenFileName}.html)";
+
+                mdWriter.WriteLine(
+                    $"| [{igTr.PackagePair.SourceFhirSequence} {sdOutcome.SourceName}]({sourceSpecLink})" +
+                    $" | {targetMarkdown}" +
+                    $" | [XVer Lookup: {id}](lookup-sd-{id}.html)" +
+                    $" | {profileMarkdown}" +
+                    $" |");
+            }
+            else
+            {
+                mdWriter.WriteLine(
+                    $"| [{igTr.PackagePair.SourceFhirSequence} {sdOutcome.SourceName}]({sourceSpecLink})" +
+                    $" | {targetMarkdown}" +
+                    $" | [XVer Lookup: {id}](lookup-sd-{id}.html)" +
+                    $" |");
+            }
         }
 
         mdWriter.WriteLine("{: .grid }");
