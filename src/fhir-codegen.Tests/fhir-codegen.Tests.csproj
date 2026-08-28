@@ -42,4 +42,18 @@
     <ProjectReference Include="..\Fhir.CodeGen.Comparison\Fhir.CodeGen.Comparison.csproj" />
   </ItemGroup>
 
+  <!-- build-order only: the shared project types are already compiled into this assembly -->
+  <ItemGroup>
+    <ProjectReference Include="..\fhir-codegen\fhir-codegen.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>FhirCodeGenCliDirectory</_Parameter1>
+      <_Parameter2>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\fhir-codegen\bin\$(Configuration)\$(TargetFramework)'))</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>
