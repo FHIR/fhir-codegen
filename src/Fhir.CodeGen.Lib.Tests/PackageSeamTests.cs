@@ -248,6 +248,22 @@ public class PackageSeamTests
     [Fact]
     [Trait("Category", "PackageSeam")]
     [Trait("DefaultCache", "true")]
+    internal async Task ShortWildcardDirectiveResolvesFromCache()
+    {
+        PackageLoader loader = new(
+            new() { FhirCacheDirectory = CachePath },
+            new() { JsonModel = LoaderOptions.JsonDeserializationModel.Default });
+
+        DefinitionCollection? loaded = await loader.LoadPackages(["hl7.fhir.r4.core#4.x"]);
+
+        loaded.ShouldNotBeNull();
+        loaded!.MainPackageId.ShouldBe(_r4CoreId);
+        loaded.MainPackageVersion.ShouldBe(_r4CoreVersion);
+    }
+
+    [Fact]
+    [Trait("Category", "PackageSeam")]
+    [Trait("DefaultCache", "true")]
     internal async Task DependencyRecursionLoadsDependencies()
     {
         DefinitionCollection withoutDependencies = await LoadR4();

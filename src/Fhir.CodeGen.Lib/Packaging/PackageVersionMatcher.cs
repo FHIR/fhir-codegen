@@ -48,6 +48,30 @@ internal static class PackageVersionMatcher
         }
     }
 
+    /// <summary>Orders two resolved versions.</summary>
+    /// <param name="left"> The first version.</param>
+    /// <param name="right">The second version.</param>
+    /// <returns>A negative value, zero, or a positive value, as with <see cref="IComparable{T}"/>.</returns>
+    public static int Compare(string left, string right)
+    {
+        if (FhirSemVer.TryParse(left, out FhirSemVer? parsedLeft) &&
+            FhirSemVer.TryParse(right, out FhirSemVer? parsedRight) &&
+            (parsedLeft is not null) &&
+            (parsedRight is not null))
+        {
+            try
+            {
+                return parsedLeft.CompareTo(parsedRight);
+            }
+            catch (Exception)
+            {
+                // moving tokens are not orderable; fall through to the ordinal comparison
+            }
+        }
+
+        return string.CompareOrdinal(left, right);
+    }
+
     /// <summary>
     /// Matches the dotted numeric-and-wildcard forms the replaced version type accepted, where an
     /// omitted or wildcard component matches anything: <c>*</c>, <c>4</c>, <c>4.0</c>, <c>4.x</c>,

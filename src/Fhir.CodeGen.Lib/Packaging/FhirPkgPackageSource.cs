@@ -137,6 +137,10 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
 
         PackageRecord? record = await _packageManager.InstallAsync(directive, options, cancellationToken).ConfigureAwait(false);
 
+        // the upstream range grammar rejects the shorter wildcard forms this project has always
+        // accepted (`4.x`), which the replaced disk cache resolved locally
+        record ??= await ResolveFromCacheAsync(directive, options, cancellationToken).ConfigureAwait(false);
+
         if (record is null)
         {
             return null;
@@ -158,6 +162,68 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
         }
 
         return Project(record, index);
+    }
+
+    /// <summary>Resolves a directive the registries could not against the newest satisfying cached package.</summary>
+    /// <param name="directive">        The package directive to resolve.</param>
+    /// <param name="options">          The install options to reuse.</param>
+    /// <param name="cancellationToken">A token that may be used to cancel the operation.</param>
+    /// <returns>The installed package record, or null when the cache holds nothing satisfying.</returns>
+    private async Task<PackageRecord?> ResolveFromCacheAsync(string directive, InstallOptions options, CancellationToken cancellationToken)
+    {
+        CodeGenPackageDirective parsed = Parse(directive);
+
+        if (string.IsNullOrEmpty(parsed.PackageId) ||
+            string.IsNullOrEmpty(parsed.RequestedVersion) ||
+            parsed.IsExactVersion)
+        {
+            return null;
+        }
+
+        IReadOnlyList<PackageRecord> cached;
+
+        try
+        {
+            cached = await _packageManager.ListCachedSummariesAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("Could not list cached packages while resolving {directive}: {message}", directive, ex.Message);
+            return null;
+        }
+
+        string? best = null;
+
+        foreach (PackageRecord candidate in cached)
+        {
+            string? candidateName = candidate.Reference.Name;
+            string? candidateVersion = candidate.Reference.Version;
+
+            if (string.IsNullOrEmpty(candidateName) ||
+                string.IsNullOrEmpty(candidateVersion) ||
+                !string.Equals(candidateName, parsed.PackageId, StringComparison.OrdinalIgnoreCase) ||
+                !PackageVersionMatcher.Satisfies(candidateVersion, parsed.RequestedVersion!))
+            {
+                continue;
+            }
+
+            if ((best is null) || (PackageVersionMatcher.Compare(candidateVersion, best) > 0))
+            {
+                best = candidateVersion;
+            }
+        }
+
+        if (best is null)
+        {
+            return null;
+        }
+
+        _logger.LogInformation(
+            "Resolved {directive} to {resolved} from the package cache",
+            directive,
+            $"{parsed.PackageId}@{best}");
+
+        return await _packageManager.InstallAsync($"{parsed.PackageId}@{best}", options, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Projects an installed package record onto the types this project owns.</summary>
