@@ -12,6 +12,7 @@ using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Shouldly;
 using Fhir.CodeGen.Common.Packaging;
+using Fhir.CodeGen.Lib.Configuration;
 using Fhir.CodeGen.Lib.Loader;
 using Fhir.CodeGen.Lib.Models;
 using Fhir.CodeGen.Lib.Packaging;
@@ -21,7 +22,9 @@ namespace Fhir.CodeGen.Lib.Tests;
 /// <summary>Tests for this repository's package consumption seam.</summary>
 /// <remarks>
 /// These cover the boundary this repository owns, not the package library's cache, registry, or
-/// version internals. All tests read from the shared FHIR package cache and make no network calls.
+/// version internals. They read from the shared FHIR package cache and contact no remote registry;
+/// the one exception is <see cref="CachedPackageResolvesWhenRegistryUnreachable"/>, which points at
+/// a refused loopback address on purpose.
 /// </remarks>
 public class PackageSeamTests
 {
@@ -273,5 +276,108 @@ public class PackageSeamTests
         HashSet<PackageIdentity> expanded = [.. withDependencies.Manifests.Keys];
 
         expanded.IsSupersetOf(baseline).ShouldBeTrue();
+    }
+
+    [Theory]
+    [Trait("Category", "PackageSeam")]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    internal void RegistryConfigurationHonorsUseOfficialRegistries(bool useOfficial, bool addFhirUrl, bool addNpmUrl)
+    {
+        const string fhirUrl = "http://127.0.0.1:1/fhir";
+        const string npmUrl = "http://127.0.0.1:1/npm";
+
+        ConfigRoot config = new()
+        {
+            UseOfficialRegistries = useOfficial,
+            AdditionalFhirRegistryUrls = addFhirUrl ? [fhirUrl] : [],
+            AdditionalNpmRegistryUrls = addNpmUrl ? [npmUrl] : [],
+        };
+
+        CodeGenRegistryConfiguration resolved = FhirPkgPackageSource.ResolveRegistryConfiguration(config);
+
+        resolved.IncludeCiBuilds.ShouldBe(useOfficial);
+        resolved.IncludeHl7WebsiteFallback.ShouldBe(useOfficial);
+
+        int officialCount = useOfficial ? 2 : 0;
+        int additionalCount = (addFhirUrl ? 1 : 0) + (addNpmUrl ? 1 : 0);
+
+        resolved.Endpoints.Count.ShouldBe(officialCount + additionalCount);
+
+        for (int i = 0; i < officialCount; i++)
+        {
+            resolved.Endpoints[i].Kind.ShouldBe(CodeGenRegistryKind.FhirNpm);
+            resolved.Endpoints[i].Url.ShouldNotBeNullOrWhiteSpace();
+        }
+
+        if (addFhirUrl)
+        {
+            resolved.Endpoints[officialCount].ShouldBe(new CodeGenRegistryEndpoint(fhirUrl, CodeGenRegistryKind.FhirNpm));
+        }
+
+        if (addNpmUrl)
+        {
+            resolved.Endpoints[^1].ShouldBe(new CodeGenRegistryEndpoint(npmUrl, CodeGenRegistryKind.Npm));
+        }
+
+        // an empty chain is what actually disables the registries, and only when nothing else re-enables them
+        resolved.RegistriesDisabled.ShouldBe(!useOfficial && !addFhirUrl && !addNpmUrl);
+    }
+
+    [Fact]
+    [Trait("Category", "PackageSeam")]
+    [Trait("DefaultCache", "true")]
+    internal async Task ExactDirectiveResolvesWhenRegistriesAreDisabled()
+    {
+        PackageLoader loader = new(
+            new() { FhirCacheDirectory = CachePath, UseOfficialRegistries = false },
+            new() { JsonModel = LoaderOptions.JsonDeserializationModel.Default });
+
+        DefinitionCollection? loaded = await loader.LoadPackages(TestCommon.EntriesR4);
+
+        loaded.ShouldNotBeNull();
+        loaded!.MainPackageId.ShouldBe(_r4CoreId);
+        loaded.MainPackageVersion.ShouldBe(_r4CoreVersion);
+    }
+
+    [Fact]
+    [Trait("Category", "PackageSeam")]
+    [Trait("DefaultCache", "true")]
+    internal async Task WildcardDirectiveResolvesWhenRegistriesAreDisabled()
+    {
+        PackageLoader loader = new(
+            new() { FhirCacheDirectory = CachePath, UseOfficialRegistries = false },
+            new() { JsonModel = LoaderOptions.JsonDeserializationModel.Default });
+
+        DefinitionCollection? loaded = await loader.LoadPackages(["hl7.fhir.r4.core#4.0.x"]);
+
+        loaded.ShouldNotBeNull();
+        loaded!.MainPackageId.ShouldBe(_r4CoreId);
+        loaded.MainPackageVersion.ShouldBe(_r4CoreVersion);
+    }
+
+    [Fact]
+    [Trait("Category", "PackageSeam")]
+    [Trait("DefaultCache", "true")]
+    internal async Task CachedPackageResolvesWhenRegistryUnreachable()
+    {
+        // the chain is non-empty, so the install really runs and really fails; loopback port 1
+        // refuses immediately and needs no DNS
+        PackageLoader loader = new(
+            new()
+            {
+                FhirCacheDirectory = CachePath,
+                UseOfficialRegistries = false,
+                AdditionalFhirRegistryUrls = ["http://127.0.0.1:1/"],
+            },
+            new() { JsonModel = LoaderOptions.JsonDeserializationModel.Default });
+
+        DefinitionCollection? loaded = await loader.LoadPackages(["hl7.fhir.r4.core#4.0.x"]);
+
+        loaded.ShouldNotBeNull();
+        loaded!.MainPackageId.ShouldBe(_r4CoreId);
+        loaded.MainPackageVersion.ShouldBe(_r4CoreVersion);
     }
 }
