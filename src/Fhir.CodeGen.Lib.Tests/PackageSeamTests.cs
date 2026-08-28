@@ -3,6 +3,7 @@
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
 
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,6 +11,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Shouldly;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Lib.Configuration;
@@ -379,5 +381,84 @@ public class PackageSeamTests
         loaded.ShouldNotBeNull();
         loaded!.MainPackageId.ShouldBe(_r4CoreId);
         loaded.MainPackageVersion.ShouldBe(_r4CoreVersion);
+    }
+
+    [Fact]
+    [Trait("Category", "PackageSeam")]
+    [Trait("DefaultCache", "true")]
+    internal async Task DuplicateRequestedDirectiveIsSkippedBeforeInstall()
+    {
+        // the install runs on a dedicated long-running task, so messages arrive from more than one thread
+        ConcurrentQueue<string> sink = new();
+
+        PackageLoader loader = new(
+            new()
+            {
+                FhirCacheDirectory = CachePath,
+                UseOfficialRegistries = false,
+                LogFactory = LoggerFactory.Create(builder => builder.AddProvider(new CapturingLoggerProvider(sink))),
+            },
+            new() { JsonModel = LoaderOptions.JsonDeserializationModel.Default });
+
+        string directive = $"{_r4CoreId}#{_r4CoreVersion}";
+
+        DefinitionCollection? loaded = await loader.LoadPackages([directive, directive]);
+
+        loaded.ShouldNotBeNull();
+        loaded!.MainPackageId.ShouldBe(_r4CoreId);
+        loaded.MainPackageVersion.ShouldBe(_r4CoreVersion);
+
+        string[] messages = [.. sink];
+        string moniker = $"{_r4CoreId}@{_r4CoreVersion}";
+
+        messages.Count(m => m.Contains($"Processing {moniker}", System.StringComparison.Ordinal)).ShouldBe(
+            1,
+            "the repeated directive must be skipped before the install, not after it");
+
+        messages.Count(m =>
+            m.Contains("Skipping already requested directive", System.StringComparison.Ordinal) &&
+            m.Contains(moniker, System.StringComparison.Ordinal)).ShouldBe(1);
+    }
+
+    /// <summary>A logger provider that captures every formatted message for assertion.</summary>
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<string> _sink;
+
+        internal CapturingLoggerProvider(ConcurrentQueue<string> sink)
+        {
+            _sink = sink;
+        }
+
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(_sink);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class CapturingLogger : ILogger
+        {
+            private readonly ConcurrentQueue<string> _sink;
+
+            internal CapturingLogger(ConcurrentQueue<string> sink)
+            {
+                _sink = sink;
+            }
+
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                System.Exception? exception,
+                System.Func<TState, System.Exception?, string> formatter)
+            {
+                _sink.Enqueue(formatter(state, exception));
+            }
+        }
     }
 }
