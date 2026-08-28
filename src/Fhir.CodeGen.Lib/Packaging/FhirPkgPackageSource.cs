@@ -39,6 +39,7 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
     private readonly ServiceProvider _serviceProvider;
     private readonly IFhirPackageManager _packageManager;
     private readonly IFhirPackageResourceManager _resourceManager;
+    private readonly CodeGenRegistryConfiguration _registryConfiguration;
     private readonly ILogger _logger;
 
     private bool _disposedValue;
@@ -50,16 +51,12 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
     {
         _logger = loggerFactory.CreateLogger<FhirPkgPackageSource>();
 
-        List<RegistryEndpoint> additional = [];
+        CodeGenRegistryConfiguration registries = ResolveRegistryConfiguration(config);
+        _registryConfiguration = registries;
 
-        foreach (string url in config.AdditionalFhirRegistryUrls)
+        if (registries.RegistriesDisabled)
         {
-            additional.Add(new RegistryEndpoint() { Url = url, Type = RegistryType.FhirNpm });
-        }
-
-        foreach (string url in config.AdditionalNpmRegistryUrls)
-        {
-            additional.Add(new RegistryEndpoint() { Url = url, Type = RegistryType.Npm });
+            _logger.LogInformation("Package registries are disabled; packages will be resolved from the cache only.");
         }
 
         ServiceCollection services = new();
@@ -70,25 +67,12 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
         {
             options.CachePath = config.FhirCacheDirectory;
 
-            options.IncludeCiBuilds = config.UseOfficialRegistries;
-            options.IncludeHl7WebsiteFallback = config.UseOfficialRegistries;
+            options.IncludeCiBuilds = registries.IncludeCiBuilds;
+            options.IncludeHl7WebsiteFallback = registries.IncludeHl7WebsiteFallback;
 
-            // an explicit registry list replaces the built-in published chain, so the official
-            // endpoints have to be restated whenever additional ones are supplied
-            if (additional.Count != 0)
+            foreach (CodeGenRegistryEndpoint endpoint in registries.Endpoints)
             {
-                if (config.UseOfficialRegistries)
-                {
-                    foreach (RegistryEndpoint endpoint in RegistryEndpoint.DefaultPublishedChain)
-                    {
-                        options.Registries.Add(endpoint);
-                    }
-                }
-
-                foreach (RegistryEndpoint endpoint in additional)
-                {
-                    options.Registries.Add(endpoint);
-                }
+                options.Registries.Add(ToRegistryEndpoint(endpoint));
             }
         });
 
@@ -96,6 +80,76 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
         _packageManager = _serviceProvider.GetRequiredService<IFhirPackageManager>();
         _resourceManager = _serviceProvider.GetRequiredService<IFhirPackageResourceManager>();
     }
+
+    /// <summary>Resolves the registry chain described by the root configuration.</summary>
+    /// <remarks>
+    /// Pure: performs no I/O and builds no services, so the decision can be asserted directly.
+    /// </remarks>
+    /// <param name="config">The resolved root configuration.</param>
+    /// <returns>The resolved registry configuration.</returns>
+    internal static CodeGenRegistryConfiguration ResolveRegistryConfiguration(ConfigRoot config)
+    {
+        List<CodeGenRegistryEndpoint> endpoints = [];
+
+        // `FhirPrimary` + `FhirSecondary` reproduces the shipped default chain; the HL7 website
+        // client is appended by `IncludeHl7WebsiteFallback` and must not be seeded twice
+        if (config.UseOfficialRegistries)
+        {
+            endpoints.Add(ToCodeGenEndpoint(RegistryEndpoint.FhirPrimary));
+            endpoints.Add(ToCodeGenEndpoint(RegistryEndpoint.FhirSecondary));
+        }
+
+        foreach (string url in config.AdditionalFhirRegistryUrls)
+        {
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                endpoints.Add(new CodeGenRegistryEndpoint(url, CodeGenRegistryKind.FhirNpm));
+            }
+        }
+
+        foreach (string url in config.AdditionalNpmRegistryUrls)
+        {
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                endpoints.Add(new CodeGenRegistryEndpoint(url, CodeGenRegistryKind.Npm));
+            }
+        }
+
+        return new CodeGenRegistryConfiguration()
+        {
+            Endpoints = endpoints,
+            IncludeCiBuilds = config.UseOfficialRegistries,
+            IncludeHl7WebsiteFallback = config.UseOfficialRegistries,
+        };
+    }
+
+    /// <summary>Projects a package-library endpoint onto the record this project owns.</summary>
+    /// <param name="endpoint">The package-library endpoint.</param>
+    /// <returns>The projected endpoint.</returns>
+    private static CodeGenRegistryEndpoint ToCodeGenEndpoint(RegistryEndpoint endpoint) => new(
+        endpoint.Url,
+        endpoint.Type switch
+        {
+            RegistryType.FhirCiBuild => CodeGenRegistryKind.FhirCiBuild,
+            RegistryType.FhirHttp => CodeGenRegistryKind.FhirHttp,
+            RegistryType.Npm => CodeGenRegistryKind.Npm,
+            _ => CodeGenRegistryKind.FhirNpm,
+        });
+
+    /// <summary>Projects a resolved endpoint back onto the package library's type.</summary>
+    /// <param name="endpoint">The resolved endpoint.</param>
+    /// <returns>The package-library endpoint.</returns>
+    private static RegistryEndpoint ToRegistryEndpoint(CodeGenRegistryEndpoint endpoint) => new()
+    {
+        Url = endpoint.Url,
+        Type = endpoint.Kind switch
+        {
+            CodeGenRegistryKind.FhirCiBuild => RegistryType.FhirCiBuild,
+            CodeGenRegistryKind.FhirHttp => RegistryType.FhirHttp,
+            CodeGenRegistryKind.Npm => RegistryType.Npm,
+            _ => RegistryType.FhirNpm,
+        },
+    };
 
     /// <summary>Parses a package directive into its component parts.</summary>
     /// <param name="directive">The package directive to parse.</param>
@@ -135,7 +189,25 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
         // dependency traversal is driven by the loader, not by the package manager
         InstallOptions options = new() { IncludeDependencies = false };
 
-        PackageRecord? record = await _packageManager.InstallAsync(directive, options, cancellationToken).ConfigureAwait(false);
+        PackageRecord? record = null;
+
+        // an empty registry list is indistinguishable from the default chain to the package
+        // library, so cache-only resolution has to skip the registry-backed install entirely
+        if (!_registryConfiguration.RegistriesDisabled)
+        {
+            try
+            {
+                record = await _packageManager.InstallAsync(directive, options, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Could not resolve {directive} from a registry: {message}", directive, ex.Message);
+            }
+        }
 
         // the upstream range grammar rejects the shorter wildcard forms this project has always
         // accepted (`4.x`), which the replaced disk cache resolved locally
@@ -174,8 +246,7 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
         CodeGenPackageDirective parsed = Parse(directive);
 
         if (string.IsNullOrEmpty(parsed.PackageId) ||
-            string.IsNullOrEmpty(parsed.RequestedVersion) ||
-            parsed.IsExactVersion)
+            string.IsNullOrEmpty(parsed.RequestedVersion))
         {
             return null;
         }
@@ -223,7 +294,21 @@ internal sealed class FhirPkgPackageSource : ICodeGenPackageSource
             directive,
             $"{parsed.PackageId}@{best}");
 
-        return await _packageManager.InstallAsync($"{parsed.PackageId}@{best}", options, cancellationToken).ConfigureAwait(false);
+        // the version was just found on disk, so this short-circuits to the cache; guard it anyway
+        // so a surprise registry attempt cannot turn a cache hit into a thrown exception
+        try
+        {
+            return await _packageManager.InstallAsync($"{parsed.PackageId}@{best}", options, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not load cached package {directive}: {message}", $"{parsed.PackageId}@{best}", ex.Message);
+            return null;
+        }
     }
 
     /// <summary>Projects an installed package record onto the types this project owns.</summary>
