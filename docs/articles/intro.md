@@ -23,7 +23,7 @@ that emit code, schemas, or summaries.
                    .tgz packages from ~/.fhir
                               │
                               ▼
-         Fhir.CodeGen.Packages  (cache + registry lookup)
+         Fhir.CodeGen.Lib.Packaging  (fhir-pkg-lib, behind the seam)
                               │
                               ▼
             Fhir.CodeGen.Lib.Loader.PackageLoader

@@ -38,12 +38,12 @@ public API changes in `Fhir.CodeGen.*` are breaking changes.
 | `src/fhir-codegen/` | `System.CommandLine`-based CLI (`OutputType=Exe`). |
 | `src/fhir-codegen-shared/` | Shared Project (`.projitems`) imported by the CLI. |
 | `src/Fhir.CodeGen.Common/` | Lightweight POCOs, shared models, polyfills. Dependency-light by design. |
-| `src/Fhir.CodeGen.Packages/` | FHIR package cache management (download, resolve, registry lookup). |
 | `src/Fhir.CodeGen.CrossVersionLoader/` | Load and reconcile artifacts across R2/R3/R4/R4B/R5. |
 | `src/Fhir.CodeGen.MappingLanguage/` | FML (FHIR Mapping Language) parser/abstractions. |
 | `src/Fhir.CodeGen.LangSQLite/`, `src/Fhir.CodeGen.SQLiteGenerator/` | SQLite export backend. |
 | `src/Fhir.CodeGen.Lib/` | Core engine: loader → normalized model → language exporters. |
 | `src/Fhir.CodeGen.Lib/Language/` | **The main extension point** — one `ILanguage` implementation per output format. |
+| `src/Fhir.CodeGen.Lib/Packaging/` | The package boundary — codegen-owned types over `fhir-pkg-lib`. The **only** place permitted to name a `FhirPkg` type. |
 | `src/Fhir.CodeGen.Comparison/` | Package/artifact diffing. |
 | `src/Fhir.CodeGen.CrossVersionExporter/` | Produces cross-version artifacts. |
 | `src/performance-test-cli/` | Standalone perf tooling. |
@@ -76,7 +76,7 @@ public API changes in `Fhir.CodeGen.*` are breaking changes.
   (the `Hl7.Fhir.*` family is currently `5.13.3` everywhere).
 - **Warnings are not errors.** No project sets `TreatWarningsAsErrors`,
   `EnforceCodeStyleInBuild`, `AnalysisLevel`, or `AnalysisMode`.
-- Accepted framework-adjacent package baselines after the .NET 10 upgrade: `Microsoft.Extensions.*` and `Microsoft.Data.Sqlite` are `10.0.11`, `System.CommandLine` is `2.0.11`, retained `System.Text.Json` references are `10.0.11`, and SQLite generator Roslyn packages are `5.9.0`. The FHIR family remains deferred at `5.13.3`, and `Microsoft.OpenApi` remains deferred at `1.6.29`.
+- Accepted framework-adjacent package baselines after the .NET 10 upgrade: `Microsoft.Extensions.*` and `Microsoft.Data.Sqlite` are `10.0.11`, `System.CommandLine` is `2.0.11`, retained `System.Text.Json` references are `10.0.11`, and SQLite generator Roslyn packages are `5.9.0`. FHIR package acquisition comes from `fhir-pkg-lib 2026.803.800`, referenced only by `Fhir.CodeGen.Lib`. The FHIR family remains deferred at `5.13.3`, and `Microsoft.OpenApi` remains deferred at `1.6.29`.
 - Tests need the **FHIR package cache** populated — see "Test" below.
 
 ---
@@ -142,8 +142,7 @@ dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "R
 ```
 
 Test projects: `Fhir.CodeGen.Lib.Tests`,
-`Fhir.CodeGen.MappingLanguage.Tests`, `Fhir.CodeGen.Packages.Tests`,
-`fhir-codegen.Tests`.
+`Fhir.CodeGen.MappingLanguage.Tests`, `fhir-codegen.Tests`.
 
 ### Focused — one class or one test
 
@@ -272,9 +271,17 @@ These are decisions, not preferences. Violating one is a review Blocker.
   `Fhir.CodeGen.Common`. Preserve those branches when editing.
 - **`Fhir.CodeGen.Common` stays dependency-light.** Everything else depends
   on it; adding a heavy dependency there propagates everywhere.
-- **Dependency direction is one-way:** `Common` ← `Packages` /
+- **Dependency direction is one-way:** `Common` ←
   `CrossVersionLoader` / `MappingLanguage` / `LangSQLite` ← `Lib` ← CLI.
   Do not introduce a cycle or make `Common` depend upward.
+- **The package library is quarantined behind a seam.** FHIR package
+  acquisition comes from the `fhir-pkg-lib` NuGet package, and
+  `src/Fhir.CodeGen.Lib/Packaging/` is the **only** place permitted to name a
+  `FhirPkg` type. Everything above it works in the codegen-owned types
+  (`PackageIdentity`, `CodeGenPackage`, `CodeGenPackageManifest`,
+  `CodeGenPackageIndex`, `CodeGenPackageDirective`).
+  `PackageSeamTests.PublicSurfaceExposesNoUpstreamPackageTypes` reflects over
+  the exported surface of `Fhir.CodeGen.Lib` and enforces this.
 - **Tests do not write generated artifacts to disk.**
   `GenerationTests.WriteGeneratedFiles` is `false`
   (`src/Fhir.CodeGen.Lib.Tests/GenerationTests.cs:29`). Toggle it locally
