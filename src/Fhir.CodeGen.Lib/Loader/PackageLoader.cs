@@ -45,6 +45,9 @@ internal static partial class PackageLoaderLogMessages
     [LoggerMessage(Level = LogLevel.Information, Message = "Auto-loading core expansion: {moniker}")]
     internal static partial void LogAutoExpansionMessage(this ILogger logger, string moniker);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "Skipping already requested directive: {moniker}")]
+    internal static partial void LogSkipRequestedMessage(this ILogger logger, string moniker);
+
     [LoggerMessage(Level = LogLevel.Error, Message = "Error parsing {style} {mime}: {exMessage}: {innerMessage}")]
     internal static partial void LogParseError(this ILogger logger, string style, string mime, string exMessage, string? innerMessage = null);
 
@@ -503,6 +506,28 @@ public partial class PackageLoader : IDisposable
         bool? autoLoadExpansionsValue = null,
         bool? resolveDependenciesValue = null)
     {
+        // recursion state is scoped to one top-level load, never to the loader instance
+        HashSet<string> requestedDirectives = new(StringComparer.OrdinalIgnoreCase);
+
+        return await LoadPackagesInternal(
+            requestedDirectives,
+            packages,
+            definitions,
+            fhirVersion,
+            loadFilterOverride,
+            autoLoadExpansionsValue,
+            resolveDependenciesValue);
+    }
+
+    private async Tasks.Task<DefinitionCollection?> LoadPackagesInternal(
+        HashSet<string> requestedDirectives,
+        IEnumerable<string> packages,
+        DefinitionCollection? definitions = null,
+        string? fhirVersion = null,
+        HashSet<FhirArtifactClassEnum>? loadFilterOverride = null,
+        bool? autoLoadExpansionsValue = null,
+        bool? resolveDependenciesValue = null)
+    {
         await Tasks.Task.Delay(0);
 
         bool autoLoadExpansions = autoLoadExpansionsValue ?? _rootConfiguration.AutoLoadExpansions;
@@ -597,6 +622,14 @@ public partial class PackageLoader : IDisposable
                 }
             }
 
+            // the requested directive is the only key available before the install; the resolved
+            // identity checked at the already-loaded guard below does not exist until after it
+            if (!requestedDirectives.Add(packageDirective.RawDirective))
+            {
+                _logger.LogSkipRequestedMessage(packageDirective.AnyDirective);
+                continue;
+            }
+
             // check if we are flagged to load expansions and this is a core package
             if (autoLoadExpansions &&
                 (
@@ -606,13 +639,20 @@ public partial class PackageLoader : IDisposable
                 (packageDirective.PackageId != "hl7.fhir.r2.core"))
             {
                 string expansionPackageName = packageDirective.PackageId.Replace(".core", ".expansions");
-                string expansionDirective = expansionPackageName +
-                    "@" +
-                    (packageDirective.RequestedVersion ?? "latest");
 
-                _logger.LogAutoExpansionMessage($"Auto-loading core expansions: {expansionDirective}...");
+                // a name with no ".core" segment (a core-partial name such as hl7.fhir.r4) is
+                // returned unchanged by the replacement above, so requesting it would re-enter
+                // this method with the identical directive
+                if (expansionPackageName != packageDirective.PackageId)
+                {
+                    string expansionDirective = expansionPackageName +
+                        "@" +
+                        (packageDirective.RequestedVersion ?? "latest");
 
-                await LoadPackages([expansionDirective], definitions, requestedFhirVersion);
+                    _logger.LogAutoExpansionMessage($"Auto-loading core expansions: {expansionDirective}...");
+
+                    await LoadPackagesInternal(requestedDirectives, [expansionDirective], definitions, requestedFhirVersion);
+                }
             }
 
             _logger.LogProcessingStartMessage(packageDirective.AnyDirective);
@@ -689,7 +729,7 @@ public partial class PackageLoader : IDisposable
 
                     CodeGenPackageDirective desiredDirective = _packageSource.Parse(desiredMoniker);
 
-                    await LoadPackages([desiredMoniker], definitions, requestedFhirVersion);
+                    await LoadPackagesInternal(requestedDirectives, [desiredMoniker], definitions, requestedFhirVersion);
                     if (definitions.TryGetManifest(desiredDirective.PackageId ?? string.Empty, desiredDirective.RequestedVersion ?? string.Empty, out _))
                     {
                         _logger.LogPackageSubstitutionSuccess(desiredMoniker, resolvedDirective);
@@ -766,7 +806,7 @@ public partial class PackageLoader : IDisposable
             // if we are resolving dependencies, check them now
             if (resolveDependencies && manifest.Dependencies.Any())
             {
-                await LoadPackages(manifest.Dependencies.Select(kvp => $"{kvp.Key}@{kvp.Value}"), definitions, requestedFhirVersion);
+                await LoadPackagesInternal(requestedDirectives, manifest.Dependencies.Select(kvp => $"{kvp.Key}@{kvp.Value}"), definitions, requestedFhirVersion);
                 _logger.LogPackageDependenciesResolved(resolvedDirective);
             }
             else
