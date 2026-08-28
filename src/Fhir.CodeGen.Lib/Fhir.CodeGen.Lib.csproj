@@ -51,7 +51,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Fhir.CodeGen.LangSQLite\Fhir.CodeGen.LangSQLite.csproj" />
-    <ProjectReference Include="..\Fhir.CodeGen.Packages\Fhir.CodeGen.Packages.csproj" />
     <ProjectReference Include="..\Fhir.CodeGen.Common\Fhir.CodeGen.Common.csproj" />
     <ProjectReference Include="..\Fhir.CodeGen.CrossVersionLoader\Fhir.CodeGen.CrossVersionLoader.csproj" />
     <ProjectReference Include="..\Fhir.CodeGen.MappingLanguage\Fhir.CodeGen.MappingLanguage.csproj" />
