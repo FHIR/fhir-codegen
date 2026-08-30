@@ -121,7 +121,56 @@ public class CorePartialPackageCliTests : IDisposable
         return count;
     }
 
-    private static string ResolveCliExecutable()
+    /// <summary>Pins the two properties of the build-injected CLI directory that cannot be exercised
+    /// on a Windows developer machine: it must be usable on Linux/macOS, and it must follow the CLI
+    /// when <c>dotnet test -a &lt;arch&gt;</c> moves the output under a runtime-identifier directory.
+    /// </summary>
+    [Fact]
+    public void InjectedCliDirectoryIsPortableAndRuntimeIdentifierAware()
+    {
+        string injected = ReadInjectedCliDirectory();
+
+        Path.IsPathFullyQualified(injected).ShouldBeTrue(
+            $"the injected CLI directory '{injected}' is not fully qualified");
+
+        string[] segments = Path.TrimEndingDirectorySeparator(injected).Split(Path.DirectorySeparatorChar);
+
+        // a segment test, not a substring test: GetFullPath removes parent-directory segments but
+        // leaves a literal ".." that is part of a legitimate directory name alone
+        segments.ShouldNotContain(
+            "..",
+            $"the injected CLI directory '{injected}' still holds an unresolved parent-directory segment");
+
+        char foreignSeparator = Path.DirectorySeparatorChar == '\\' ? '/' : '\\';
+
+        injected.Contains(foreignSeparator).ShouldBeFalse(
+            $"the injected CLI directory '{injected}' holds a separator this platform does not use");
+
+        Directory.Exists(injected).ShouldBeTrue($"the injected CLI directory '{injected}' does not exist");
+
+        // both assemblies build into the same bin-relative layout, runtime identifier included, so a
+        // divergence here means the injected path stopped tracking the CLI's real output directory
+        OutputTail(injected).ShouldBe(
+            OutputTail(AppContext.BaseDirectory),
+            "the injected CLI directory and the test output directory disagree beneath 'bin'");
+    }
+
+    /// <summary>Returns everything after the last <c>bin</c> segment of a build output directory,
+    /// joined with '/' so the comparison is separator-neutral.</summary>
+    private static string OutputTail(string directory)
+    {
+        string[] segments = Path
+            .TrimEndingDirectorySeparator(Path.GetFullPath(directory))
+            .Split(Path.DirectorySeparatorChar);
+
+        int binIndex = Array.LastIndexOf(segments, "bin");
+
+        return binIndex < 0
+            ? string.Empty
+            : string.Join('/', segments.Skip(binIndex + 1));
+    }
+
+    private static string ReadInjectedCliDirectory()
     {
         string? cliDirectory = typeof(CorePartialPackageCliTests).Assembly
             .GetCustomAttributes<AssemblyMetadataAttribute>()
@@ -130,13 +179,21 @@ public class CorePartialPackageCliTests : IDisposable
 
         cliDirectory.ShouldNotBeNullOrEmpty("the FhirCodeGenCliDirectory assembly metadata was not injected by the build");
 
+        return cliDirectory!;
+    }
+
+    private static string ResolveCliExecutable()
+    {
+        string cliDirectory = Path.GetFullPath(ReadInjectedCliDirectory());
+
         string executableName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? "fhir-codegen.exe"
             : "fhir-codegen";
 
-        string executablePath = Path.Combine(cliDirectory!, executableName);
+        string executablePath = Path.Combine(cliDirectory, executableName);
 
-        File.Exists(executablePath).ShouldBeTrue($"the fhir-codegen CLI was not found at '{executablePath}'");
+        File.Exists(executablePath).ShouldBeTrue(
+            $"the fhir-codegen CLI was not found at '{executablePath}' (injected directory: '{cliDirectory}')");
 
         return executablePath;
     }

@@ -49,11 +49,19 @@
     </ProjectReference>
   </ItemGroup>
 
-  <ItemGroup>
-    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
-      <_Parameter1>FhirCodeGenCliDirectory</_Parameter1>
-      <_Parameter2>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\fhir-codegen\bin\$(Configuration)\$(TargetFramework)'))</_Parameter2>
-    </AssemblyAttribute>
-  </ItemGroup>
+  <!-- the CLI's output directory is read from the project itself: a hand-composed path is
+       neither separator-correct on Unix nor RID-correct under `dotnet test -a <arch>` -->
+  <Target Name="InjectFhirCodeGenCliDirectory" BeforeTargets="GetAssemblyAttributes">
+    <MSBuild Projects="$(MSBuildThisFileDirectory)..\fhir-codegen\fhir-codegen.csproj" Targets="GetTargetPath">
+      <Output TaskParameter="TargetOutputs" ItemName="_FhirCodeGenCliTarget" />
+    </MSBuild>
+
+    <ItemGroup>
+      <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+        <_Parameter1>FhirCodeGenCliDirectory</_Parameter1>
+        <_Parameter2>@(_FhirCodeGenCliTarget->'%(RootDir)%(Directory)')</_Parameter2>
+      </AssemblyAttribute>
+    </ItemGroup>
+  </Target>
 
 </Project>
