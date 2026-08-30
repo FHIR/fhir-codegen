@@ -420,6 +420,52 @@ public class PackageSeamTests
             m.Contains(moniker, System.StringComparison.Ordinal)).ShouldBe(1);
     }
 
+    [Fact]
+    [Trait("Category", "PackageSeam")]
+    [Trait("DefaultCache", "true")]
+    internal async Task SeparateLoadPackagesCallsDoNotShareVisitedSet()
+    {
+        ConcurrentQueue<string> sink = new();
+
+        PackageLoader loader = new(
+            new()
+            {
+                FhirCacheDirectory = CachePath,
+                UseOfficialRegistries = false,
+                LogFactory = LoggerFactory.Create(builder => builder.AddProvider(new CapturingLoggerProvider(sink))),
+            },
+            new() { JsonModel = LoaderOptions.JsonDeserializationModel.Default });
+
+        string directive = $"{_r4CoreId}#{_r4CoreVersion}";
+
+        // two top-level calls on one reused loader; the visited set is scoped to a single call, so
+        // the second must load exactly as the first did
+        DefinitionCollection? first = await loader.LoadPackages([directive]);
+        DefinitionCollection? second = await loader.LoadPackages([directive]);
+
+        first.ShouldNotBeNull();
+
+        second.ShouldNotBeNull();
+        second!.MainPackageId.ShouldBe(_r4CoreId);
+        second.MainPackageVersion.ShouldBe(_r4CoreVersion);
+
+        // the load-bearing assertion: a visited set hoisted onto the loader still returns the
+        // collection shell created before the check, so only the contents expose the regression
+        second.TryGetManifest(_r4CoreId, _r4CoreVersion, out _).ShouldBeTrue(
+            "the second load returned an empty collection, so the visited set is no longer per-call");
+
+        string[] messages = [.. sink];
+        string moniker = $"{_r4CoreId}@{_r4CoreVersion}";
+
+        messages.Count(m => m.Contains($"Processing {moniker}", System.StringComparison.Ordinal)).ShouldBe(
+            2,
+            "each top-level load must process the directive; the visited set is not shared across calls");
+
+        messages.Count(m =>
+            m.Contains("Skipping already requested directive", System.StringComparison.Ordinal) &&
+            m.Contains(moniker, System.StringComparison.Ordinal)).ShouldBe(0);
+    }
+
     /// <summary>A logger provider that captures every formatted message for assertion.</summary>
     private sealed class CapturingLoggerProvider : ILoggerProvider
     {
