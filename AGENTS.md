@@ -291,6 +291,11 @@ These are decisions, not preferences. Violating one is a review Blocker.
   references it today — the existing SQLite backend uses
   `Microsoft.Data.Sqlite` — so introducing it adds a dependency and needs
   the user's go-ahead.
+- **Documentation exploration stays documentation-only.** `dev-explore`
+  may write its own slot artifacts and manifest-listed documentation
+  output, never application code, dependencies, configuration, or git
+  history. Static HTML assets are part of the documentation deliverable.
+  Exploration and implementation slots are separate.
 
 ---
 
@@ -381,6 +386,25 @@ scratch/<MMDD>-<##>/
   analysis.md          # authored by dev-review
 ```
 
+Use a **separate exploration slot** for `dev-explore`:
+
+```text
+scratch\<MMDD>-<##>\
+  request.md           # Workflow: dev-explore; options, state, manifest
+  approaches.md        # competing documentation shapes and selection
+  sources.md           # source inventory and evidence map
+  outline.md           # pages, sections, and question coverage
+  review.md            # review of the current deliverable
+  output\              # default generated documentation directory
+    README.md          # Markdown entry, or index.html for HTML
+```
+
+`dev-explore` owns these artifacts, never calls the implementation or
+publishing loop, and never commits. `output` may explicitly name a
+dedicated documentation directory outside scratch; it must be empty or
+already owned by that exploration. Existing manual edits are protected.
+An exploration carries no `Issue` binding.
+
 - `<MMDD>` is the local date (zero-padded month + day); `<##>` is a
   zero-padded two-digit slot number.
 - `scratch/` is **ignored** — `/scratch` in `.gitignore`. Nothing in it is
@@ -398,7 +422,11 @@ scratch/<MMDD>-<##>/
 - Read this file before proposing any build, test, or lint command. **Never
   invent a command.** If something you need is not documented here, say so
   rather than guessing.
-- Subagents must use the same model configuration as the spawning agent.
+- Subagents follow the **subagent model policy** recorded below.
+- `dev-explore` defaults to automatic decisions and uses the same model
+  policy. Explicit per-run model selections do not rewrite this file.
+  Its concurrency and total-child budgets include rechecks and retries;
+  resuming does not reset cumulative spend.
 - Do not add new linting, building, or testing tooling without being asked.
   In particular, do not add StyleCop.Analyzers or set
   `EnforceCodeStyleInBuild` on your own initiative.
@@ -415,3 +443,29 @@ scratch/<MMDD>-<##>/
 - The `docs/specs/` tree documents the cross-version (`xver`) pipeline step
   by step. Consult it before changing anything under
   `Fhir.CodeGen.CrossVersionLoader` or `Fhir.CodeGen.CrossVersionExporter`.
+
+### Subagent model policy
+
+Every `dev-*` skill that fans out reads this table before it spawns
+anything, and each skill classifies its own roles as **reasoning** or
+**mechanical**. **An absent or unreadable table means `uniform`** — the
+conservative default, and the behavior every repo had before this table
+existed.
+
+| Setting | Value |
+|-|-|
+| Policy | uniform |
+| Mechanical-tier model | n/a |
+
+- **`uniform`** — every sub-agent runs the spawning agent's model
+  configuration, whatever its role.
+- **`tiered`** — a sub-agent in a **reasoning** role runs the spawning
+  agent's configuration; a sub-agent in a **mechanical** role runs the
+  recorded mechanical-tier model.
+
+The role classification lives in the skills, not here: it is a property
+of the loop and does not vary between repositories. Only the policy and
+the model id do, which is why they are the two rows recorded.
+
+A recorded value here is a **resolved answer**. `dev-setup` asks once and
+never re-prompts, exactly as it treats the GitHub integration block.

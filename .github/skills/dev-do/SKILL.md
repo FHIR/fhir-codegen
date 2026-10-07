@@ -211,8 +211,12 @@ sibling source request (`featurerequest.md` / `bugreport.md`).
       and only then continue. Never edit an undeclared path.
    2. After pre-flight succeeds, set both the phase and top-level plan
       status to `In-progress`.
-   3. Execute the phase steps. Use sub-agents only where independent
-      work justifies them, and never exceed `max_subagents`.
+   3. Execute the phase steps by dispatching a `dev-implementer` with
+      the plan path, this phase's identifier, and its `**Owned paths:**`
+      as the files it owns. Split the phase across several implementers
+      only where the slices touch disjoint files and each is substantial
+      enough to earn its own context, and never exceed `max_subagents`.
+      See § *Sub-Agent Use* for the one edit you make yourself.
    4. Run every phase `Verification` command. If a command fails,
       debug within reasonable scope. If it cannot be made green, mark
       the phase and plan `Blocked` with an actionable reason and stop.
@@ -283,11 +287,67 @@ sibling source request (`featurerequest.md` / `bugreport.md`).
   same time.
 - Use sub-agents for parallel exploration of unfamiliar areas,
   independent owned-file work, and fanning out tests across the
-  repository's projects. Use `code-review` for an existing diff. When an
-  adversarial critique is useful and no registered specialist exists,
-  use a `general-purpose` sub-agent explicitly prompted for that role.
+  repository's projects. Match the agent to the job rather than reaching
+  for `general-purpose`:
+  - **`task`** for running builds, tests, and lints. It returns a short
+    summary on success and the full output only on failure, which is
+    exactly the shape a verification step needs — and it keeps a green
+    thousand-line build log out of your context entirely.
+  - **`explore`** for locating files, symbols, and call sites in an
+    unfamiliar area.
+  - **`code-review`** for an existing diff, and **`rubber-duck`** when an
+    adversarial critique is useful.
+  - **`general-purpose`** only for work that needs the full toolset and
+    genuine judgment, and that none of the above covers.
+- **A phase's code is written by a `dev-implementer`, not by you.**
+  Dispatch one per phase as the default. You are the conductor of this
+  stage: you read the plan, decide what each phase means, integrate what
+  comes back, verify it, update the status, and commit. Writing the code
+  yourself puts it in whatever context happens to be holding this skill —
+  which under `dev-complete` is a stage runner carrying the whole run's
+  history, and which in any case carries none of the implementer's brief.
+- **Fan-out is a separate decision from delegation.** One implementer per
+  phase is not a fan-out; it is where the work belongs. Run *several* in
+  parallel only when the phase splits into slices that touch disjoint
+  files and each slice is substantial enough to be worth its own context.
+  A phase split three ways for the sake of parallelism pays three context
+  startups to write what one implementer would have written in sequence.
+- **The exception is an edit the plan already specifies verbatim** — a
+  version bump, a constant the plan names, a rename it spells out in
+  full. There is no judgment left in it to delegate, and the round trip
+  would cost more than the edit. Anything that requires reading
+  surrounding code to get right is not this.
 - Do **not** delegate the plan-status updates or the commits — you own
   those. Sub-agents return work; you integrate, verify, and commit.
+
+## Sub-Agent Model Tier
+
+Resolve each role against the **subagent model policy** in the
+repository's `AGENTS.md` (`## Agent guardrails`). An absent or
+unreadable policy means `uniform`, and every role below runs the
+spawning agent's model.
+
+| Role | Tier | Agent |
+|-|-|-|
+| Implementing a phase, or an owned-file slice of one | reasoning | `dev-implementer` |
+| Adversarial critique of an approach mid-phase | reasoning | `rubber-duck` |
+| Diagnosing a failed verification command | reasoning | `general-purpose` |
+| Reviewing a diff you just produced | reasoning | `code-review` |
+| Running a documented build, test, or lint command and reporting the result | mechanical | `task` |
+| Locating files, symbols, or call sites | mechanical | `explore` |
+| Checking a specific claim against a specific file | mechanical | `explore` |
+
+**The built-in agents already run lightweight models.** `explore` and
+`task` are the mechanical tier for most repositories — reaching for them
+is what makes the policy real, and no `model:` needs to be passed to get
+it. Only a mechanical role that none of the built-ins covers needs the
+recorded mechanical-tier model.
+
+The line is whether the caller can **verify the output cheaply**. A test
+run either passes or it does not, and you read the result yourself, so a
+cheap model running it costs nothing when it is wrong. A diagnosis of
+*why* it failed is a judgment you would have to redo, so it is not
+mechanical however much it looks like one.
 
 ## Commit Hygiene
 
