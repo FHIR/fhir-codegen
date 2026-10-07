@@ -73,10 +73,10 @@ public API changes in `Fhir.CodeGen.*` are breaking changes.
 - Versions are declared **per-project** in each `.csproj`. There is no
   central package management and no lock file, so a dependency bump must be
   applied consistently across every project that references the package
-  (the `Hl7.Fhir.*` family is currently `5.13.3` everywhere).
+  (the `Hl7.Fhir.*` family is currently `5.13.4` everywhere).
 - **Warnings are not errors.** No project sets `TreatWarningsAsErrors`,
   `EnforceCodeStyleInBuild`, `AnalysisLevel`, or `AnalysisMode`.
-- Accepted framework-adjacent package baselines after the .NET 10 upgrade: `Microsoft.Extensions.*` and `Microsoft.Data.Sqlite` are `10.0.11`, `System.CommandLine` is `2.0.11`, retained `System.Text.Json` references are `10.0.11`, and SQLite generator Roslyn packages are `5.9.0`. FHIR package acquisition comes from `fhir-pkg-lib 2026.803.800`, referenced only by `Fhir.CodeGen.Lib`. The FHIR family remains deferred at `5.13.3`, and `Microsoft.OpenApi` remains deferred at `1.6.29`.
+- Accepted framework-adjacent package baselines after the .NET 10 upgrade: `Microsoft.Extensions.*` and `Microsoft.Data.Sqlite` are `10.0.12`, `System.CommandLine` is `2.0.12`, retained `System.Text.Json` references are `10.0.11`, and SQLite generator Roslyn packages are `5.9.0`. FHIR package acquisition comes from `fhir-pkg-lib 2026.901.1609`, referenced only by `Fhir.CodeGen.Lib`. The FHIR family is `5.13.4`, `brianpos.Fhir.Base.FhirPath.Validator` is `5.13.4-rc2`, and `Microsoft.OpenApi` is `1.6.31`; the FHIR and OpenAPI major-version migrations remain deferred.
 - Tests need the **FHIR package cache** populated — see "Test" below.
 
 ---
@@ -115,7 +115,7 @@ check exists.
 
 **xUnit 2.9.3** with **Shouldly 4.3.0** for assertions — *not*
 FluentAssertions. The runner is **VSTest**
-(`Microsoft.NET.Test.Sdk 18.9.0` + `xunit.runner.visualstudio 4.0.0`);
+(`Microsoft.NET.Test.Sdk 18.10.0` + `xunit.runner.visualstudio 4.0.0`);
 there is no `global.json` `"runner"` entry and no `OutputType=Exe` test
 project, so **Microsoft.Testing.Platform is not in use**.
 
