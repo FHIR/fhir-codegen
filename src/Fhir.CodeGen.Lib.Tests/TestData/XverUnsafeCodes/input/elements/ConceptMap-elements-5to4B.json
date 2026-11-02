@@ -1,0 +1,40 @@
+{
+  "resourceType": "ConceptMap",
+  "id": "elements-5to4B",
+  "url": "http://example.org/ConceptMap/elements-5to4B",
+  "status": "active",
+  "property": [
+    {
+      "code": "requires-omitted-mandatory-code",
+      "system": "http://hl7.org/fhir/uv/xver/ValueSet/xver-conceptmap-properties",
+      "type": "boolean"
+    }
+  ],
+  "group": [
+    {
+      "source": "http://hl7.org/fhir/5.0/element-names",
+      "target": "http://hl7.org/fhir/4.3/element-names",
+      "element": [
+        {
+          "code": "ValueSet.compose.include.filter.op",
+          "target": [
+            {
+              "code": "ValueSet.compose.include.filter.op",
+              "relationship": "equivalent",
+              "property": [
+                { "code": "requires-omitted-mandatory-code", "valueBoolean": true }
+              ]
+            },
+            {
+              "code": "ValueSet.compose.include.filter.value",
+              "relationship": "related-to",
+              "property": [
+                { "code": "requires-omitted-mandatory-code", "valueBoolean": false }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

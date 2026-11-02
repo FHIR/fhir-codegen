@@ -453,12 +453,31 @@ public class ConceptMapLoader
                 continue;
             }
 
-            object? loaded = _loader!.ParseContentsSystemTextStream("fhir+json", typeof(ConceptMap), path: filename);
+            bool capturesUnsafeCodeInputs = sourceMapType is SourceMapTypeCodes.Codes or SourceMapTypeCodes.Elements;
+            object? loaded;
+            try
+            {
+                loaded = _loader!.ParseContentsSystemTextStream("fhir+json", typeof(ConceptMap), path: filename);
+            }
+            catch (Exception exception) when (capturesUnsafeCodeInputs)
+            {
+                throw new InvalidDataException($"Unsafe-code source '{filename}' for {sourcePackage.NpmId} -> {targetPackage.NpmId}, JSON path $: could not read/parse ConceptMap.", exception);
+            }
+
             if (loaded is not ConceptMap cm)
             {
+                if (capturesUnsafeCodeInputs)
+                {
+                    throw new InvalidDataException($"Unsafe-code source '{filename}' for {sourcePackage.NpmId} -> {targetPackage.NpmId}, JSON path $: could not read/parse ConceptMap.");
+                }
+
                 _logger.LogError($"Error loading {filename}: could not parse as ConceptMap");
                 continue;
             }
+
+            UnsafeCodeSourceReader.Capture(
+                _db, cm, relativePath, filename, Path.GetRelativePath(basePath, filename),
+                sourcePackage.Key, targetPackage.Key);
 
             // process the map
             switch (sourceMapType)

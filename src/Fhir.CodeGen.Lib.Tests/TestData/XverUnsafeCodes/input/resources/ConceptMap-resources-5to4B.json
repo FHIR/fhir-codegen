@@ -1,0 +1,15 @@
+{
+  "resourceType": "ConceptMap",
+  "id": "resources-5to4B",
+  "url": "http://example.org/ConceptMap/resources-5to4B",
+  "status": "active",
+  "group": [
+    {
+      "source": "http://hl7.org/fhir/5.0/resource-types",
+      "target": "http://hl7.org/fhir/4.3/resource-types",
+      "element": [
+        { "code": "ValueSet", "target": [ { "code": "ValueSet", "relationship": "equivalent" } ] }
+      ]
+    }
+  ]
+}

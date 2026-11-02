@@ -14,10 +14,21 @@ public static class DbMappingClasses
         try { DbValueSetConceptMapping.LoadMaxKey(db); } catch { }
         try { DbStructureMapping.LoadMaxKey(db); } catch { }
         try { DbElementMapping.LoadMaxKey(db); } catch { }
+        try { DbUnsafeCodeElementAnnotation.LoadMaxKey(db); } catch { }
+        try { DbUnsafeCodeMapEvidence.LoadMaxKey(db); } catch { }
+        try { DbUnsafeCodeRule.LoadMaxKey(db); } catch { }
+        try { DbUnsafeCodeInputState.LoadMaxKey(db); } catch { }
+        try { DbUnsafeCodePairState.LoadMaxKey(db); } catch { }
     }
 
     public static void DropTables(IDbConnection db)
     {
+        UnsafeCodeInputStore.InvalidateInputs(db);
+        DbUnsafeCodeElementAnnotation.DropTable(db);
+        DbUnsafeCodeMapEvidence.DropTable(db);
+        DbUnsafeCodeRule.DropTable(db);
+        DbUnsafeCodePairState.DropTable(db);
+        DbUnsafeCodeInputState.DropTable(db);
         DbMappingSourceFile.DropTable(db);
         DbValueSetMapping.DropTable(db);
         DbValueSetConceptMapping.DropTable(db);
@@ -32,6 +43,10 @@ public static class DbMappingClasses
         DbValueSetConceptMapping.CreateTable(db);
         DbStructureMapping.CreateTable(db);
         DbElementMapping.CreateTable(db);
+        DbUnsafeCodeElementAnnotation.CreateTable(db);
+        DbUnsafeCodeMapEvidence.CreateTable(db);
+        DbUnsafeCodeRule.CreateTable(db);
+        UnsafeCodeInputStore.EnsureStateTables(db);
     }
 }
 
@@ -193,4 +208,3 @@ public partial class DbElementMapping : DbMappingBase
     public required Hl7.Fhir.Model.ConceptMap.ConceptMapRelationship? ConceptDomainRelationship { get; set; }
     public required Hl7.Fhir.Model.ConceptMap.ConceptMapRelationship? ValueDomainRelationship { get; set; }
 }
-

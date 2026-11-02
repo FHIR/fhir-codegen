@@ -35,6 +35,11 @@ public static class DbContentClasses
         bool forStructures = true,
         bool forSupport = true)
     {
+        if (forPackages || forTerminologies || forStructures || forSupport)
+        {
+            UnsafeCodeInputStore.InvalidateInputs(db);
+        }
+
         if (forPackages)
         {
             DbFhirPackage.DropTable(db);

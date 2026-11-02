@@ -797,10 +797,17 @@ public partial class XVerProcessor
         MappingLoader mappingLoader = new(_db.DbConnection, _loggerFactory);
         if (!string.IsNullOrEmpty(_config.CrossVersionMapSourcePath))
         {
-            _ = mappingLoader.TryLoadCrossVersionSourceMaps(
+            if (!mappingLoader.TryLoadCrossVersionSourceMaps(
                 _config.CrossVersionMapSourcePath,
-                _config.UseInternalTypeMaps);
+                _config.UseInternalTypeMaps))
+            {
+                throw new InvalidOperationException($"Failed to load cross-version maps from configured source '{_config.CrossVersionMapSourcePath}'.");
+            }
             //_ = _db.TryLoadFhirCrossVersionMaps(_config.CrossVersionMapSourcePath);
+        }
+        else
+        {
+            UnsafeCodeInputStore.ReplaceWithEmptyInputs(_db.DbConnection, DbFhirPackage.SelectList(_db.DbConnection));
         }
     }
 

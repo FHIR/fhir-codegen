@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Data;
 using System.Linq;
 using System.Runtime.ConstrainedExecution;
@@ -79,9 +80,13 @@ public class MappingLoader : IDisposable
             JsonModel = LoaderOptions.JsonDeserializationModel.SystemTextJson,
         });
 
+        ImmutableArray<UnsafeCodeRule> unsafeCodeRules = UnsafeCodeConfigurationLoader.Load(_fhirCrossVersionRepoPath);
+
         // ensure our tables exist and are empty
         DbMappingClasses.DropTables(_db);
         DbMappingClasses.CreateTables(_db);
+        UnsafeCodeInputStore.BeginInputs(_db, "source", _fhirCrossVersionRepoPath);
+        UnsafeCodeInputStore.InsertRules(_db, unsafeCodeRules);
 
         // create our concept map loader
         ConceptMapLoader conceptMapLoader = new(
@@ -150,6 +155,7 @@ public class MappingLoader : IDisposable
         // check for inverses of all mappings
         //checkInversions();
 
+        UnsafeCodeInputStore.CompleteInputs(_db, _packages);
         return true;
     }
 
