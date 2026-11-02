@@ -72,7 +72,78 @@ internal sealed record UnsafeCodeMapEvidence(
 // Paths and version matches are serialized losslessly at the persistence boundary, never as FHIRPath.
 internal sealed record UnsafeCodePathStep(string ElementId, string? TypeName, bool IsContentReference);
 
-internal sealed record UnsafeCodeVersionMatch(bool IsWildcard, ImmutableArray<string> Versions);
+// Versions are exclusions for a wildcard, inclusions otherwise. Only wildcards include unknown versions.
+internal sealed record UnsafeCodeVersionMatch
+{
+    public UnsafeCodeVersionMatch(bool isWildcard, ImmutableArray<string> versions)
+    {
+        IsWildcard = isWildcard;
+        Versions = [.. (versions.IsDefault ? [] : versions).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+    }
+
+    public bool IsWildcard { get; }
+    public ImmutableArray<string> Versions { get; }
+
+    internal bool Matches(string? version) => version is null
+        ? IsWildcard
+        : IsWildcard != Versions.Contains(version, StringComparer.Ordinal);
+
+    public bool Equals(UnsafeCodeVersionMatch? other) => other is not null &&
+        IsWildcard == other.IsWildcard && Versions.SequenceEqual(other.Versions, StringComparer.Ordinal);
+
+    public override int GetHashCode()
+    {
+        HashCode hash = new();
+        hash.Add(IsWildcard);
+        foreach (string version in Versions)
+        {
+            hash.Add(version, StringComparer.Ordinal);
+        }
+
+        return hash.ToHashCode();
+    }
+}
+
+internal sealed record UnsafeCodeRuleProvenance(string SourceRelativeFilename, int EntryIndex);
+
+internal sealed record UnsafeCodeDecision(
+    UnsafeCodeIdentity Identity,
+    UnsafeCodeMappingContext Context,
+    UnsafeCodeVersionMatch VersionMatch,
+    ImmutableArray<UnsafeCodeProvenance> AnnotationProvenance,
+    ImmutableArray<UnsafeCodeProvenance> EvidenceProvenance,
+    ImmutableArray<UnsafeCodeRuleProvenance> RuleProvenance)
+{
+    public bool Equals(UnsafeCodeDecision? other) => other is not null &&
+        Identity == other.Identity && Context == other.Context && VersionMatch == other.VersionMatch &&
+        AnnotationProvenance.SequenceEqual(other.AnnotationProvenance) &&
+        EvidenceProvenance.SequenceEqual(other.EvidenceProvenance) &&
+        RuleProvenance.SequenceEqual(other.RuleProvenance);
+
+    public override int GetHashCode()
+    {
+        HashCode hash = new();
+        hash.Add(Identity);
+        hash.Add(Context);
+        hash.Add(VersionMatch);
+        foreach (UnsafeCodeProvenance provenance in AnnotationProvenance)
+        {
+            hash.Add(provenance);
+        }
+
+        foreach (UnsafeCodeProvenance provenance in EvidenceProvenance)
+        {
+            hash.Add(provenance);
+        }
+
+        foreach (UnsafeCodeRuleProvenance provenance in RuleProvenance)
+        {
+            hash.Add(provenance);
+        }
+
+        return hash.ToHashCode();
+    }
+}
 
 internal sealed record UnsafeCodeTrigger(
     int StructureOutcomeKey,
