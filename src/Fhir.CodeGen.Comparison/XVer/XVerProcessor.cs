@@ -366,39 +366,16 @@ public partial class XVerProcessor
                 break;
 
             case "outcomes":
-                if (_config.ReloadDatabase)
-                {
-                    LoadDatabase(_config.ReloadDatabase);
-                    LoadFhirCrossVersionMaps();
-                    LoadExtensionSubstitutions();
-                    LoadFhirTypeValueSets();
-                }
-
-                GenerateOutcomes();
-                break;
-
             case "outcomes-vs":
-                if (_config.ReloadDatabase)
-                {
-                    LoadDatabase(_config.ReloadDatabase);
-                    LoadFhirCrossVersionMaps();
-                    LoadExtensionSubstitutions();
-                    LoadFhirTypeValueSets();
-                }
-
-                GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet);
-                break;
-
             case "outcomes-sd":
-                if (_config.ReloadDatabase)
-                {
-                    LoadDatabase(_config.ReloadDatabase);
-                    LoadFhirCrossVersionMaps();
-                    LoadExtensionSubstitutions();
-                    LoadFhirTypeValueSets();
-                }
-
-                GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource);
+                ExecuteOutcomeCommand(
+                    command, _config.ReloadDatabase,
+                    () => LoadDatabase(true),
+                    LoadFhirCrossVersionMaps,
+                    LoadExtensionSubstitutions,
+                    LoadFhirTypeValueSets,
+                    family => CompareInDatabase(family),
+                    family => GenerateOutcomes(family));
                 break;
 
 
@@ -424,6 +401,35 @@ public partial class XVerProcessor
                 ExportOutcomes();
                 break;
         }
+    }
+
+    internal static void ExecuteOutcomeCommand(
+        string command,
+        bool reload,
+        Action loadDatabase,
+        Action loadMaps,
+        Action loadSubstitutions,
+        Action loadTypeValueSets,
+        Action<FhirArtifactClassEnum?> compare,
+        Action<FhirArtifactClassEnum?> outcomes)
+    {
+        FhirArtifactClassEnum? family = command switch
+        {
+            "outcomes" => null,
+            "outcomes-vs" => FhirArtifactClassEnum.ValueSet,
+            "outcomes-sd" => FhirArtifactClassEnum.Resource,
+            _ => throw new ArgumentOutOfRangeException(nameof(command)),
+        };
+        if (reload)
+        {
+            loadDatabase();
+            loadMaps();
+            loadSubstitutions();
+            loadTypeValueSets();
+            compare(family);
+        }
+
+        outcomes(family);
     }
 
     public void UpdateValueSetMaps()

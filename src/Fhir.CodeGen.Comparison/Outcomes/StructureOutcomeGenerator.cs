@@ -93,6 +93,8 @@ public class StructureOutcomeGenerator
                 continue;
             }
 
+            DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey);
+
             // create our element outcome generator for this package pair
             ElementOutcomeGenerator elementOutcomeGenerator = new(
                 _db,
@@ -107,6 +109,7 @@ public class StructureOutcomeGenerator
             elementOutcomeGenerator.DoPostProcessing(packagePair);
             //updateOutcomeContextsForContentReferences(packagePair);
             applyCachedChanges(packagePair);
+            new UnsafeCodeOutcomeGenerator(_db).GenerateForPair(packagePair, dependency);
         }
     }
     private void applyCachedChanges(FhirPackageComparisonPair packagePair)

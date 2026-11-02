@@ -108,6 +108,255 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         }
     }
 
+    internal FhirPackageComparisonPair PreparePair(int source = 2, int target = 0)
+    {
+        UnsafeCodeInputStore.ReplaceWithEmptyInputs(Connection, Packages);
+        DbComparisonClasses.CreateTables(Connection);
+        DbOutcomeClasses.CreateTables(Connection, forValueSets: false);
+        FhirPackageComparisonPair pair = new(Packages[source], Packages[target]);
+        StampComparison(pair);
+        return pair;
+    }
+
+    internal void StampComparison(FhirPackageComparisonPair pair)
+    {
+        string? revision = UnsafeCodeInputStore.BeginComparison(Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+        UnsafeCodeInputStore.CompleteComparison(Connection, pair.SourcePackageKey, pair.TargetPackageKey, revision);
+    }
+
+    internal DbUnsafeCodePairState PairState(FhirPackageComparisonPair pair) =>
+        DbUnsafeCodePairState.SelectSingle(Connection, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)!;
+
+    internal DbStructureDefinition AddStructure(DbFhirPackage package, string id, FhirArtifactClassEnum artifactClass = FhirArtifactClassEnum.ComplexType)
+    {
+        TestStructure row = new(package)
+        {
+            Id = id,
+            Name = id,
+            ArtifactClass = artifactClass,
+            UnversionedUrl = "http://example.org/StructureDefinition/" + id,
+            VersionedUrl = "http://example.org/StructureDefinition/" + id + "|" + package.PackageVersion,
+        };
+        row.Key = DbStructureDefinition.Insert(Connection, row);
+        return row;
+    }
+
+    internal DbStructureDefinition Structure(DbFhirPackage package, string id = "ValueSet") =>
+        DbStructureDefinition.SelectSingle(Connection, FhirPackageKey: package.Key, Id: id)!;
+
+    internal DbElement AddElement(DbStructureDefinition structure, string id, string type = "", string? binding = null, BindingStrength strength = BindingStrength.Required)
+    {
+        DbFhirPackage package = Packages.Single(package => package.Key == structure.FhirPackageKey);
+        List<DbElement> siblings = DbElement.SelectList(Connection, StructureKey: structure.Key);
+        int separator = id.LastIndexOf('.');
+        TestElement row = new(package, structure.Key, id)
+        {
+            ResourceFieldOrder = siblings.Count,
+            ParentElementKey = separator < 0 ? null : siblings.SingleOrDefault(parent => parent.Id == id[..separator])?.Key,
+            FullCollatedTypeLiteral = type,
+            DistinctTypeLiterals = type,
+            DistinctTypeCount = type.Length == 0 ? 0 : 1,
+            BindingValueSet = binding,
+            ValueSetBindingStrength = strength,
+        };
+        row.Key = DbElement.Insert(Connection, row);
+        if (row.ParentElementKey is int parentKey)
+        {
+            DbElement parent = siblings.Single(parent => parent.Key == parentKey);
+            parent.ChildElementCount++;
+            DbElement.Update(Connection, [parent]);
+        }
+
+        return row;
+    }
+
+    internal void AddType(DbElement element, string typeName, DbStructureDefinition type, DbStructureDefinition? profile = null)
+    {
+        DbElementType.Insert(Connection, new DbElementType
+        {
+            FhirPackageKey = element.FhirPackageKey,
+            StructureKey = element.StructureKey,
+            ElementKey = element.Key,
+            TypeName = typeName,
+            TypeStructureKey = type.Key,
+            TypeProfile = profile?.VersionedUrl,
+            TypeProfileStructureKey = profile?.Key,
+            TargetProfile = null,
+            TargetProfileStructureKey = null,
+        });
+    }
+
+    internal DbValueSet SetBinding(DbFhirPackage package, string system = FilterSystem, string? systemVersion = null, string valueSetVersion = "source-vs")
+    {
+        DbValueSet row = DbValueSet.SelectSingle(Connection, FhirPackageKey: package.Key, Id: "filter-operator")!;
+        row.Version = valueSetVersion;
+        row.VersionedUrl = row.UnversionedUrl + "|" + valueSetVersion;
+        row.Compose = new() { Include = [new() { System = system, Version = systemVersion }] };
+        DbValueSet.Update(Connection, [row]);
+        return row;
+    }
+
+    internal DbStructureOutcome AddOutcome(FhirPackageComparisonPair pair, DbStructureDefinition source, DbStructureDefinition? target = null)
+    {
+        TestStructureOutcome row = new(pair, source, target);
+        row.Key = DbStructureOutcome.Insert(Connection, row);
+        return row;
+    }
+
+    internal void AddRule(string system = FilterSystem, string code = "unsafe", string? version = null, bool noMapOnly = false,
+        string excludedRelationships = "", string excludedVersions = "")
+    {
+        DbUnsafeCodeRule.Insert(Connection, new DbUnsafeCodeRule
+        {
+            System = system,
+            Code = code,
+            Version = version,
+            NoMapOnly = noMapOnly,
+            ExcludedRelationshipLiteral = excludedRelationships,
+            ExcludedVersionLiteral = excludedVersions,
+            SourceRelativeFilename = "input/ig-support/unsafe-code-mappings.json",
+            EntryIndex = DbUnsafeCodeRule.SelectList(Connection).Count,
+        });
+    }
+
+    internal void AddAnnotation(FhirPackageComparisonPair pair, DbElement source, DbElement target)
+    {
+        DbUnsafeCodeElementAnnotation.Insert(Connection, new DbUnsafeCodeElementAnnotation
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey,
+            TargetFhirPackageKey = pair.TargetPackageKey,
+            SourceElementId = source.Id,
+            TargetElementId = target.Id,
+            RequiresOmittedMandatoryCode = true,
+            SourceRelativeFilename = "input/elements/test.json",
+            GroupIndex = 0,
+            SourceIndex = 0,
+            TargetIndex = 0,
+        });
+    }
+
+    internal DbUnsafeCodeMapEvidence AddEvidence(FhirPackageComparisonPair pair, string code = "unsafe", string? sourceScope = FilterValueSet,
+        string? targetScope = FilterValueSet, string? sourceVersion = null, string? targetVersion = null, bool noMap = true,
+        ConceptMap.ConceptMapRelationship? relationship = null, string sourceSystem = FilterSystem)
+    {
+        DbUnsafeCodeMapEvidence row = new()
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey,
+            TargetFhirPackageKey = pair.TargetPackageKey,
+            SourceValueSetUrl = sourceScope,
+            TargetValueSetUrl = targetScope,
+            SourceValueSetVersion = sourceVersion,
+            TargetValueSetVersion = targetVersion,
+            SourceSystem = sourceSystem,
+            SourceCode = code,
+            ExplicitNoMap = noMap,
+            Relationship = relationship,
+            SourceRelativeFilename = "input/codes/test.json",
+            GroupIndex = 0,
+            SourceIndex = DbUnsafeCodeMapEvidence.SelectList(Connection).Count,
+        };
+        row.Key = DbUnsafeCodeMapEvidence.Insert(Connection, row);
+        return row;
+    }
+
+    internal void Connect(FhirPackageComparisonPair pair, DbStructureOutcome outcome, DbElement source, DbElement target)
+    {
+        TestElementMapping mapping = new(pair, source, target);
+        mapping.Key = DbElementMapping.Insert(Connection, mapping);
+        TestElementComparison comparison = new(pair, source, target) { ElementMappingKey = mapping.Key };
+        comparison.Key = DbElementComparison.Insert(Connection, comparison);
+        TestElementOutcome elementOutcome = new(pair, source);
+        elementOutcome.Key = DbElementOutcome.Insert(Connection, elementOutcome);
+        DbElementOutcomeTarget.Insert(Connection, new TestElementTarget(pair, outcome, elementOutcome, comparison, target));
+    }
+
+    private sealed class TestStructureOutcome : DbStructureOutcome
+    {
+        [SetsRequiredMembers]
+        internal TestStructureOutcome(FhirPackageComparisonPair pair, DbStructureDefinition source, DbStructureDefinition? target)
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey;
+            TargetFhirPackageKey = pair.TargetPackageKey;
+            SourceFhirSequence = pair.SourceFhirSequence;
+            TargetFhirSequence = pair.TargetFhirSequence;
+            SourceStructureKey = source.Key;
+            TargetStructureKey = target?.Key;
+            SourceId = source.Id;
+            SourceName = source.Name;
+            SourceCanonicalVersioned = source.VersionedUrl;
+            SourceCanonicalUnversioned = source.UnversionedUrl;
+            SourceVersion = source.Version;
+            Comments = "";
+        }
+    }
+
+    private sealed class TestElementMapping : DbElementMapping
+    {
+        [SetsRequiredMembers]
+        internal TestElementMapping(FhirPackageComparisonPair pair, DbElement source, DbElement target)
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey;
+            TargetFhirPackageKey = pair.TargetPackageKey;
+            SourceStructureKey = source.StructureKey;
+            TargetStructureKey = target.StructureKey;
+            SourceElementKey = source.Key;
+            TargetElementKey = target.Key;
+            SourceElementId = source.Id;
+            TargetElementId = target.Id;
+        }
+    }
+
+    private sealed class TestElementComparison : DbElementComparison
+    {
+        [SetsRequiredMembers]
+        internal TestElementComparison(FhirPackageComparisonPair pair, DbElement source, DbElement target)
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey;
+            TargetFhirPackageKey = pair.TargetPackageKey;
+            SourceStructureKey = source.StructureKey;
+            TargetStructureKey = target.StructureKey;
+            SourceElementKey = source.Key;
+            TargetElementKey = target.Key;
+            SourceElementId = source.Id;
+            TargetElementId = target.Id;
+        }
+    }
+
+    private sealed class TestElementOutcome : DbElementOutcome
+    {
+        [SetsRequiredMembers]
+        internal TestElementOutcome(FhirPackageComparisonPair pair, DbElement source)
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey;
+            TargetFhirPackageKey = pair.TargetPackageKey;
+            SourceStructureKey = source.StructureKey;
+            SourceElementKey = source.Key;
+            SourceId = source.Id;
+            SourceName = source.Name;
+            SourceCanonicalVersioned = "";
+            SourceCanonicalUnversioned = "";
+            SourceVersion = "";
+            SourceMaxCardinalityString = source.MaxCardinalityString;
+            Comments = "";
+        }
+    }
+
+    private sealed class TestElementTarget : DbElementOutcomeTarget
+    {
+        [SetsRequiredMembers]
+        internal TestElementTarget(FhirPackageComparisonPair pair, DbStructureOutcome outcome, DbElementOutcome element, DbElementComparison comparison, DbElement target)
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey;
+            TargetFhirPackageKey = pair.TargetPackageKey;
+            ElementOutcomeKey = element.Key;
+            StructureOutcomeKey = outcome.Key;
+            ElementComparisonKey = comparison.Key;
+            TargetStructureKey = target.StructureKey;
+            TargetElementKey = target.Key;
+            TargetElementId = target.Id;
+        }
+    }
+
     private void InsertStructure(DbFhirPackage package)
     {
         TestStructure row = new(package);

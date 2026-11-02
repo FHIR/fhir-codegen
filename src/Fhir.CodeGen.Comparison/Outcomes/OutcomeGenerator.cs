@@ -22,11 +22,18 @@ public class OutcomeGenerator
     public OutcomeGenerator(
         ComparisonDatabase db,
         ILoggerFactory loggerFactory)
+        : this(db.DbConnection, loggerFactory)
+    {
+    }
+
+    internal OutcomeGenerator(
+        IDbConnection db,
+        ILoggerFactory loggerFactory)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<OutcomeGenerator>();
 
-        _db = db.DbConnection;
+        _db = db;
     }
 
     public void GenerateOutcomes(
@@ -35,6 +42,11 @@ public class OutcomeGenerator
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
+        if (processStructures)
+        {
+            UnsafeCodeInputStore.RequireInputs(_db);
+        }
+
         // ensure out tables exist and are empty
         DbOutcomeClasses.DropTables(_db, forValueSets: processValueSets, forStructures: processStructures);
         DbOutcomeClasses.CreateTables(_db, forValueSets: processValueSets, forStructures: processStructures);

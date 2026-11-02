@@ -5,6 +5,7 @@
 
 using System.Collections.Immutable;
 using System.Data;
+using System.Text.Json;
 using Fhir.CodeGen.SQLiteGenerator;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Utility;
@@ -87,6 +88,7 @@ public partial class DbUnsafeCodeTrigger : DbRecordBase
     public required string VersionsJson { get; set; }
     public required string EvidenceKeysJson { get; set; }
     public required string RuleKeysJson { get; set; }
+    public string AnnotationKeysJson { get; set; } = "[]";
 }
 
 [CgSQLiteTable(tableName: "UnsafeCodeInputState")]
@@ -114,6 +116,146 @@ public partial class DbUnsafeCodePairState : DbRecordBase
 
 internal static class UnsafeCodeInputStore
 {
+    internal static void InvalidateComparisons(IDbConnection db)
+    {
+        InvalidateOutcomes(db);
+        List<DbUnsafeCodePairState> pairs = DbUnsafeCodePairState.SelectList(db);
+        foreach (DbUnsafeCodePairState pair in pairs)
+        {
+            pair.ComparisonRevision = null;
+        }
+
+        pairs.Update(db);
+    }
+
+    internal static void InvalidateOutcomes(IDbConnection db)
+    {
+        EnsureStateTables(db);
+        List<DbUnsafeCodePairState> pairs = DbUnsafeCodePairState.SelectList(db);
+        foreach (DbUnsafeCodePairState pair in pairs)
+        {
+            ClearOutcome(pair);
+        }
+
+        pairs.Update(db);
+    }
+
+    internal static string RequireInputs(IDbConnection db)
+    {
+        EnsureStateTables(db);
+        DbUnsafeCodeInputState? input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1);
+        if (input?.FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
+            string.IsNullOrEmpty(input.CompletedInputRevision))
+        {
+            throw new InvalidOperationException("Unsafe-code inputs are missing, incomplete, or incompatible. Reload cross-version maps, rerun structure comparisons, and regenerate outcomes.");
+        }
+
+        return input.CompletedInputRevision;
+    }
+
+    internal static DbUnsafeCodePairState RequireComparison(IDbConnection db, int sourceKey, int targetKey)
+    {
+        string revision = RequireInputs(db);
+        DbUnsafeCodePairState? pair = DbUnsafeCodePairState.SelectSingle(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        if (pair?.InputRevision != revision || string.IsNullOrEmpty(pair.ComparisonRevision))
+        {
+            throw new InvalidOperationException($"Unsafe-code structure comparison {sourceKey}->{targetKey} is missing or stale. Rerun structure comparisons after loading maps, then regenerate outcomes.");
+        }
+
+        return pair;
+    }
+
+    internal static string? BeginComparison(IDbConnection db, int sourceKey, int targetKey)
+    {
+        EnsureStateTables(db);
+        DbUnsafeCodePairState? pair = DbUnsafeCodePairState.SelectSingle(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        if (pair is not null)
+        {
+            pair.ComparisonRevision = null;
+            ClearOutcome(pair);
+            DbUnsafeCodePairState.Update(db, [pair]);
+        }
+
+        DbUnsafeCodeInputState? input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1);
+        return input?.FormatVersion == UnsafeCodeConstants.InputFormatVersion ? input.CompletedInputRevision : null;
+    }
+
+    internal static void CompleteComparison(IDbConnection db, int sourceKey, int targetKey, string? revision)
+    {
+        if (revision is null)
+        {
+            return;
+        }
+
+        DbUnsafeCodeInputState? input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1);
+        DbUnsafeCodePairState? pair = DbUnsafeCodePairState.SelectSingle(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        if (input?.CompletedInputRevision != revision || input.FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
+            pair?.InputRevision != revision)
+        {
+            return;
+        }
+
+        pair.ComparisonRevision = Guid.NewGuid().ToString("N");
+        ClearOutcome(pair);
+        DbUnsafeCodePairState.Update(db, [pair]);
+    }
+
+    internal static DbUnsafeCodePairState BeginOutcomes(IDbConnection db, int sourceKey, int targetKey)
+    {
+        DbUnsafeCodePairState pair = RequireComparison(db, sourceKey, targetKey);
+        ClearOutcome(pair);
+        DbUnsafeCodePairState.Update(db, [pair]);
+        DbUnsafeCodeTrigger.Delete(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        return pair;
+    }
+
+    internal static void CompleteOutcomes(IDbConnection db, DbUnsafeCodePairState dependency)
+    {
+        DbUnsafeCodePairState pair = RequireComparison(db, dependency.SourceFhirPackageKey, dependency.TargetFhirPackageKey);
+        if (pair.InputRevision != dependency.InputRevision || pair.ComparisonRevision != dependency.ComparisonRevision)
+        {
+            throw new InvalidOperationException($"Unsafe-code dependencies changed during outcomes for {pair.SourceFhirPackageKey}->{pair.TargetFhirPackageKey}. Rerun structure comparisons and outcomes.");
+        }
+
+        pair.OutcomeInputRevision = pair.InputRevision;
+        pair.OutcomeComparisonRevision = pair.ComparisonRevision;
+        pair.OutcomeFormatVersion = UnsafeCodeConstants.OutcomeFormatVersion;
+        DbUnsafeCodePairState.Update(db, [pair]);
+    }
+
+    internal static void InsertTriggers(
+        IDbConnection db,
+        IEnumerable<UnsafeCodeTrigger> triggers,
+        IReadOnlyDictionary<UnsafeCodeMappingContext, int[]> annotationKeys)
+    {
+        List<DbUnsafeCodeTrigger> rows = triggers.Select(trigger => new DbUnsafeCodeTrigger
+        {
+            Key = DbUnsafeCodeTrigger.GetIndex(),
+            StructureOutcomeKey = trigger.StructureOutcomeKey,
+            SourceFhirPackageKey = trigger.Context.SourceFhirPackageKey,
+            TargetFhirPackageKey = trigger.Context.TargetFhirPackageKey,
+            SourceElementId = trigger.Context.SourceElementId,
+            TargetElementId = trigger.Context.TargetElementId,
+            SourcePathJson = JsonSerializer.Serialize(trigger.SourcePath),
+            System = trigger.Identity.System,
+            Code = trigger.Identity.Code,
+            SourceVersion = trigger.Identity.Version,
+            IsWildcardVersion = trigger.VersionMatch.IsWildcard,
+            VersionsJson = JsonSerializer.Serialize(trigger.VersionMatch.Versions),
+            EvidenceKeysJson = JsonSerializer.Serialize(trigger.EvidenceKeys),
+            RuleKeysJson = JsonSerializer.Serialize(trigger.RuleKeys),
+            AnnotationKeysJson = JsonSerializer.Serialize(trigger.EvidenceKeys.Length > 0 && annotationKeys.TryGetValue(trigger.Context, out int[]? keys) ? keys : []),
+        }).ToList();
+        rows.Insert(db, insertPrimaryKey: true);
+    }
+
+    private static void ClearOutcome(DbUnsafeCodePairState pair)
+    {
+        pair.OutcomeInputRevision = null;
+        pair.OutcomeComparisonRevision = null;
+        pair.OutcomeFormatVersion = null;
+    }
+
     internal static void EnsureStateTables(IDbConnection db)
     {
         DbUnsafeCodeInputState.CreateTable(db);

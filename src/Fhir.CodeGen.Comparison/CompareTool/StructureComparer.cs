@@ -125,8 +125,10 @@ public class StructureComparer
         foreach (FhirPackageComparisonPair packagePair in packagePairs)
         {
             _logger.LogInformation($"Processing {packagePair.SourcePackageShortName} -> {packagePair.TargetPackageShortName}");
+            string? inputRevision = UnsafeCodeInputStore.BeginComparison(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey);
             doComparison(packagePair);
             applyCachedChanges(packagePair);
+            UnsafeCodeInputStore.CompleteComparison(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey, inputRevision);
         }
     }
 

@@ -34,6 +34,11 @@ public static class DbComparisonClasses
         bool forValueSets = true,
         bool forStructures = true)
     {
+        if (forStructures)
+        {
+            UnsafeCodeInputStore.InvalidateComparisons(db);
+        }
+
         if (forValueSets)
         {
             DbValueSetComparison.DropTable(db);
@@ -938,4 +943,3 @@ public class DbComparisonCache<T>
 
     public int Count => _byKey.Count;
 }
-

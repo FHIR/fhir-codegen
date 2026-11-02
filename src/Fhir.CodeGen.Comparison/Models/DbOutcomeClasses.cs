@@ -152,6 +152,7 @@ public static class DbOutcomeClasses
         try { DbStructureOutcome.LoadMaxKey(db); } catch { }
         try { DbElementOutcome.LoadMaxKey(db); } catch { }
         try { DbElementOutcomeTarget.LoadMaxKey(db); } catch { }
+        try { DbUnsafeCodeTrigger.LoadMaxKey(db); } catch { }
     }
 
     public static void DropTables(
@@ -159,6 +160,11 @@ public static class DbOutcomeClasses
         bool forValueSets = true,
         bool forStructures = true)
     {
+        if (forStructures)
+        {
+            UnsafeCodeInputStore.InvalidateOutcomes(db);
+        }
+
         if (forValueSets)
         {
             DbValueSetOutcome.DropTable(db);
@@ -167,6 +173,7 @@ public static class DbOutcomeClasses
 
         if (forStructures)
         {
+            DbUnsafeCodeTrigger.DropTable(db);
             DbStructureOutcome.DropTable(db);
             DbElementOutcome.DropTable(db);
             DbElementOutcomeTarget.DropTable(db);
@@ -186,6 +193,7 @@ public static class DbOutcomeClasses
 
         if (forStructures)
         {
+            DbUnsafeCodeTrigger.CreateTable(db);
             DbStructureOutcome.CreateTable(db);
             DbElementOutcome.CreateTable(db);
             DbElementOutcomeTarget.CreateTable(db);
@@ -830,4 +838,3 @@ public partial class DbElementOutcomeTarget : DbRecordBase
 
     public required string? Comments { get; set; }
 }
-
