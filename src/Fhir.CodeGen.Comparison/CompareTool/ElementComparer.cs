@@ -562,7 +562,8 @@ public class ElementComparer
                         trackingRecord.SourcePackage,
                         sourceElement.Key,
                         trackingRecord.TargetPackage,
-                        targetElement?.Key));
+                        targetElement?.Key),
+                    elementMappingKey: explicitMapping.Key);
 
                 _elementComparisonCache.CacheAdd(elementComparison);
                 elementComparisons.Add(elementComparison);
@@ -1433,7 +1434,8 @@ public class ElementComparer
         string? technicalMessage,
         string? userMessage,
         int?[] contentStepKeys,
-        bool applyRelatedRelationships = true)
+        bool applyRelatedRelationships = true,
+        int? elementMappingKey = null)
     {
         sdTrackingRecord.ComparisonRecordKey ??= DbStructureComparison.GetIndex();
 
@@ -1541,7 +1543,7 @@ public class ElementComparer
         {
             Key = elementComparisonKey,
             StructureComparisonKey = sdTrackingRecord.ComparisonRecordKey.Value,
-            ElementMappingKey = sdTrackingRecord.ExplicitMapping?.Key,
+            ElementMappingKey = elementMappingKey,
 
             Steps = Math.Abs(sdTrackingRecord.SourcePackage.DefinitionFhirSequence - sdTrackingRecord.TargetPackage.DefinitionFhirSequence),
 
