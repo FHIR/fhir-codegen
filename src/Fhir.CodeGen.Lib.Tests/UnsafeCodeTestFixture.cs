@@ -3,15 +3,24 @@
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
 
+extern alias r4;
+extern alias r4b;
+
 using System.Diagnostics.CodeAnalysis;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
+using Fhir.CodeGen.Comparison.CompareTool;
 using Fhir.CodeGen.Comparison.CrossVersionSource;
 using Fhir.CodeGen.Comparison.Models;
-using Hl7.Fhir.Model;
+using Fhir.CodeGen.Comparison.Outcomes;
+using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Serialization;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
+using BindingStrength = Hl7.Fhir.Model.BindingStrength;
+using ConceptMap = Hl7.Fhir.Model.ConceptMap;
+using FhirBoolean = Hl7.Fhir.Model.FhirBoolean;
+using PublicationStatus = Hl7.Fhir.Model.PublicationStatus;
 
 namespace Fhir.CodeGen.Lib.Tests;
 
@@ -27,7 +36,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal List<DbFhirPackage> Packages { get; } = [];
     internal DbUnsafeCodeInputState InputState => DbUnsafeCodeInputState.SelectSingle(Connection, Key: 1)!;
 
-    internal UnsafeCodeTestFixture()
+    internal UnsafeCodeTestFixture(bool initializeIndices = false)
     {
         Connection = new("Data Source=:memory:");
         Connection.Open();
@@ -36,11 +45,19 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         {
             Directory.CreateDirectory(SourceRoot);
             string input = Path.Combine(AppContext.BaseDirectory, "TestData", "XverUnsafeCodes");
-            foreach (string filename in Directory.GetFiles(input, "*", SearchOption.AllDirectories))
+            foreach (string filename in Directory.GetFiles(Path.Combine(input, "input"), "*", SearchOption.AllDirectories))
             {
                 string destination = Path.Combine(SourceRoot, Path.GetRelativePath(input, filename));
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                 File.Copy(filename, destination);
+            }
+
+            if (initializeIndices)
+            {
+                DbContentClasses.LoadIndices(Connection);
+                DbMappingClasses.LoadIndices(Connection);
+                DbComparisonClasses.LoadIndices(Connection);
+                DbOutcomeClasses.LoadIndices(Connection);
             }
 
             DbContentClasses.CreateTables(Connection);
@@ -73,6 +90,170 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     }
 
     internal bool Load() => new MappingLoader(Connection, NullLoggerFactory.Instance).TryLoadCrossVersionSourceMaps(SourceRoot, false);
+
+    internal static UnsafeCodeTestFixture CreateProfileInputs(bool initializeIndices = true)
+    {
+        UnsafeCodeTestFixture fixture = new(initializeIndices);
+        foreach (DbFhirPackage package in fixture.Packages)
+        {
+            DbStructureDefinition code = fixture.AddStructure(package, "code", FhirArtifactClassEnum.PrimitiveType);
+            DbStructureDefinition text = fixture.AddStructure(package, "string", FhirArtifactClassEnum.PrimitiveType);
+            DbStructureDefinition extension = fixture.AddStructure(package, "Extension");
+            fixture.AddElement(extension, "Extension");
+            DbElement value = fixture.AddElement(extension, "Extension.value[x]", "code,string");
+            fixture.AddType(value, "code", code);
+            fixture.AddType(value, "string", text);
+
+            DbStructureDefinition structure = fixture.Structure(package);
+            fixture.AddElement(structure, "ValueSet");
+            fixture.AddElement(structure, "ValueSet.compose");
+            fixture.AddElement(structure, "ValueSet.compose.include");
+            fixture.AddElement(structure, "ValueSet.compose.include.filter");
+            DbElement op = fixture.AddElement(structure, FilterElement, "code", FilterValueSet);
+            fixture.AddType(op, "code", code);
+            if (package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R5)
+            {
+                op.MaxCardinality = -1;
+                op.MaxCardinalityString = "*";
+                DbElement.Update(fixture.Connection, [op]);
+            }
+
+            DbElement filterValue = fixture.AddElement(structure, "ValueSet.compose.include.filter.value", "string");
+            fixture.AddType(filterValue, "string", text);
+            fixture.SetBinding(package, systemVersion: package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R5
+                ? "source-system,version" : package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R4 ? "target-system-r4" : "target-system-r4b",
+                valueSetVersion: package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R5
+                    ? "source-vs" : package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R4 ? "target-vs-r4" : "target-vs-r4b");
+        }
+
+        return fixture;
+    }
+
+    internal static UnsafeCodeTestFixture CreateNoFeatureInputs(bool initializeIndices = true)
+    {
+        UnsafeCodeTestFixture fixture = CreateProfileInputs(initializeIndices);
+        foreach (string filename in Directory.GetFiles(Path.Combine(fixture.SourceRoot, "input", "elements"), "*.json"))
+        {
+            ConceptMap map = new FhirJsonParser().Parse<ConceptMap>(File.ReadAllText(filename));
+            foreach (ConceptMap.TargetElementComponent target in map.Group.SelectMany(group => group.Element).SelectMany(element => element.Target))
+            {
+                target.Property.RemoveAll(property => property.Code == UnsafeCodeConstants.PropertyCode && property.Value is FhirBoolean { Value: true });
+            }
+
+            File.WriteAllText(filename, map.ToJson());
+        }
+
+        if (File.Exists(fixture.ConfigurationFilename))
+        {
+            File.Delete(fixture.ConfigurationFilename);
+        }
+
+        return fixture;
+    }
+
+    internal FhirPackageComparisonPair LoadCompareAndGenerate(int targetIndex)
+    {
+        // The production transitive comparer indexes the package list by release.
+        foreach (FhirReleases.FhirSequenceCodes sequence in new[] { FhirReleases.FhirSequenceCodes.DSTU2, FhirReleases.FhirSequenceCodes.STU3 })
+        {
+            DbFhirPackage.Insert(Connection, new DbFhirPackage
+            {
+                Name = sequence.ToCorePackageId(),
+                PackageId = sequence.ToCorePackageId(),
+                PackageVersion = sequence.ToLongVersion(),
+                FhirVersionShort = sequence.ToShortVersion(),
+                CanonicalUrl = "http://hl7.org/fhir",
+                ShortName = sequence.ToRLiteral(),
+                Dependencies = null,
+                DefinitionFhirSequence = sequence,
+            });
+        }
+
+        if (!Load())
+        {
+            throw new InvalidOperationException("The synthetic cross-version maps did not load.");
+        }
+
+        FhirPackageComparisonPair pair = new(Packages[2], Packages[targetIndex]);
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)> pairs = [pair.SequencePair];
+        DbComparisonClasses.CreateTables(Connection);
+        new StructureComparer(Connection, NullLoggerFactory.Instance).CompareStructures(specificPairs:
+            [(FhirReleases.FhirSequenceCodes.R5, FhirReleases.FhirSequenceCodes.R4B),
+                (FhirReleases.FhirSequenceCodes.R4B, FhirReleases.FhirSequenceCodes.R4), pair.SequencePair]);
+        new OutcomeGenerator(Connection, NullLoggerFactory.Instance).GenerateOutcomes(processValueSets: false, specificPairs: pairs);
+        return pair;
+    }
+
+    internal static UnsafeCodeTestFixture CreateRepresentationInputs()
+    {
+        UnsafeCodeTestFixture fixture = new();
+        foreach (DbFhirPackage package in fixture.Packages)
+        {
+            foreach (string primitive in new[] { "code", "string", "uri" })
+            {
+                fixture.AddStructure(package, primitive, FhirArtifactClassEnum.PrimitiveType);
+            }
+
+            DbStructureDefinition coding = fixture.AddStructure(package, "Coding");
+            fixture.AddElement(coding, "Coding");
+            fixture.AddTypedElement(coding, "Coding.system", "uri");
+            fixture.AddTypedElement(coding, "Coding.version", "string");
+            fixture.AddTypedElement(coding, "Coding.code", "code");
+            DbStructureDefinition concept = fixture.AddStructure(package, "CodeableConcept");
+            fixture.AddElement(concept, "CodeableConcept");
+            fixture.AddTypedElement(concept, "CodeableConcept.coding", "Coding");
+            DbStructureDefinition quantity = fixture.AddStructure(package, "Quantity");
+            fixture.AddElement(quantity, "Quantity");
+            fixture.AddTypedElement(quantity, "Quantity.system", "uri");
+            fixture.AddTypedElement(quantity, "Quantity.code", "code");
+            DbStructureDefinition extension = fixture.AddStructure(package, "Extension");
+            fixture.AddElement(extension, "Extension");
+            DbElement value = fixture.AddElement(extension, "Extension.value[x]");
+            foreach (string type in new[] { "code", "string", "uri", "Coding", "CodeableConcept", "Quantity" })
+            {
+                fixture.AddType(value, type, fixture.Structure(package, type));
+            }
+
+            fixture.AddElement(fixture.Structure(package), "ValueSet");
+            DbStructureDefinition basic = fixture.AddStructure(package, "Basic", FhirArtifactClassEnum.Resource);
+            fixture.AddElement(basic, "Basic");
+            fixture.AddTypedElement(basic, "Basic.code", "CodeableConcept");
+        }
+
+        return fixture;
+    }
+
+    internal DbElement AddTypedElement(DbStructureDefinition structure, string id, string type)
+    {
+        DbElement element = AddElement(structure, id, type);
+        AddType(element, type, Structure(Packages.Single(package => package.Key == structure.FhirPackageKey), type));
+        return element;
+    }
+
+    internal static ITypedElement TargetInstance(int targetIndex, string json)
+    {
+        BaseFhirJsonPocoDeserializer deserializer = new(targetIndex == 0
+            ? r4::Hl7.Fhir.Model.ModelInfo.ModelInspector
+            : r4b::Hl7.Fhir.Model.ModelInfo.ModelInspector);
+        return deserializer.DeserializeResource(json).ToTypedElement();
+    }
+
+    internal DbElementOutcome AddRepresentationOutcome(FhirPackageComparisonPair pair, DbElement source,
+        string? context = null, DbElementOutcome? parent = null, bool cardinalityOnly = false)
+    {
+        TestElementOutcome outcome = new(pair, source)
+        {
+            RequiresXVerDefinition = true,
+            RequiresExtensionDefinition = !cardinalityOnly && parent is null,
+            RequiresCardinalityDefinition = cardinalityOnly,
+            RequiresSliceDefinition = parent is not null,
+            ParentElementOutcomeKey = parent?.Key,
+            ExtensionContextsLiteral = cardinalityOnly ? null : context,
+            CardinalityExtensionContextsLiteral = cardinalityOnly ? context : null,
+        };
+        outcome.Key = DbElementOutcome.Insert(Connection, outcome);
+        return outcome;
+    }
 
     internal void WriteConfiguration(string json)
     {
@@ -259,14 +440,17 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         return row;
     }
 
-    internal void Connect(FhirPackageComparisonPair pair, DbStructureOutcome outcome, DbElement source, DbElement target)
+    internal void Connect(FhirPackageComparisonPair pair, DbStructureOutcome outcome, DbElement source, DbElement target, DbElementOutcome? existing = null)
     {
         TestElementMapping mapping = new(pair, source, target);
         mapping.Key = DbElementMapping.Insert(Connection, mapping);
         TestElementComparison comparison = new(pair, source, target) { ElementMappingKey = mapping.Key };
         comparison.Key = DbElementComparison.Insert(Connection, comparison);
-        TestElementOutcome elementOutcome = new(pair, source);
-        elementOutcome.Key = DbElementOutcome.Insert(Connection, elementOutcome);
+        DbElementOutcome elementOutcome = existing ?? new TestElementOutcome(pair, source);
+        if (existing is null)
+        {
+            elementOutcome.Key = DbElementOutcome.Insert(Connection, elementOutcome);
+        }
         DbElementOutcomeTarget.Insert(Connection, new TestElementTarget(pair, outcome, elementOutcome, comparison, target));
     }
 
@@ -286,6 +470,16 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             SourceCanonicalVersioned = source.VersionedUrl;
             SourceCanonicalUnversioned = source.UnversionedUrl;
             SourceVersion = source.Version;
+            SourceArtifactClass = source.ArtifactClass;
+            TargetArtifactClass = target?.ArtifactClass;
+            TargetId = target?.Id;
+            TargetName = target?.Name;
+            TargetCanonicalUnversioned = target?.UnversionedUrl;
+            TargetCanonicalVersioned = target?.VersionedUrl;
+            GenShortId = "profile-" + source.Id;
+            GenName = "Profile" + source.Name;
+            GenUrl = "http://example.org/StructureDefinition/profile-" + source.Id;
+            GenFileName = "StructureDefinition-profile-" + source.Id;
             Comments = "";
         }
     }
@@ -337,6 +531,14 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             SourceCanonicalUnversioned = "";
             SourceVersion = "";
             SourceMaxCardinalityString = source.MaxCardinalityString;
+            SourceMinCardinality = source.MinCardinality;
+            SourceResourceOrder = source.ResourceFieldOrder;
+            SourceChildElementCount = source.ChildElementCount;
+            GenShortId = "ext-" + source.Id;
+            GenName = "Extension" + source.Id.Replace(".", "_", StringComparison.Ordinal);
+            GenUrl = "http://example.org/StructureDefinition/ext-" + source.Id;
+            GenFileName = "StructureDefinition-ext-" + source.Id;
+            GenSliceName = "fixed-local-" + source.Name;
             Comments = "";
         }
     }

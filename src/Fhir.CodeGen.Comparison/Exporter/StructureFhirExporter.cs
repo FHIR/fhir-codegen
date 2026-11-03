@@ -44,6 +44,20 @@ public class StructureFhirExporter
 
     private readonly XVerExporter _exporter;
     private readonly IDbConnection _db;
+    private ProfileRepresentationIndex? _representations;
+    private XVerIgExportTrackingRecord? _representationTracking;
+    private DbStructureOutcome? _profileOutcome;
+    private DbElementOutcome? _profileElement;
+
+    internal sealed record BuiltDefinition(string FileName, StructureDefinition Definition, int OutcomeKey);
+    internal sealed record BuiltDefinitionSet(IReadOnlyList<BuiltDefinition> Definitions, ProfileRepresentationIndex Representations);
+
+    internal sealed record BuiltDefinitions(
+        IReadOnlyList<BuiltDefinition> Extensions,
+        IReadOnlyList<BuiltDefinition> Profiles,
+        ProfileRepresentationIndex Representations);
+
+    internal ProfileRepresentationIndex Representations => _representations ?? throw new InvalidOperationException("Build definitions before accessing representations.");
 
     private ILoggerFactory _loggerFactory;
     private ILogger _logger;
@@ -143,170 +157,172 @@ public class StructureFhirExporter
 
     public void Export(XVerExportTrackingRecord tr)
     {
-        // iterate over the XVer IGs
         foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
         {
-            if (!_extensionValueTypes.ContainsKey(igTr.PackagePair.TargetFhirSequence))
-            {
-                DbStructureDefinition? extensionStructure = DbStructureDefinition.SelectSingle(
-                    _db,
-                    FhirPackageKey: igTr.PackagePair.TargetPackageKey,
-                    Name: "Extension",
-                    ArtifactClass: FhirArtifactClassEnum.ComplexType);
-
-                if (extensionStructure is null)
-                {
-                    throw new Exception($"Extension structure definition not found in target package `{igTr.PackagePair.TargetPackage.PackageId}`");
-                }
-
-                DbElement? extValueElement = DbElement.SelectSingle(
-                    _db,
-                    FhirPackageKey: igTr.PackagePair.TargetPackageKey,
-                    StructureKey: extensionStructure.Key,
-                    Id: "Extension.value[x]");
-
-                if (extValueElement is null)
-                {
-                    throw new Exception($"Extension.value[x] element not found in target package `{igTr.PackagePair.TargetPackage.PackageId}`");
-                }
-
-                _extensionValueTypes[igTr.PackagePair.TargetFhirSequence] = DbElementType.SelectList(
-                    _db,
-                    ElementKey: extValueElement.Key);
-
-                _extensionValueTypeNames[igTr.PackagePair.TargetFhirSequence] = _extensionValueTypes[igTr.PackagePair.TargetFhirSequence]
-                    .Select(et => et.TypeName ?? et.Literal)
-                    .ToHashSet();
-            }
-
-            if (!_canonicalTargetElements.ContainsKey(igTr.PackagePair.TargetFhirSequence))
-            {
-                List<int> resourceKeys = DbStructureDefinition.SelectList(
-                    _db,
-                    FhirPackageKey: igTr.PackagePair.TargetPackageKey,
-                    ArtifactClass: FhirArtifactClassEnum.Resource)
-                    .Select(sd => sd.Key)
-                    .ToList();
-
-                List<DbElement> urlElements = DbElement.SelectList(
-                    _db,
-                    FhirPackageKey: igTr.PackagePair.TargetPackageKey,
-                    Name: "url",
-                    StructureKeyValues: resourceKeys);
-
-                // remove non-root URL elements
-                urlElements.RemoveAll(ed => ed.Id.Count('.') > 1);
-
-                _canonicalTargetElements[igTr.PackagePair.TargetFhirSequence] = urlElements;
-                _canonicalTargetResourceNames[igTr.PackagePair.TargetFhirSequence] = urlElements.Select(ed => ed.Id.Split('.')[0]).ToHashSet();
-            }
-
-            if (!_resourceReferenceLookup.ContainsKey(igTr.PackagePair.SequencePair))
-            {
-                PackagePairStructureMappingTracker structureMappingTracker = new();
-                _resourceReferenceLookup[igTr.PackagePair.SequencePair] = structureMappingTracker;
-
-                List<DbStructureOutcome> structureOutcomes = DbStructureOutcome.SelectList(
-                    _db,
-                    SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
-                    TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey);
-                
-                foreach (DbStructureOutcome sdOutcome in structureOutcomes)
-                {
-                    bool added = false;
-                    bool hasDirectTarget = hasDirectTargetForSource(sdOutcome);
-                    string? sdTargetName = hasDirectTarget
-                        ? sdOutcome.TargetName ?? sdOutcome.TargetId
-                        : null;
-                    string? sdTargetUrl = hasDirectTarget
-                        ? sdOutcome.TargetCanonicalUnversioned
-                        : null;
-
-                    if ((sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource) &&
-                        (_targetReferenceMode != TargetReferenceModes.Profile))
-                    {
-                        sdTargetName ??= "Basic";
-                        sdTargetUrl ??= "http://hl7.org/fhir/StructureDefinition/Basic";
-                    }
-
-                    if ((sdTargetName is not null) &&
-                        (_targetReferenceMode != TargetReferenceModes.Profile))
-                    {
-                        if (!structureMappingTracker.TargetStructuresByName.TryGetValue(sdOutcome.SourceName, out List<string>? sdNameTargets))
-                        {
-                            sdNameTargets = [];
-                            structureMappingTracker.TargetStructuresByName[sdOutcome.SourceName] = sdNameTargets;
-                        }
-
-                        if (!sdNameTargets.Contains(sdTargetName))
-                        {
-                            sdNameTargets.Add(sdTargetName);
-                        }
-
-                        added = true;
-                    }
-
-                    if (sdTargetUrl is not null &&
-                        (_targetReferenceMode != TargetReferenceModes.Profile))
-                    {
-                        if (!structureMappingTracker.TargetStructuresByUrl.TryGetValue(sdOutcome.SourceCanonicalUnversioned, out List<string>? sdUrlTargets))
-                        {
-                            sdUrlTargets = [];
-                            structureMappingTracker.TargetStructuresByName[sdOutcome.SourceCanonicalUnversioned] = sdUrlTargets;
-                        }
-
-                        if (!sdUrlTargets.Contains(sdTargetUrl))
-                        {
-                            sdUrlTargets.Add(sdTargetUrl);
-                        }
-
-                        added = true;
-                    }
-
-                    if ((_targetReferenceMode == TargetReferenceModes.Resource) && added)
-                    {
-                        continue;
-                    }
-
-                    string profileTarget = sdOutcome.GenUrl!;
-                    if (!structureMappingTracker.TargetProfilesByName.TryGetValue(sdOutcome.SourceName, out List<string>? profileNameTargets))
-                    {
-                        profileNameTargets = [];
-                        structureMappingTracker.TargetProfilesByName[sdOutcome.SourceName] = profileNameTargets;
-                    }
-
-                    if (!profileNameTargets.Contains(profileTarget))
-                    {
-                        profileNameTargets.Add(profileTarget);
-                    }
-
-                    if (!structureMappingTracker.TargetProfilesByUrl.TryGetValue(sdOutcome.SourceCanonicalUnversioned, out List<string>? profileUrlTargets))
-                    {
-                        profileUrlTargets = [];
-                        structureMappingTracker.TargetProfilesByName[sdOutcome.SourceCanonicalUnversioned] = profileUrlTargets;
-                    }
-
-                    if (!profileUrlTargets.Contains(profileTarget))
-                    {
-                        profileUrlTargets.Add(profileTarget);
-                    }
-                }
-            }
-
-            // export extensions
-            exportExtensions(igTr);
-
-            // export profiles
-            exportProfiles(igTr);
-
-            // export resource maps
+            BuiltDefinitions definitions = BuildDefinitions(igTr);
+            exportExtensions(igTr, definitions.Extensions);
+            exportProfiles(igTr, definitions.Profiles);
             exportResourceMaps(igTr);
-
-            // export type maps
             exportTypeMaps(igTr);
-
-            // export element maps
             exportElementMaps(igTr);
+        }
+    }
+
+    internal BuiltDefinitions BuildDefinitions(XVerIgExportTrackingRecord igTr)
+    {
+        prepareDefinitions(igTr);
+        BuiltDefinitionSet extensions = BuildExtensions(igTr);
+        BuiltDefinitionSet profiles = BuildProfiles(igTr);
+        return new(extensions.Definitions, profiles.Definitions, profiles.Representations);
+    }
+
+    private void prepareDefinitions(XVerIgExportTrackingRecord igTr)
+    {
+        if (!_extensionValueTypes.ContainsKey(igTr.PackagePair.TargetFhirSequence))
+        {
+            DbStructureDefinition? extensionStructure = DbStructureDefinition.SelectSingle(
+                _db,
+                FhirPackageKey: igTr.PackagePair.TargetPackageKey,
+                Name: "Extension",
+                ArtifactClass: FhirArtifactClassEnum.ComplexType);
+
+            if (extensionStructure is null)
+            {
+                throw new Exception($"Extension structure definition not found in target package `{igTr.PackagePair.TargetPackage.PackageId}`");
+            }
+
+            DbElement? extValueElement = DbElement.SelectSingle(
+                _db,
+                FhirPackageKey: igTr.PackagePair.TargetPackageKey,
+                StructureKey: extensionStructure.Key,
+                Id: "Extension.value[x]");
+
+            if (extValueElement is null)
+            {
+                throw new Exception($"Extension.value[x] element not found in target package `{igTr.PackagePair.TargetPackage.PackageId}`");
+            }
+
+            _extensionValueTypes[igTr.PackagePair.TargetFhirSequence] = DbElementType.SelectList(
+                _db,
+                ElementKey: extValueElement.Key);
+
+            _extensionValueTypeNames[igTr.PackagePair.TargetFhirSequence] = _extensionValueTypes[igTr.PackagePair.TargetFhirSequence]
+                .Select(et => et.TypeName ?? et.Literal)
+                .ToHashSet();
+        }
+
+        if (!_canonicalTargetElements.ContainsKey(igTr.PackagePair.TargetFhirSequence))
+        {
+            List<int> resourceKeys = DbStructureDefinition.SelectList(
+                _db,
+                FhirPackageKey: igTr.PackagePair.TargetPackageKey,
+                ArtifactClass: FhirArtifactClassEnum.Resource)
+                .Select(sd => sd.Key)
+                .ToList();
+
+            List<DbElement> urlElements = DbElement.SelectList(
+                _db,
+                FhirPackageKey: igTr.PackagePair.TargetPackageKey,
+                Name: "url",
+                StructureKeyValues: resourceKeys);
+
+            // remove non-root URL elements
+            urlElements.RemoveAll(ed => ed.Id.Count('.') > 1);
+
+            _canonicalTargetElements[igTr.PackagePair.TargetFhirSequence] = urlElements;
+            _canonicalTargetResourceNames[igTr.PackagePair.TargetFhirSequence] = urlElements.Select(ed => ed.Id.Split('.')[0]).ToHashSet();
+        }
+
+        if (!_resourceReferenceLookup.ContainsKey(igTr.PackagePair.SequencePair))
+        {
+            PackagePairStructureMappingTracker structureMappingTracker = new();
+            _resourceReferenceLookup[igTr.PackagePair.SequencePair] = structureMappingTracker;
+
+            List<DbStructureOutcome> structureOutcomes = DbStructureOutcome.SelectList(
+                _db,
+                SourceFhirPackageKey: igTr.PackagePair.SourcePackageKey,
+                TargetFhirPackageKey: igTr.PackagePair.TargetPackageKey);
+
+            foreach (DbStructureOutcome sdOutcome in structureOutcomes)
+            {
+                bool added = false;
+                bool hasDirectTarget = hasDirectTargetForSource(sdOutcome);
+                string? sdTargetName = hasDirectTarget
+                    ? sdOutcome.TargetName ?? sdOutcome.TargetId
+                    : null;
+                string? sdTargetUrl = hasDirectTarget
+                    ? sdOutcome.TargetCanonicalUnversioned
+                    : null;
+
+                if ((sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource) &&
+                    (_targetReferenceMode != TargetReferenceModes.Profile))
+                {
+                    sdTargetName ??= "Basic";
+                    sdTargetUrl ??= "http://hl7.org/fhir/StructureDefinition/Basic";
+                }
+
+                if ((sdTargetName is not null) &&
+                    (_targetReferenceMode != TargetReferenceModes.Profile))
+                {
+                    if (!structureMappingTracker.TargetStructuresByName.TryGetValue(sdOutcome.SourceName, out List<string>? sdNameTargets))
+                    {
+                        sdNameTargets = [];
+                        structureMappingTracker.TargetStructuresByName[sdOutcome.SourceName] = sdNameTargets;
+                    }
+
+                    if (!sdNameTargets.Contains(sdTargetName))
+                    {
+                        sdNameTargets.Add(sdTargetName);
+                    }
+
+                    added = true;
+                }
+
+                if (sdTargetUrl is not null &&
+                    (_targetReferenceMode != TargetReferenceModes.Profile))
+                {
+                    if (!structureMappingTracker.TargetStructuresByUrl.TryGetValue(sdOutcome.SourceCanonicalUnversioned, out List<string>? sdUrlTargets))
+                    {
+                        sdUrlTargets = [];
+                        structureMappingTracker.TargetStructuresByName[sdOutcome.SourceCanonicalUnversioned] = sdUrlTargets;
+                    }
+
+                    if (!sdUrlTargets.Contains(sdTargetUrl))
+                    {
+                        sdUrlTargets.Add(sdTargetUrl);
+                    }
+
+                    added = true;
+                }
+
+                if ((_targetReferenceMode == TargetReferenceModes.Resource) && added)
+                {
+                    continue;
+                }
+
+                string profileTarget = sdOutcome.GenUrl!;
+                if (!structureMappingTracker.TargetProfilesByName.TryGetValue(sdOutcome.SourceName, out List<string>? profileNameTargets))
+                {
+                    profileNameTargets = [];
+                    structureMappingTracker.TargetProfilesByName[sdOutcome.SourceName] = profileNameTargets;
+                }
+
+                if (!profileNameTargets.Contains(profileTarget))
+                {
+                    profileNameTargets.Add(profileTarget);
+                }
+
+                if (!structureMappingTracker.TargetProfilesByUrl.TryGetValue(sdOutcome.SourceCanonicalUnversioned, out List<string>? profileUrlTargets))
+                {
+                    profileUrlTargets = [];
+                    structureMappingTracker.TargetProfilesByName[sdOutcome.SourceCanonicalUnversioned] = profileUrlTargets;
+                }
+
+                if (!profileUrlTargets.Contains(profileTarget))
+                {
+                    profileUrlTargets.Add(profileTarget);
+                }
+            }
         }
     }
 
@@ -1175,7 +1191,7 @@ public class StructureFhirExporter
     }
 
 
-    private void exportProfiles(XVerIgExportTrackingRecord igTr)
+    private void exportProfiles(XVerIgExportTrackingRecord igTr, IReadOnlyList<BuiltDefinition> definitions)
     {
         CrossVersionExporter.StructureDefinitionToR3? exporterR3 = (_exporter._versionSpecificExport == XVerExporter.VersionSpecificExportCodes.TargetVersion) &&
             (igTr.PackagePair.TargetFhirSequence < FhirReleases.FhirSequenceCodes.R4)
@@ -1196,6 +1212,48 @@ public class StructureFhirExporter
         _logger.LogInformation($"Writing Profiles for `{igTr.PackageId}`...");
 
         List<XVerIgFileRecord> exported = [];
+
+        foreach (BuiltDefinition definition in definitions)
+        {
+            StructureDefinition profileSd = definition.Definition;
+            string filename = definition.FileName;
+            string path = Path.Combine(dir, filename + ".json");
+            if (exporterR3 is not null)
+            {
+                File.WriteAllText(path, exporterR3.ToJson(profileSd, new SerializerSettings() { Pretty = true }));
+            }
+            else
+            {
+                File.WriteAllText(path, profileSd.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
+            }
+
+            exported.Add(new()
+            {
+                FileName = filename + ".json",
+                FileNameWithoutExtension = filename,
+                IsPageContentFile = false,
+                Name = profileSd.Name,
+                Id = profileSd.Id,
+                Url = profileSd.Url,
+                ResourceType = Hl7.Fhir.Model.FHIRAllTypes.StructureDefinition.GetLiteral(),
+                Version = profileSd.Version,
+                Description = profileSd.Description ?? profileSd.Title ?? $"Profile: {profileSd.Url}",
+            });
+        }
+
+        _logger.LogInformation($"Wrote {exported.Count} Profiles for `{igTr.PackageId}`");
+        igTr.ProfileFiles = exported;
+    }
+
+    internal BuiltDefinitionSet BuildProfiles(XVerIgExportTrackingRecord igTr)
+    {
+        prepareDefinitions(igTr);
+        if (_representationTracking != igTr)
+        {
+            BuildExtensions(igTr);
+        }
+
+        List<BuiltDefinition> definitions = [];
 
         // get the structures defined in the source package (Resources + ComplexTypes)
         List<DbStructureDefinition> sourceStructures = [];
@@ -1255,36 +1313,12 @@ public class StructureFhirExporter
                     sdOutcome,
                     profileSd);
 
-                // write the profile to a file
                 string filename = sdOutcome.GenFileName ?? throw new ArgumentNullException(nameof(sdOutcome.GenFileName));
-                string path = Path.Combine(dir, filename + ".json");
-
-                if (exporterR3 is not null)
-                {
-                    File.WriteAllText(path, exporterR3.ToJson(profileSd, new SerializerSettings() { Pretty = true }));
-                }
-                else
-                {
-                    File.WriteAllText(path, profileSd.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
-                }
-
-                exported.Add(new()
-                {
-                    FileName = filename + ".json",
-                    FileNameWithoutExtension = filename,
-                    IsPageContentFile = false,
-                    Name = profileSd.Name,
-                    Id = profileSd.Id,
-                    Url = profileSd.Url,
-                    ResourceType = Hl7.Fhir.Model.FHIRAllTypes.StructureDefinition.GetLiteral(),
-                    Version = profileSd.Version,
-                    Description = profileSd.Description ?? profileSd.Title ?? $"Profile: {profileSd.Url}",
-                });
+                definitions.Add(new(filename, profileSd, sdOutcome.Key));
             }
         }
 
-        _logger.LogInformation($"Wrote {exported.Count} Profiles for `{igTr.PackageId}`");
-        igTr.ProfileFiles = exported;
+        return new(definitions.AsReadOnly(), Representations);
     }
 
     private DbStructureDefinition resolveProfileTargetSd(
@@ -1414,10 +1448,13 @@ public class StructureFhirExporter
 
         //DbElement targetRootEd = targetElements[0];
         ILookup<string, DbElement> targetIdLookup = targetElements.ToLookup(ed => ed.Id);
+        _profileOutcome = sdOutcome;
+        _representations!.AddProfile(sdOutcome, targetElements[0]);
 
         // iterate over the elements and add to the differential as necessary
         foreach (DbElement targetEd in targetElements)
         {
+            _representations.AddNative(sdOutcome, targetEd);
             // check to see if we are in the 'Basic.code' target element, which we need to profile
             if ((targetEd.Id == "Basic.code") && (sourceSd.Name != "Basic"))
             {
@@ -1632,6 +1669,7 @@ public class StructureFhirExporter
             // add each outcome that we should have here
             foreach (DbElementOutcome targetEdOutcome in targetEdOutcomes.OrderBy(edo => edo.DefineAsModifier))
             {
+                _profileElement = targetEdOutcome;
                 // resolve the outcome targets
                 List<DbElementOutcomeTarget> outcomeTargets = DbElementOutcomeTarget.SelectList(
                     _db,
@@ -1817,7 +1855,9 @@ public class StructureFhirExporter
                             acTargetPath,
                             edShort,
                             edDefinition,
-                            edComment));
+                            edComment,
+                            narrowedType: "canonical",
+                            choiceElement: targetEd));
                     }
                     else if (targetEd.IsChoiceType && isAltReference)
                     {
@@ -1854,7 +1894,9 @@ public class StructureFhirExporter
                             arTargetPath,
                             edShort,
                             edDefinition,
-                            edComment));
+                            edComment,
+                            narrowedType: "Reference",
+                            choiceElement: targetEd));
                     }
                     else if (targetEdOutcome.DefineAsModifier)
                     {
@@ -2011,7 +2053,9 @@ public class StructureFhirExporter
                         acTargetPath,
                         edShort,
                         edDefinition,
-                        edComment));
+                        edComment,
+                        narrowedType: acTargetEd.IsChoiceType ? "canonical" : null,
+                        choiceElement: acTargetEd.IsChoiceType ? acTargetEd : null));
                 }
 
                 // check for additional alternate reference NOT on root
@@ -2060,7 +2104,9 @@ public class StructureFhirExporter
                         arTargetPath,
                         edShort,
                         edDefinition,
-                        edComment));
+                        edComment,
+                        narrowedType: arTargetEd.IsChoiceType ? "Reference" : null,
+                        choiceElement: arTargetEd.IsChoiceType ? arTargetEd : null));
                 }
             }
         }
@@ -2075,13 +2121,21 @@ public class StructureFhirExporter
         string? edDefinition,
         string? edComment,
         int? cardMin = null,
-        string? cardMax = null)
+        string? cardMax = null,
+        string? narrowedType = null,
+        DbElement? choiceElement = null)
     {
+        ProfileExtensionAttachment attachment = new(path, url, narrowedType, choiceElement);
+        if (_profileOutcome is not null && _profileElement is not null)
+        {
+            _representations!.Attach(_profileOutcome, _profileElement, attachment);
+        }
+
         return new()
         {
             ElementId = id,
             SliceName = sliceName,
-            Path = path,
+            Path = attachment.Path,
             Short = edShort,
             Definition = edDefinition,
             Comment = edComment,
@@ -2097,7 +2151,7 @@ public class StructureFhirExporter
                 new ElementDefinition.TypeRefComponent()
                 {
                     Code = "Extension",
-                    Profile = [ url ],
+                    Profile = [ attachment.Url ],
                 },
             ],
         };
@@ -2254,7 +2308,7 @@ public class StructureFhirExporter
     }
 
 
-    private void exportExtensions(XVerIgExportTrackingRecord igTr)
+    private void exportExtensions(XVerIgExportTrackingRecord igTr, IReadOnlyList<BuiltDefinition> definitions)
     {
         CrossVersionExporter.StructureDefinitionToR3? exporterR3 = (_exporter._versionSpecificExport == XVerExporter.VersionSpecificExportCodes.TargetVersion) &&
             (igTr.PackagePair.TargetFhirSequence < FhirReleases.FhirSequenceCodes.R4)
@@ -2275,6 +2329,45 @@ public class StructureFhirExporter
         _logger.LogInformation($"Writing extensions for `{igTr.PackageId}`...");
 
         List<XVerIgFileRecord> exported = [];
+
+        foreach (BuiltDefinition definition in definitions)
+        {
+            StructureDefinition extSd = definition.Definition;
+            string filename = definition.FileName;
+            string path = Path.Combine(dir, filename + ".json");
+            if (exporterR3 is not null)
+            {
+                File.WriteAllText(path, exporterR3.ToJson(extSd, new SerializerSettings() { Pretty = true }));
+            }
+            else
+            {
+                File.WriteAllText(path, extSd.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
+            }
+
+            exported.Add(new()
+            {
+                FileName = filename + ".json",
+                FileNameWithoutExtension = filename,
+                IsPageContentFile = false,
+                Name = extSd.Name,
+                Id = extSd.Id,
+                Url = extSd.Url,
+                ResourceType = Hl7.Fhir.Model.FHIRAllTypes.StructureDefinition.GetLiteral(),
+                Version = extSd.Version,
+                Description = extSd.Description ?? extSd.Title ?? $"Extension: {extSd.Url}",
+            });
+        }
+
+        _logger.LogInformation($"Wrote {exported.Count} Extensions for `{igTr.PackageId}`");
+        igTr.ExtensionFiles = exported;
+    }
+
+    internal BuiltDefinitionSet BuildExtensions(XVerIgExportTrackingRecord igTr)
+    {
+        prepareDefinitions(igTr);
+        _representations = new(_db, igTr.PackagePair);
+        _representationTracking = igTr;
+        List<BuiltDefinition> definitions = [];
 
         // get the structures defined in the source package
         Dictionary<int, DbStructureDefinition> sourceSds = DbStructureDefinition.SelectDict(
@@ -2407,36 +2500,12 @@ public class StructureFhirExporter
                     continue;
                 }
 
-                // write the extension to a file
                 string filename = edOutcome.GenFileName ?? throw new ArgumentNullException(nameof(edOutcome.GenFileName));
-                string path = Path.Combine(dir, filename + ".json");
-
-                if (exporterR3 is not null)
-                {
-                    File.WriteAllText(path, exporterR3.ToJson(extSd, new SerializerSettings() { Pretty = true }));
-                }
-                else
-                {
-                    File.WriteAllText(path, extSd.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
-                }
-
-                exported.Add(new()
-                {
-                    FileName = filename + ".json",
-                    FileNameWithoutExtension = filename,
-                    IsPageContentFile = false,
-                    Name = extSd.Name,
-                    Id = extSd.Id,
-                    Url = extSd.Url,
-                    ResourceType = Hl7.Fhir.Model.FHIRAllTypes.StructureDefinition.GetLiteral(),
-                    Version = extSd.Version,
-                    Description = extSd.Description ?? extSd.Title ?? $"Extension: {extSd.Url}",
-                });
+                definitions.Add(new(filename, extSd, edOutcome.Key));
             }
         }
 
-        _logger.LogInformation($"Wrote {exported.Count} Extensions for `{igTr.PackageId}`");
-        igTr.ExtensionFiles = exported;
+        return new(definitions.AsReadOnly(), Representations);
     }
 
     private Dictionary<int, string> findContentReferenceUrls(
@@ -2775,7 +2844,8 @@ public class StructureFhirExporter
         List<string>? dtTargetProfiles = null,
         bool excludeExtensionElement = false,
         string? elementUrlOverride = null,
-        bool generatingForCardinality = false)
+        bool generatingForCardinality = false,
+        RelativeExtensionNode? representationParent = null)
     {
         if (edOutcome.ExtensionDefinitionIsProhibited)
         {
@@ -2812,6 +2882,17 @@ public class StructureFhirExporter
 
         //bool isRoot = edOutcome.ParentElementOutcomeKey is null;
         bool isRoot = extSd.Differential.Element.Count == 0;
+        string? locationUrl = !generatingForCardinality && edOutcome.ExtensionSubstitutionUrl is not null
+            ? edOutcome.ExtensionSubstitutionUrl
+            : !isRoot && edOutcome.ContentReferenceAncestorId is not null
+                ? edOutcome.ContentReferenceExtensionUrl
+                : elementUrlOverride ?? (inTopLevel ? edOutcome.GenUrl : edOutcome.GenSliceName);
+        RelativeExtensionNode representation = _representations!.AddExtensionNode(extSd.Url, sourceEd, locationUrl, representationParent);
+        if (isRoot)
+        {
+            representation.Contexts = [.. extSd.Context.Select(context => context.Expression)];
+            representation.IsModifier = edOutcome.DefineAsModifier;
+        }
 
         // add the starting element for where we are
         if (isRoot)
@@ -2896,6 +2977,7 @@ public class StructureFhirExporter
         if (!generatingForCardinality &&
             (edOutcome.ExtensionSubstitutionUrl is not null))
         {
+            representation.IsOpaque = true;
             // add the URL element (always required)
             extSd.Differential.Element.Add(new()
             {
@@ -2909,7 +2991,7 @@ public class StructureFhirExporter
                 },
                 Min = 1,
                 Max = "1",
-                Fixed = new FhirUri(edOutcome.ExtensionSubstitutionUrl),
+                Fixed = new FhirUri(representation.Url),
             });
 
             mapTargetRecs.Add(new()
@@ -2926,6 +3008,7 @@ public class StructureFhirExporter
         if (!isRoot &&
             (edOutcome.ContentReferenceAncestorId is not null))
         {
+            representation.ContentReferenceUrl = edOutcome.ContentReferenceExtensionUrl;
             // add the URL element (always required)
             extSd.Differential.Element.Add(new()
             {
@@ -2939,7 +3022,7 @@ public class StructureFhirExporter
                 },
                 Min = 1,
                 Max = "1",
-                Fixed = new FhirUri(edOutcome.ContentReferenceExtensionUrl),
+                Fixed = new FhirUri(representation.Url),
             });
 
             // add a contrained out value element
@@ -3120,7 +3203,7 @@ public class StructureFhirExporter
         // if this is a datatype element, add the necessary meta elements
         if (dataTypeNameLiteral is not null)
         {
-            addDataTypeMetaElements(
+            representation.Datatype = addDataTypeMetaElements(
                 igTr.PackagePair.SourceFhirSequence,
                 igTr.PackagePair.TargetFhirSequence,
                 extSd,
@@ -3166,7 +3249,8 @@ public class StructureFhirExporter
                 nextId,
                 nextPath,
                 dtValueElements,
-                generatingForCardinality: generatingForCardinality);
+                generatingForCardinality: generatingForCardinality,
+                representationParent: representation);
         }
 
         List<string> distinctInvalidTypeNames = invalidValueTypes
@@ -3210,7 +3294,8 @@ public class StructureFhirExporter
                         extElementId + ".extension:" + crEd.NameClean(),
                         extElementPath + ".extension",
                         dtValueElements,
-                        generatingForCardinality: generatingForCardinality);
+                        generatingForCardinality: generatingForCardinality,
+                        representationParent: representation);
 
                     continue;
                 }
@@ -3249,7 +3334,7 @@ public class StructureFhirExporter
                         ParentElementKey: ietEd.Key);
 
                     // if there is a single type, nest into it directly
-                    addDataTypeMetaElements(
+                    representation.Datatype = addDataTypeMetaElements(
                         igTr.PackagePair.SourceFhirSequence,
                         igTr.PackagePair.TargetFhirSequence,
                         extSd,
@@ -3305,7 +3390,8 @@ public class StructureFhirExporter
                             ietTargetProfiles,
                             excludeExtensionElement: false,
                             elementUrlOverride: dtEtEd.NameClean(),
-                            generatingForCardinality: generatingForCardinality);
+                            generatingForCardinality: generatingForCardinality,
+                            representationParent: representation);
                     }
                 }
                 else
@@ -3342,7 +3428,8 @@ public class StructureFhirExporter
                         ietTargetProfiles,
                         excludeExtensionElement: false,
                         elementUrlOverride: $"value{distinctTypeName}",
-                        generatingForCardinality: generatingForCardinality);
+                        generatingForCardinality: generatingForCardinality,
+                        representationParent: representation);
                 }
             }
         }
@@ -3360,7 +3447,7 @@ public class StructureFhirExporter
             },
             Min = 1,
             Max = "1",
-            Fixed = new FhirUri(elementUrlOverride ?? (inTopLevel ? edOutcome.GenUrl : edOutcome.GenSliceName)),
+            Fixed = new FhirUri(representation.Url),
         });
 
         // add the value element - either with proper types or constrained to zero repetitions
@@ -3474,6 +3561,8 @@ public class StructureFhirExporter
                     }
                 }
 
+                representation.ValueTypes.Add((et.TypeName ?? et.Literal, typeName));
+                typeName = representation.ValueTypes[^1].TargetType;
                 if (!typeRefs.TryGetValue(typeName, out ElementDefinition.TypeRefComponent? tr))
                 {
                     tr = new()
@@ -3621,7 +3710,7 @@ public class StructureFhirExporter
             (skipModifierExtenions &&
                 ((ed.Name == "modifierExtension") || (ed.BasePath == "DomainResource.modifierExtension") || (ed.BasePath == "BackboneElement.modifierExtension")));
 
-    private void addDataTypeMetaElements(
+    private DatatypeStep addDataTypeMetaElements(
         FhirReleases.FhirSequenceCodes sourceFhirSequence,
         FhirReleases.FhirSequenceCodes targetFhirSequence,
         StructureDefinition extSd,
@@ -3632,6 +3721,7 @@ public class StructureFhirExporter
         bool addUrlEd,
         bool addValueEd)
     {
+        DatatypeStep representation = new(dataTypeName, ProfileRepresentationIndex.DatatypeMetadataUrl);
         string id = currentId + ".extension:_datatype";
         string path = currentPath + ".extension";
 
@@ -3662,7 +3752,7 @@ public class StructureFhirExporter
             {
                 ElementId = id + ".url",
                 Path = path + ".url",
-                Fixed = new FhirUri("http://hl7.org/fhir/StructureDefinition/_datatype"),
+                Fixed = new FhirUri(representation.MetadataUrl),
                 Min = 1,
                 Max = "1",
                 Base = new()
@@ -3696,10 +3786,12 @@ public class StructureFhirExporter
                         Code = "string",
                     }
                 ],
-                Fixed = new FhirString(dataTypeName),
+                Fixed = new FhirString(representation.Name),
             };
             extSd.Differential.Element.Add(valueEd);
         }
+
+        return representation;
     }
 
     private (string tn, bool isValid, DbElementType et) getValidValueType(FhirReleases.FhirSequenceCodes targetFhirSequence, DbElementType et)

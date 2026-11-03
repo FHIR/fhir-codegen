@@ -24,6 +24,10 @@ namespace Fhir.CodeGen.Comparison.Exporter;
 
 public class IgExporter
 {
+    internal sealed record ExportSchedule(
+        IReadOnlyList<FhirPackageComparisonPair> PackagePairs,
+        IReadOnlyList<DbFhirPackage> ValidationPackages);
+
     public class XVerExportTrackingRecord
     {
         public List<XVerIgExportTrackingRecord> XVerIgs { get; set; } = [];
@@ -428,8 +432,6 @@ public class IgExporter
     private ILoggerFactory _loggerFactory;
     private ILogger _logger;
 
-    private List<DbFhirPackage> _packages = [];
-
     private string _outputPath;
     private string? _crossVersionSourcePath;
 
@@ -452,10 +454,6 @@ public class IgExporter
 
         _crossVersionSourcePath = crossVersionSourcePath;
         _outputPath = outputPath;
-        if (!Directory.Exists(_outputPath))
-        {
-            Directory.CreateDirectory(_outputPath);
-        }
 
         _exporter = exporter;
 
@@ -612,23 +610,26 @@ public class IgExporter
     public XVerExportTrackingRecord CreateInitialXVerIgs(
         bool includeScripts = true,
         int? maxStepSize = null,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null) =>
+        CreateInitialXVerIgs(BuildExportSchedule(maxStepSize, specificPairs), includeScripts);
+
+    internal ExportSchedule BuildExportSchedule(
+        int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
-        XVerExportTrackingRecord tr = new();
-        
         // get the list of packages
-        _packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
 
         List<FhirPackageComparisonPair> packagePairs = [];
-        maxStepSize ??= _packages.Count - 1;
+        maxStepSize ??= packages.Count - 1;
 
         // we want to process closer versions first, so we do a stepped approach
         for (int stepSize = 1; stepSize <= maxStepSize; stepSize++)
         {
-            for (int i = 0; i < _packages.Count - stepSize; i++)
+            for (int i = 0; i < packages.Count - stepSize; i++)
             {
-                DbFhirPackage sourcePackage = _packages[i];
-                DbFhirPackage targetPackage = _packages[i + stepSize];
+                DbFhirPackage sourcePackage = packages[i];
+                DbFhirPackage targetPackage = packages[i + stepSize];
 
                 if (_allowedExportVersions.Contains(targetPackage.DefinitionFhirSequence) &&
                     ((specificPairs is null) ||
@@ -646,12 +647,6 @@ public class IgExporter
             }
         }
 
-        // iterate over our pairs in the order we built them
-        foreach (FhirPackageComparisonPair packagePair in packagePairs)
-        {
-            tr.XVerIgs.Add(createInitialXVerIg(packagePair, includeScripts));
-        }
-
         HashSet<FhirReleases.FhirSequenceCodes>? targetFhirVersions = null;
         if (specificPairs is not null)
         {
@@ -665,8 +660,8 @@ public class IgExporter
             }
         }
 
-        // iterate over our packages for validation Igs
-        foreach (DbFhirPackage package in _packages)
+        List<DbFhirPackage> validationPackages = [];
+        foreach (DbFhirPackage package in packages)
         {
             if ((targetFhirVersions is not null) &&
                 !targetFhirVersions.Contains(package.DefinitionFhirSequence))
@@ -679,6 +674,23 @@ public class IgExporter
                 continue;
             }
 
+            validationPackages.Add(package);
+        }
+
+        return new(packagePairs.AsReadOnly(), validationPackages.AsReadOnly());
+    }
+
+    internal XVerExportTrackingRecord CreateInitialXVerIgs(ExportSchedule schedule, bool includeScripts = true)
+    {
+        Directory.CreateDirectory(_outputPath);
+        XVerExportTrackingRecord tr = new();
+        foreach (FhirPackageComparisonPair packagePair in schedule.PackagePairs)
+        {
+            tr.XVerIgs.Add(createInitialXVerIg(packagePair, includeScripts));
+        }
+
+        foreach (DbFhirPackage package in schedule.ValidationPackages)
+        {
             tr.ValidationIgs.Add(createInitialValidationIg(package, includeScripts));
         }
 
