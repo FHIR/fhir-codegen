@@ -5,10 +5,14 @@
 
 using System.Collections.Immutable;
 using System.Data;
+using System.Data.Common;
 using System.Text.Json;
+using Fhir.CodeGen.Common.Models;
+using Fhir.CodeGen.Comparison.Exporter;
 using Fhir.CodeGen.SQLiteGenerator;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Utility;
+using Microsoft.Data.Sqlite;
 
 namespace Fhir.CodeGen.Comparison.Models;
 
@@ -116,6 +120,87 @@ public partial class DbUnsafeCodePairState : DbRecordBase
 
 internal static class UnsafeCodeInputStore
 {
+    internal static void RequireExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule)
+    {
+        if (schedule.Count == 0)
+        {
+            return;
+        }
+
+        const string recovery = "Regenerate the database with the existing load stages, then compare, outcomes, and export.";
+        try
+        {
+            // Generated SELECTs check all columns as well as table existence. This
+            // boundary is deliberately read-only, including for legacy databases.
+            List<DbUnsafeCodeInputState> inputs = DbUnsafeCodeInputState.SelectList(db);
+            List<DbUnsafeCodePairState> pairs = DbUnsafeCodePairState.SelectList(db);
+            DbUnsafeCodeTrigger.SelectList(db);
+            DbUnsafeCodeElementAnnotation.SelectList(db);
+            DbUnsafeCodeMapEvidence.SelectList(db);
+            DbUnsafeCodeRule.SelectList(db);
+            if (inputs.Count != 1 || inputs[0].Key != 1 ||
+                inputs[0].FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
+                string.IsNullOrEmpty(inputs[0].CompletedInputRevision))
+            {
+                throw new InvalidOperationException($"Unsafe-code export inputs are missing, incomplete, or incompatible. {recovery}");
+            }
+
+            string revision = inputs[0].CompletedInputRevision!;
+            foreach (FhirPackageComparisonPair scheduled in schedule)
+            {
+                DbUnsafeCodePairState[] matches = [.. pairs.Where(pair =>
+                    pair.SourceFhirPackageKey == scheduled.SourcePackageKey && pair.TargetFhirPackageKey == scheduled.TargetPackageKey)];
+                if (matches.Length != 1 || matches[0].InputRevision != revision ||
+                    string.IsNullOrEmpty(matches[0].ComparisonRevision) ||
+                    matches[0].OutcomeInputRevision != revision ||
+                    matches[0].OutcomeComparisonRevision != matches[0].ComparisonRevision ||
+                    matches[0].OutcomeFormatVersion != UnsafeCodeConstants.OutcomeFormatVersion)
+                {
+                    throw new InvalidOperationException(
+                        $"Unsafe-code structure export {scheduled.SourcePackage.PackageId}|{scheduled.SourcePackage.PackageVersion}" +
+                        $" -> {scheduled.TargetPackage.PackageId}|{scheduled.TargetPackage.PackageVersion} is missing, incomplete, incompatible, or stale. {recovery}");
+                }
+            }
+        }
+        catch (DbException error) when (error is SqliteException { SqliteErrorCode: 1 } &&
+            (error.Message.Contains("no such table:", StringComparison.Ordinal) ||
+                error.Message.Contains("no such column:", StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException($"Unsafe-code export schema could not be read or is incompatible. {recovery}", error);
+        }
+    }
+
+    internal static IReadOnlyList<UnsafeCodeConstraintPlan> ReadConstraintPlans(IDbConnection db, int sourceKey, int targetKey)
+    {
+        List<DbUnsafeCodeTrigger> triggers = DbUnsafeCodeTrigger.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        if (triggers.Count == 0)
+        {
+            return [];
+        }
+
+        Dictionary<int, string> evidence = DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey)
+            .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} ({row.ConceptMapUrl ?? row.ConceptMapId}, group {row.GroupIndex}, source {row.SourceIndex}, target {row.TargetIndex})");
+        Dictionary<int, string> annotations = DbUnsafeCodeElementAnnotation.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey)
+            .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} ({row.ConceptMapUrl ?? row.ConceptMapId}, group {row.GroupIndex}, source {row.SourceIndex}, target {row.TargetIndex})");
+        Dictionary<int, string> rules = DbUnsafeCodeRule.SelectList(db)
+            .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} entry {row.EntryIndex}");
+        Dictionary<int, string?> profiles = DbStructureOutcome.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey)
+            .ToDictionary(row => row.Key, row => row.GenUrl);
+        return triggers.Select(row => new UnsafeCodeConstraintPlan(
+            row,
+            JsonSerializer.Deserialize<ImmutableArray<UnsafeCodePathStep>>(row.SourcePathJson),
+            new(row.IsWildcardVersion, JsonSerializer.Deserialize<ImmutableArray<string>>(row.VersionsJson)),
+            string.Join("; ", Provenance(row.EvidenceKeysJson, evidence)
+                .Concat(Provenance(row.AnnotationKeysJson, annotations)).Concat(Provenance(row.RuleKeysJson, rules))
+                .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)),
+            profiles.TryGetValue(row.StructureOutcomeKey, out string? canonical) && !string.IsNullOrEmpty(canonical) ? canonical
+                : throw new InvalidOperationException("Unsafe-code trigger profile outcome or canonical is missing. Regenerate load, compare, outcomes, and export."))).ToArray();
+
+        static IEnumerable<string> Provenance(string json, Dictionary<int, string> facts) =>
+            JsonSerializer.Deserialize<int[]>(json)!.Select(key => facts.TryGetValue(key, out string? fact)
+                ? fact : throw new InvalidOperationException("Unsafe-code trigger provenance is incomplete. Regenerate load, compare, outcomes, and export."));
+    }
+
     internal static void InvalidateComparisons(IDbConnection db)
     {
         InvalidateOutcomes(db);

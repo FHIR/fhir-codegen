@@ -76,10 +76,13 @@ public class XVerExporter
             this,
             _config);
 
-        IgExporter.XVerExportTrackingRecord tr = igExporter.CreateInitialXVerIgs(
-            includeIgScripts,
-            maxStepSize: maxStepSize,
-            specificPairs: specificPairs);
+        IgExporter.ExportSchedule schedule = igExporter.BuildExportSchedule(maxStepSize, specificPairs);
+        if (processStructures)
+        {
+            UnsafeCodeInputStore.RequireExportReady(_db, schedule.PackagePairs);
+        }
+
+        IgExporter.XVerExportTrackingRecord tr = igExporter.CreateInitialXVerIgs(schedule, includeIgScripts);
 
         // export vocabulary (if requested)
         if (processVocabulary)

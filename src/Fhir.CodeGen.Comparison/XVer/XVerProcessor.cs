@@ -380,15 +380,15 @@ public partial class XVerProcessor
 
 
             case "export":
-                if (_config.ReloadDatabase)
-                {
-                    LoadDatabase(_config.ReloadDatabase);
-                    LoadFhirCrossVersionMaps();
-                    LoadExtensionSubstitutions();
-                    LoadFhirTypeValueSets();
-                }
-
-                ExportOutcomes();
+                ExecuteOutcomeCommand(
+                    command, _config.ReloadDatabase,
+                    () => LoadDatabase(true),
+                    LoadFhirCrossVersionMaps,
+                    LoadExtensionSubstitutions,
+                    LoadFhirTypeValueSets,
+                    family => CompareInDatabase(family),
+                    family => GenerateOutcomes(family),
+                    () => ExportOutcomes());
                 break;
 
             default:
@@ -411,11 +411,12 @@ public partial class XVerProcessor
         Action loadSubstitutions,
         Action loadTypeValueSets,
         Action<FhirArtifactClassEnum?> compare,
-        Action<FhirArtifactClassEnum?> outcomes)
+        Action<FhirArtifactClassEnum?> outcomes,
+        Action? export = null)
     {
         FhirArtifactClassEnum? family = command switch
         {
-            "outcomes" => null,
+            "outcomes" or "export" => null,
             "outcomes-vs" => FhirArtifactClassEnum.ValueSet,
             "outcomes-sd" => FhirArtifactClassEnum.Resource,
             _ => throw new ArgumentOutOfRangeException(nameof(command)),
@@ -429,7 +430,15 @@ public partial class XVerProcessor
             compare(family);
         }
 
-        outcomes(family);
+        if (command != "export" || reload)
+        {
+            outcomes(family);
+        }
+
+        if (command == "export")
+        {
+            (export ?? throw new ArgumentNullException(nameof(export)))();
+        }
     }
 
     public void UpdateValueSetMaps()

@@ -6,7 +6,9 @@
 extern alias r4;
 extern alias r4b;
 
+using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.CompareTool;
@@ -14,6 +16,7 @@ using Fhir.CodeGen.Comparison.CrossVersionSource;
 using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.Outcomes;
 using Hl7.Fhir.ElementModel;
+using Hl7.Fhir.Introspection;
 using Hl7.Fhir.Serialization;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -153,9 +156,23 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal FhirPackageComparisonPair LoadCompareAndGenerate(int targetIndex)
     {
+        LoadProfileMaps();
+        FhirPackageComparisonPair pair = new(Packages[2], Packages[targetIndex]);
+        CompareProfilePair(pair);
+        new OutcomeGenerator(Connection, NullLoggerFactory.Instance).GenerateOutcomes(processValueSets: false, specificPairs: [pair.SequencePair]);
+        return pair;
+    }
+
+    internal void LoadProfileMaps()
+    {
         // The production transitive comparer indexes the package list by release.
         foreach (FhirReleases.FhirSequenceCodes sequence in new[] { FhirReleases.FhirSequenceCodes.DSTU2, FhirReleases.FhirSequenceCodes.STU3 })
         {
+            if (DbFhirPackage.SelectSingle(Connection, PackageId: sequence.ToCorePackageId()) is not null)
+            {
+                continue;
+            }
+
             DbFhirPackage.Insert(Connection, new DbFhirPackage
             {
                 Name = sequence.ToCorePackageId(),
@@ -174,14 +191,16 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             throw new InvalidOperationException("The synthetic cross-version maps did not load.");
         }
 
-        FhirPackageComparisonPair pair = new(Packages[2], Packages[targetIndex]);
-        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)> pairs = [pair.SequencePair];
+    }
+
+    internal void CompareProfilePair(FhirPackageComparisonPair pair)
+    {
+        // Match FhirDbComparer.Compare's reset boundary when reusing a database.
+        DbComparisonClasses.DropTables(Connection, forValueSets: false);
         DbComparisonClasses.CreateTables(Connection);
         new StructureComparer(Connection, NullLoggerFactory.Instance).CompareStructures(specificPairs:
             [(FhirReleases.FhirSequenceCodes.R5, FhirReleases.FhirSequenceCodes.R4B),
                 (FhirReleases.FhirSequenceCodes.R4B, FhirReleases.FhirSequenceCodes.R4), pair.SequencePair]);
-        new OutcomeGenerator(Connection, NullLoggerFactory.Instance).GenerateOutcomes(processValueSets: false, specificPairs: pairs);
-        return pair;
     }
 
     internal static UnsafeCodeTestFixture CreateRepresentationInputs()
@@ -230,12 +249,48 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         return element;
     }
 
+    internal DbStructureOutcome[] AddResourceOwnerGraph(FhirPackageComparisonPair pair, params string[] resourceTypes)
+    {
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            AddElement(AddStructure(package, "Resource", FhirArtifactClassEnum.Resource), "Resource");
+            foreach (string type in resourceTypes)
+            {
+                DbStructureDefinition resource = AddStructure(package, type, FhirArtifactClassEnum.Resource);
+                AddElement(resource, type);
+                AddTypedElement(resource, type + ".contained", "Resource");
+                if (type == "Bundle")
+                {
+                    AddTypedElement(resource, "Bundle.type", "code");
+                    AddElement(resource, "Bundle.entry");
+                    AddTypedElement(resource, "Bundle.entry.resource", "Resource");
+                }
+                else if (type == "Parameters")
+                {
+                    AddElement(resource, "Parameters.parameter");
+                    AddTypedElement(resource, "Parameters.parameter.resource", "Resource");
+                    DbElement value = AddTypedElement(resource, "Parameters.parameter.value[x]", "Coding");
+                    value.IsChoiceType = true;
+                    DbElement.Update(Connection, [value]);
+                }
+                else if (type == "Observation")
+                {
+                    AddTypedElement(resource, "Observation.code", "CodeableConcept");
+                }
+            }
+        }
+
+        return [.. resourceTypes.Select(type => AddOutcome(pair, Structure(pair.SourcePackage, type), Structure(pair.TargetPackage, type)))];
+    }
+
     internal static ITypedElement TargetInstance(int targetIndex, string json)
     {
-        BaseFhirJsonPocoDeserializer deserializer = new(targetIndex == 0
+        ModelInspector inspector = targetIndex == 0
             ? r4::Hl7.Fhir.Model.ModelInfo.ModelInspector
-            : r4b::Hl7.Fhir.Model.ModelInfo.ModelInspector);
-        return deserializer.DeserializeResource(json).ToTypedElement();
+            : r4b::Hl7.Fhir.Model.ModelInfo.ModelInspector;
+        BaseFhirJsonPocoDeserializer deserializer = new(inspector);
+        Utf8JsonReader reader = new(System.Text.Encoding.UTF8.GetBytes(json), new JsonReaderOptions { MaxDepth = 512 });
+        return deserializer.DeserializeResource(ref reader).ToTypedElement(inspector);
     }
 
     internal DbElementOutcome AddRepresentationOutcome(FhirPackageComparisonPair pair, DbElement source,
@@ -303,6 +358,31 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     {
         string? revision = UnsafeCodeInputStore.BeginComparison(Connection, pair.SourcePackageKey, pair.TargetPackageKey);
         UnsafeCodeInputStore.CompleteComparison(Connection, pair.SourcePackageKey, pair.TargetPackageKey, revision);
+    }
+
+    internal void GenerateSafety(FhirPackageComparisonPair pair) =>
+        new UnsafeCodeOutcomeGenerator(Connection).GenerateForPair(pair);
+
+    internal void AddTrigger(DbStructureOutcome outcome, ImmutableArray<UnsafeCodePathStep> path,
+        string system = FilterSystem, string code = "unsafe", string? sourceVersion = null,
+        bool wildcard = true, params string[] versions)
+    {
+        DbUnsafeCodeTrigger.Insert(Connection, new DbUnsafeCodeTrigger
+        {
+            StructureOutcomeKey = outcome.Key,
+            SourceFhirPackageKey = outcome.SourceFhirPackageKey,
+            TargetFhirPackageKey = outcome.TargetFhirPackageKey,
+            SourceElementId = path[^1].ElementId,
+            TargetElementId = "",
+            SourcePathJson = JsonSerializer.Serialize(path),
+            System = system,
+            Code = code,
+            SourceVersion = sourceVersion,
+            IsWildcardVersion = wildcard,
+            VersionsJson = JsonSerializer.Serialize(versions),
+            EvidenceKeysJson = "[]",
+            RuleKeysJson = "[]",
+        });
     }
 
     internal DbUnsafeCodePairState PairState(FhirPackageComparisonPair pair) =>

@@ -243,6 +243,7 @@ public class CrossVersionArtifactSemanticTests
             connection.Open();
 
             DbContentClasses.CreateTables(connection);
+            DbMappingClasses.CreateTables(connection);
             DbComparisonClasses.CreateTables(connection);
             DbOutcomeClasses.CreateTables(connection);
 
@@ -328,6 +329,12 @@ public class CrossVersionArtifactSemanticTests
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceUnmappedResource, null);
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceDataType, null);
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourcePrimitiveType, null);
+
+            UnsafeCodeInputStore.ReplaceWithEmptyInputs(connection, [sourcePackage, targetPackage]);
+            string? revision = UnsafeCodeInputStore.BeginComparison(connection, sourcePackage.Key, targetPackage.Key);
+            UnsafeCodeInputStore.CompleteComparison(connection, sourcePackage.Key, targetPackage.Key, revision);
+            new Fhir.CodeGen.Comparison.Outcomes.UnsafeCodeOutcomeGenerator(connection)
+                .GenerateForPair(new(sourcePackage, targetPackage));
         }
 
         private static DbFhirPackage InsertPackage(

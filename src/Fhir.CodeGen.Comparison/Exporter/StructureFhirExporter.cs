@@ -49,7 +49,10 @@ public class StructureFhirExporter
     private DbStructureOutcome? _profileOutcome;
     private DbElementOutcome? _profileElement;
 
-    internal sealed record BuiltDefinition(string FileName, StructureDefinition Definition, int OutcomeKey);
+    internal sealed record BuiltDefinition(string FileName, StructureDefinition Definition, int OutcomeKey)
+    {
+        internal string? SourceId { get; init; }
+    }
     internal sealed record BuiltDefinitionSet(IReadOnlyList<BuiltDefinition> Definitions, ProfileRepresentationIndex Representations);
 
     internal sealed record BuiltDefinitions(
@@ -1314,10 +1317,14 @@ public class StructureFhirExporter
                     profileSd);
 
                 string filename = sdOutcome.GenFileName ?? throw new ArgumentNullException(nameof(sdOutcome.GenFileName));
-                definitions.Add(new(filename, profileSd, sdOutcome.Key));
+                definitions.Add(new(filename, profileSd, sdOutcome.Key) { SourceId = sourceSd.Name });
             }
         }
 
+        UnsafeCodeConstraintEmitter.Attach(
+            definitions, Representations,
+            UnsafeCodeInputStore.ReadConstraintPlans(_db, igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey),
+            $"{igTr.PackagePair.SourceFhirSequence.ToRLiteral()}->{igTr.PackagePair.TargetFhirSequence.ToRLiteral()}");
         return new(definitions.AsReadOnly(), Representations);
     }
 

@@ -3,7 +3,12 @@
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
 
+extern alias r4;
+extern alias r4b;
+extern alias stu3;
+
 using System.Collections.Immutable;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Fhir.CodeGen.Common.FhirExtensions;
 using Fhir.CodeGen.Common.Packaging;
@@ -13,6 +18,9 @@ using Fhir.CodeGen.Lib.Configuration;
 using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
+using Hl7.Fhir.FhirPath;
+using Hl7.FhirPath;
+using Hl7.FhirPath.Expressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -28,6 +36,921 @@ public sealed class UnsafeCodeProfileCollection
 [Collection(UnsafeCodeProfileCollection.Name)]
 public class UnsafeCodeProfileTests
 {
+    private static readonly FhirPathCompiler Compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void PersistedPlansNotPolicyFilesDriveConstruction(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateNoFeatureInputs();
+        fixture.WriteConfiguration("""[{"system":"http://hl7.org/fhir/filter-operator","code":"exists"}]""");
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        StructureDefinition FirstProfile() => Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition;
+        string[] first = RecoveredExpressions(FirstProfile(), targetIndex);
+        first.ShouldNotBeEmpty();
+        // A fresh exporter must neither reread nor validate the edited policy file.
+        fixture.WriteConfiguration("{ deliberately invalid JSON");
+        RecoveredExpressions(FirstProfile(), targetIndex).ShouldBe(first);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        first.Select(expression => Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, FilterJson("exists", null, null))))
+            .All(result => result).ShouldBeFalse();
+        File.Delete(fixture.ConfigurationFilename);
+        RecoveredExpressions(FirstProfile(), targetIndex).ShouldBe(first);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void SemanticKeysAndExpressionsIgnoreDatabaseKeysAndPlanOrdering(int targetIndex)
+    {
+        string? expected = null;
+        int? firstOutcome = null;
+        foreach (bool reordered in new[] { false, true })
+        {
+            using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+            FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+            if (reordered)
+            {
+                DbStructureDefinition noise = fixture.AddStructure(pair.SourcePackage, "Unrelated");
+                fixture.AddElement(noise, "Unrelated");
+                fixture.AddOutcome(pair, noise);
+            }
+            DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+            DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "Coding");
+            DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.jurisdiction.coding", "Coding");
+            fixture.Connect(pair, outcome, source, target);
+            foreach (string code in reordered ? new[] { "quoted'\\code", "unsafe", "unsafe" } : new[] { "unsafe", "quoted'\\code" })
+            {
+                fixture.AddTrigger(outcome, SourcePath(source.Id), code: code, versions: reordered ? ["b", "a", "a"] : ["a", "b"]);
+            }
+            StructureDefinition profile = Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition;
+            string[] expressions = RecoveredExpressions(profile, targetIndex);
+            string constraintJson = JsonNode.Parse(profile.ToJson())!["differential"]!["element"]![0]!["constraint"]!.ToJsonString();
+            if (reordered)
+            {
+                outcome.Key.ShouldNotBe(firstOutcome!.Value);
+                constraintJson.ShouldBe(expected);
+            }
+            else
+            {
+                firstOutcome = outcome.Key;
+                expected = constraintJson;
+            }
+            string json = "{\"resourceType\":\"ValueSet\",\"status\":\"active\",\"jurisdiction\":[{\"coding\":[{\"system\":" +
+                JsonSerializer.Serialize(UnsafeCodeTestFixture.FilterSystem) + ",\"code\":" + JsonSerializer.Serialize("quoted'\\code") + "}]}]}";
+            Evaluate(expressions.ShouldHaveSingleItem(), UnsafeCodeTestFixture.TargetInstance(targetIndex, json)).ShouldBeFalse();
+        }
+    }
+
+    [Theory]
+    [InlineData(0, "missing")]
+    [InlineData(1, "unsupported")]
+    [InlineData(0, "profile")]
+    public void ActivePlansNeverSilentlyDisappearWhenProjectionIsMissing(int targetIndex, string kind)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureDefinition sourceStructure = fixture.Structure(pair.SourcePackage, kind == "profile" ? "Coding" : "ValueSet");
+        DbStructureDefinition targetStructure = fixture.Structure(pair.TargetPackage, kind == "profile" ? "Coding" : "ValueSet");
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, sourceStructure, targetStructure);
+        ImmutableArray<UnsafeCodePathStep> path;
+        if (kind == "profile")
+        {
+            path = [new("Coding", null, false), new("Coding.code", null, false)];
+        }
+        else
+        {
+            DbElement source = fixture.AddTypedElement(sourceStructure, "ValueSet.original", "code");
+            DbElement target = fixture.AddTypedElement(targetStructure, "ValueSet.renamed", "uri");
+            if (kind == "unsupported") fixture.Connect(pair, outcome, source, target);
+            path = SourcePath(source.Id);
+        }
+        fixture.AddTrigger(outcome, path);
+        InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Exporter(fixture).BuildDefinitions(Tracking(pair)));
+        error.Message.ShouldContain(outcome.GenUrl!);
+        error.Message.ShouldContain(path[^1].ElementId);
+        error.Message.ShouldContain(UnsafeCodeTestFixture.FilterSystem);
+        error.Message.ShouldContain("#unsafe");
+        error.Message.ShouldContain("provenance");
+        error.Message.ShouldContain(kind == "unsupported" ? "unsupported code carrier" : "Missing");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void DecomposedCodingsMatchSystemVersionAndCodeWithinTheirOwnExtension(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElement targetValue = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.TargetPackageKey, Id: "Extension.value[x]")!;
+        DbElementType.Delete(fixture.Connection, ElementKey: targetValue.Key, TypeName: "Coding");
+        foreach (DbElement child in DbElement.SelectList(fixture.Connection, StructureKey: fixture.Structure(pair.SourcePackage, "Coding").Key)
+            .Where(child => child.ParentElementKey is not null))
+        {
+            DbElementOutcome childOutcome = fixture.AddRepresentationOutcome(pair, child);
+            childOutcome.RequiresExtensionDefinition = false;
+            childOutcome.RequiresSliceDefinition = true;
+            DbElementOutcome.Update(fixture.Connection, [childOutcome]);
+        }
+        DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "Coding");
+        DbElementOutcome extension = fixture.AddRepresentationOutcome(pair, source, "ValueSet");
+        fixture.AddTrigger(outcome, SourcePath(source.Id), versions: ["exempt"]);
+        StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
+        string expression = RecoveredExpressions(built.Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
+        expression.ShouldContain(UnsafeCodeConstraintEmitter.Literal(ProfileRepresentationIndex.DatatypeMetadataUrl));
+        foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
+        {
+            foreach ((string? version, bool unsafeCode) in new[] { ("exempt", false), ("other", true), ((string?)null, true) })
+            {
+                JsonObject Coding(string system, string code, string? codingVersion)
+                {
+                    JsonArray children =
+                    [
+                        new JsonObject { ["url"] = ProfileRepresentationIndex.DatatypeMetadataUrl, ["valueString"] = "Coding" },
+                        new JsonObject { ["url"] = "system", ["valueUri"] = system },
+                        new JsonObject { ["url"] = "code", ["valueCode"] = code },
+                    ];
+                    if (codingVersion is not null) children.Add(new JsonObject { ["url"] = "version", ["valueString"] = codingVersion });
+                    return new() { ["url"] = extension.GenUrl, ["extension"] = children };
+                }
+                JsonObject instance = new() { ["resourceType"] = "ValueSet", ["status"] = "active", ["extension"] = new JsonArray(
+                    Coding("http://different", "unsafe", "other"),
+                    Coding(UnsafeCodeTestFixture.FilterSystem, "safe", "other"),
+                    Coding(UnsafeCodeTestFixture.FilterSystem, "unsafe", version)) };
+                if (uri is not null) instance["implicitRules"] = uri;
+                Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, instance.ToJsonString()))
+                    .ShouldBe(!unsafeCode || uri == UnsafeCodeConstants.ImplicitRules);
+                instance["extension"]!.AsArray().RemoveAt(2);
+                Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, instance.ToJsonString())).ShouldBeTrue();
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void NestedChildExtensionUrlsAreExecutedFromTheSerializedConstraint(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElement parent = fixture.AddElement(fixture.Structure(pair.SourcePackage), "ValueSet.filter");
+        DbElement child = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.filter.op", "code");
+        DbElementOutcome parentOutcome = fixture.AddRepresentationOutcome(pair, parent, "ValueSet");
+        DbElementOutcome childOutcome = fixture.AddRepresentationOutcome(pair, child, parent: parentOutcome);
+        childOutcome.GenSliceName = "local'child\\url";
+        DbElementOutcome.Update(fixture.Connection, [childOutcome]);
+        fixture.AddTrigger(outcome, SourcePath(parent.Id, child.Id));
+        string expression = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
+        expression.ShouldContain(UnsafeCodeConstraintEmitter.Literal(childOutcome.GenSliceName));
+        foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
+        {
+            foreach (string childUrl in new[] { childOutcome.GenSliceName, "op" })
+            {
+                JsonObject instance = new()
+                {
+                    ["resourceType"] = "ValueSet", ["status"] = "active",
+                    ["extension"] = new JsonArray(new JsonObject
+                    {
+                        ["url"] = parentOutcome.GenUrl,
+                        ["extension"] = new JsonArray(new JsonObject { ["url"] = childUrl, ["valueCode"] = "unsafe" }),
+                    }),
+                };
+                if (uri is not null) instance["implicitRules"] = uri;
+                Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, instance.ToJsonString()))
+                    .ShouldBe(childUrl != childOutcome.GenSliceName || uri == UnsafeCodeConstants.ImplicitRules);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    public void RecursivePathsIncludeInitialAndDeepDescendants(int targetIndex, bool extension)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            DbStructureDefinition structure = fixture.AddStructure(package, "Questionnaire", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Resource);
+            fixture.AddElement(structure, "Questionnaire");
+            if (extension && package.Key == pair.TargetPackageKey) continue;
+            DbElement node = fixture.AddElement(structure, "Questionnaire.item");
+            fixture.AddTypedElement(structure, "Questionnaire.item.type", "code");
+            DbElement child = fixture.AddElement(structure, "Questionnaire.item.item");
+            child.ContentReferenceSourceKey = node.Key;
+            child.DefinedAsContentReference = true;
+            DbElement.Update(fixture.Connection, [child]);
+        }
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage, "Questionnaire"),
+            fixture.Structure(pair.TargetPackage, "Questionnaire"));
+        DbElement nodeSource = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: "Questionnaire.item")!;
+        DbElement childSource = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: "Questionnaire.item.item")!;
+        DbElement typeSource = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: "Questionnaire.item.type")!;
+        DbElementOutcome? parentOutcome = null;
+        DbElementOutcome? typeOutcome = null;
+        if (extension)
+        {
+            parentOutcome = fixture.AddRepresentationOutcome(pair, nodeSource, "Questionnaire");
+            typeOutcome = fixture.AddRepresentationOutcome(pair, typeSource, parent: parentOutcome);
+            DbElementOutcome childOutcome = fixture.AddRepresentationOutcome(pair, childSource, parent: parentOutcome);
+            childOutcome.ContentReferenceAncestorId = nodeSource.Id;
+            childOutcome.ContentReferenceExtensionUrl = parentOutcome.GenUrl;
+            DbElementOutcome.Update(fixture.Connection, [childOutcome]);
+        }
+        ImmutableArray<UnsafeCodePathStep> initial = [new("Questionnaire", null, false), new(nodeSource.Id, null, false)];
+        fixture.AddTrigger(outcome, initial.Add(new(typeSource.Id, null, false)), code: "group");
+        fixture.AddTrigger(outcome, initial.Add(new(childSource.Id, null, false)).Add(new(nodeSource.Id, null, true))
+            .Add(new(typeSource.Id, null, false)), code: "group");
+        string[] expressions = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex);
+        expressions.ShouldContain(expression => expression.Contains(".repeat("));
+        foreach (int unsafeDepth in new[] { -1, 0, 1, 40 })
+        {
+            foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
+            {
+                JsonObject? next = null;
+                for (int depth = 40; depth >= 0; depth--)
+                {
+                    if (extension)
+                    {
+                        JsonArray children = [new JsonObject { ["url"] = typeOutcome!.GenSliceName, ["valueCode"] = depth == unsafeDepth ? "group" : "string" }];
+                        if (next is not null) children.Add(next);
+                        next = new() { ["url"] = parentOutcome!.GenUrl, ["extension"] = children };
+                    }
+                    else
+                    {
+                        JsonObject item = new() { ["linkId"] = "item-" + depth, ["type"] = depth == unsafeDepth ? "group" : "string" };
+                        if (next is not null) item["item"] = new JsonArray(next);
+                        next = item;
+                    }
+                }
+                JsonObject instance = new() { ["resourceType"] = "Questionnaire", ["status"] = "active", [extension ? "extension" : "item"] = new JsonArray(next) };
+                if (uri is not null) instance["implicitRules"] = uri;
+                expressions.Select(expression => Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, instance.ToJsonString())))
+                    .All(result => result).ShouldBe(unsafeDepth < 0 || uri == UnsafeCodeConstants.ImplicitRules);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void MutuallyRecursiveTypedDatatypesEvaluateInitialAndDeepValues(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            fixture.AddTypedElement(fixture.Structure(package), "ValueSet.jurisdiction", "CodeableConcept");
+            fixture.AddTypedElement(fixture.Structure(package, "CodeableConcept"), "CodeableConcept.extension", "Extension");
+            DbElement value = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: package.Key, Id: "Extension.value[x]")!;
+            value.IsChoiceType = true;
+            DbElement.Update(fixture.Connection, [value]);
+        }
+        ImmutableArray<UnsafeCodePathStep> initial = SourcePath("ValueSet.jurisdiction");
+        fixture.AddTrigger(outcome, initial.Add(new("CodeableConcept.coding", "CodeableConcept", false)));
+        fixture.AddTrigger(outcome, initial.Add(new("CodeableConcept.extension", "CodeableConcept", false))
+            .Add(new("Extension.value[x]", "Extension", false)).Add(new("CodeableConcept.coding", "CodeableConcept", false)));
+        string[] expressions = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex);
+        expressions.ShouldContain(expression => expression.Contains(".repeat("));
+        foreach (int unsafeDepth in new[] { -1, 0, 1, 20 })
+        {
+            foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
+            {
+                JsonObject? next = null;
+                for (int depth = 20; depth >= 0; depth--)
+                {
+                    JsonObject concept = new() { ["coding"] = new JsonArray(new JsonObject
+                    {
+                        ["system"] = UnsafeCodeTestFixture.FilterSystem, ["code"] = depth == unsafeDepth ? "unsafe" : "safe",
+                    }) };
+                    if (next is not null) concept["extension"] = new JsonArray(new JsonObject { ["url"] = "http://example.org/recursive-concept", ["valueCodeableConcept"] = next });
+                    next = concept;
+                }
+                JsonObject instance = new() { ["resourceType"] = "ValueSet", ["status"] = "active", ["jurisdiction"] = new JsonArray(next) };
+                if (uri is not null) instance["implicitRules"] = uri;
+                expressions.Select(expression => Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, instance.ToJsonString())))
+                    .All(result => result).ShouldBe(unsafeDepth < 0 || uri == UnsafeCodeConstants.ImplicitRules);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void InheritedDatatypeTriggersStayScopedAtEveryResourceReuseSite(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            DbStructureDefinition observation = fixture.AddStructure(package, "Observation", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Resource);
+            fixture.AddElement(observation, "Observation");
+            fixture.AddTypedElement(observation, "Observation.code", "CodeableConcept");
+            fixture.AddElement(observation, "Observation.component");
+            fixture.AddTypedElement(observation, "Observation.component.code", "CodeableConcept");
+        }
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage, "Observation"), fixture.Structure(pair.TargetPackage, "Observation"));
+        DbStructureDefinition typeProfile = fixture.AddStructure(pair.SourcePackage, "ConceptProfile", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Profile);
+        DbElement profileRoot = fixture.AddElement(typeProfile, "CodeableConcept");
+        profileRoot.BaseStructureKey = fixture.Structure(pair.SourcePackage, "CodeableConcept").Key;
+        DbElement.Update(fixture.Connection, [profileRoot]);
+        foreach (DbElementType type in DbElementType.SelectList(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, TypeName: "CodeableConcept"))
+        {
+            type.TypeProfile = typeProfile.VersionedUrl;
+            type.TypeProfileStructureKey = typeProfile.Key;
+            DbElementType.Update(fixture.Connection, [type]);
+        }
+        foreach (string[] use in new[] { new[] { "Observation.code" }, new[] { "Observation.component", "Observation.component.code" } })
+        {
+            fixture.AddTrigger(outcome, [new("Observation", null, false),
+                .. use.Select(id => new UnsafeCodePathStep(id, null, false)), new("CodeableConcept.coding", typeProfile.VersionedUrl, false)]);
+        }
+        string[] expressions = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex);
+        expressions.Length.ShouldBe(2);
+        foreach (int unsafeSite in new[] { -1, 0, 1 })
+        {
+            foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
+            {
+                JsonObject Concept(int site) => new() { ["coding"] = new JsonArray(new JsonObject
+                {
+                    ["system"] = UnsafeCodeTestFixture.FilterSystem, ["code"] = site == unsafeSite ? "unsafe" : "safe",
+                }) };
+                JsonObject instance = new() { ["resourceType"] = "Observation", ["status"] = "final", ["code"] = Concept(0),
+                    ["component"] = new JsonArray(new JsonObject { ["code"] = Concept(1) }) };
+                if (uri is not null) instance["implicitRules"] = uri;
+                expressions.Select(expression => Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, instance.ToJsonString())))
+                    .All(result => result).ShouldBe(unsafeSite < 0 || uri == UnsafeCodeConstants.ImplicitRules);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void NestedResourceUsesItsOwnImplicitRules(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            DbStructureDefinition parameters = fixture.AddStructure(package, "Parameters", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Resource);
+            fixture.AddElement(parameters, "Parameters");
+            fixture.AddElement(parameters, "Parameters.parameter");
+            fixture.AddTypedElement(parameters, "Parameters.parameter.resource", "Parameters");
+            fixture.AddTypedElement(parameters, "Parameters.parameter.value[x]", "code");
+            DbElement value = DbElement.SelectSingle(fixture.Connection, StructureKey: parameters.Key, Id: "Parameters.parameter.value[x]")!;
+            value.IsChoiceType = true;
+            DbElement.Update(fixture.Connection, [value]);
+        }
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage, "Parameters"), fixture.Structure(pair.TargetPackage, "Parameters"));
+        fixture.AddTrigger(outcome, [new("Parameters", null, false), new("Parameters.parameter", null, false), new("Parameters.parameter.value[x]", null, false)]);
+        string[] expressions = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex);
+        expressions.ShouldContain(expression => expression.Contains(".all("));
+        foreach (int unsafeOwner in new[] { -1, 0, 1, 2 })
+        {
+            for (int declarations = 0; declarations < 27; declarations++)
+            {
+                JsonObject? next = null;
+                for (int owner = 2; owner >= 0; owner--)
+                {
+                    JsonArray parameters = [new JsonObject { ["name"] = "code", ["valueCode"] = owner == unsafeOwner ? "unsafe" : "safe" }];
+                    if (next is not null) parameters.Add(new JsonObject { ["name"] = "child", ["resource"] = next });
+                    JsonObject resource = new() { ["resourceType"] = "Parameters", ["parameter"] = parameters };
+                    int declaration = declarations / new[] { 1, 3, 9 }[owner] % 3;
+                    if (declaration != 0) resource["implicitRules"] = declaration == 1 ? "http://wrong" : UnsafeCodeConstants.ImplicitRules;
+                    next = resource;
+                }
+                ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex, next!.ToJsonString());
+                expressions.Select(expression => Evaluate(expression, instance)).All(result => result)
+                    .ShouldBe(unsafeOwner < 0 || declarations / new[] { 1, 3, 9 }[unsafeOwner] % 3 == 2);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void AlternatingResourceOwnersReachEveryTypeAfterMultipleCycles(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome[] outcomes = fixture.AddResourceOwnerGraph(pair, "Bundle", "Parameters");
+        fixture.AddTrigger(outcomes[1], [new("Parameters", null, false), new("Parameters.parameter", null, false),
+            new("Parameters.parameter.value[x]", null, false)]);
+        fixture.AddTrigger(outcomes[0], [new("Bundle", null, false), new("Bundle.type", null, false)], code: "document");
+        StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
+        Dictionary<string, string[]> expressions = built.Profiles.ToDictionary(profile => profile.Definition.Type,
+            profile => RecoveredExpressions(profile.Definition, targetIndex));
+        expressions.Values.ShouldAllBe(value => value.Length > 0);
+
+        foreach (string unsafeType in new[] { "Parameters", "Bundle" })
+        {
+            foreach (string rootType in new[] { "Bundle", "Parameters" })
+            {
+                foreach (int cycles in new[] { 0, 1, 5, 20 })
+                {
+                    foreach (string? ownerUri in new[] { null, "http://wrong", UnsafeCodeConstants.ImplicitRules })
+                    {
+                        foreach (string? parentUri in new[] { null, "http://wrong", UnsafeCodeConstants.ImplicitRules })
+                        {
+                            JsonObject next = Resource(unsafeType, true, ownerUri);
+                            int wrappers = cycles * 2 + (rootType == unsafeType ? 0 : 1);
+                            for (int depth = 0; depth < wrappers; depth++)
+                            {
+                                string parentType = next["resourceType"]!.GetValue<string>() == "Parameters" ? "Bundle" : "Parameters";
+                                next = Resource(parentType, false, parentUri, next);
+                            }
+                            ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex, next.ToJsonString());
+                            instance.InstanceType.ShouldBe(rootType);
+                            expressions[rootType].Select(expression => Evaluate(expression, instance)).All(result => result)
+                                .ShouldBe(ownerUri == UnsafeCodeConstants.ImplicitRules,
+                                    $"root {rootType}, unsafe {unsafeType}, cycles {cycles}, child URI {ownerUri}, parent URI {parentUri}");
+                        }
+                    }
+                }
+            }
+        }
+
+        // A real resource below an unindexed location is not a transition.
+        JsonObject unrelated = new()
+        {
+            ["resourceType"] = "Parameters",
+            ["parameter"] = new JsonArray(new JsonObject
+            {
+                ["name"] = "unrelated",
+                ["part"] = new JsonArray(new JsonObject { ["name"] = "child", ["resource"] = Resource("Parameters", true, null) }),
+            }),
+        };
+        ITypedElement unrelatedInstance = UnsafeCodeTestFixture.TargetInstance(targetIndex, unrelated.ToJsonString());
+        expressions["Parameters"].ShouldAllBe(expression => Evaluate(expression, unrelatedInstance));
+
+        static JsonObject Resource(string type, bool unsafeCode, string? uri, JsonObject? child = null)
+        {
+            JsonObject resource = new() { ["resourceType"] = type };
+            if (type == "Bundle")
+            {
+                resource["type"] = unsafeCode ? "document" : "collection";
+                if (child is not null) resource["entry"] = new JsonArray(new JsonObject { ["resource"] = child });
+            }
+            else
+            {
+                JsonArray parameters = [new JsonObject
+                {
+                    ["name"] = "code",
+                    ["valueCoding"] = new JsonObject { ["system"] = UnsafeCodeTestFixture.FilterSystem, ["code"] = unsafeCode ? "unsafe" : "safe" },
+                }];
+                if (child is not null) parameters.Add(new JsonObject { ["name"] = "child", ["resource"] = child });
+                resource["parameter"] = parameters;
+            }
+            if (uri is not null) resource["implicitRules"] = uri;
+            return resource;
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void GenericContainedOwnerClosureGrowsWithGraphNotTrails(int targetIndex)
+    {
+        List<int> lengths = [];
+        foreach (int size in new[] { 2, 3, 4, 5 })
+        {
+            using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+            FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+            string[] resourceTypes = new[] { "Observation", "Patient", "Organization", "Practitioner", "Device" }[..size];
+            DbStructureOutcome[] outcomes = fixture.AddResourceOwnerGraph(pair, resourceTypes);
+            fixture.AddTrigger(outcomes[0], [new("Observation", null, false), new("Observation.code", null, false)]);
+            StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
+            string[][] expressions = [.. built.Profiles.Select(profile => RecoveredExpressions(profile.Definition, targetIndex))];
+            int count = expressions.Sum(value => value.Length);
+            int length = expressions.SelectMany(value => value).Sum(expression => expression.Length);
+            Console.WriteLine($"OWNER_GRAPH target={targetIndex} profiles={size} constraints={count} expressionChars={length}");
+            // One source occurrence, shared across every reachable owner, not one
+            // invariant (or transition copy) for every edge-simple trail.
+            count.ShouldBe(size);
+            expressions.ShouldAllBe(value => value.Length == 1);
+            expressions.SelectMany(value => value).ShouldAllBe(expression =>
+                expression.Split(".repeat(", StringSplitOptions.None).Length - 1 == 1);
+            expressions.SelectMany(value => value).ShouldAllBe(expression =>
+                expression.Split(".contained.", StringSplitOptions.None).Length - 1 == size * size);
+            lengths.Add(length);
+
+            foreach (StructureFhirExporter.BuiltDefinition profile in built.Profiles)
+            {
+                string expression = RecoveredExpressions(profile.Definition, targetIndex).ShouldHaveSingleItem();
+                foreach (string? uri in new[] { null, "http://wrong", UnsafeCodeConstants.ImplicitRules })
+                {
+                    JsonObject next = new()
+                    {
+                        ["resourceType"] = "Observation", ["status"] = "final",
+                        ["code"] = new JsonObject { ["coding"] = new JsonArray(new JsonObject
+                        {
+                            ["system"] = UnsafeCodeTestFixture.FilterSystem, ["code"] = "unsafe",
+                        }) },
+                    };
+                    if (uri is not null) next["implicitRules"] = uri;
+                    JsonObject sibling = (JsonObject)next.DeepClone();
+                    sibling["implicitRules"] = UnsafeCodeConstants.ImplicitRules;
+                    JsonObject root = Container(profile.Definition.Type, next);
+                    root["contained"]!.AsArray().Add(sibling);
+                    Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, root.ToJsonString()))
+                        .ShouldBe(uri == UnsafeCodeConstants.ImplicitRules);
+                }
+            }
+
+            if (size == 3)
+            {
+                DbElement duplicate = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage, "Observation"), "Observation.otherContained", "Resource");
+                fixture.Connect(pair, outcomes[0], duplicate,
+                    DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.TargetPackageKey, Id: "Observation.contained")!);
+                StructureFhirExporter.BuiltDefinitions duplicated = Exporter(fixture).BuildDefinitions(Tracking(pair));
+                foreach (StructureFhirExporter.BuiltDefinition profile in duplicated.Profiles)
+                {
+                    StructureDefinition before = built.Profiles.Single(candidate => candidate.OutcomeKey == profile.OutcomeKey).Definition;
+                    RecoveredExpressions(profile.Definition, targetIndex).ShouldBe(RecoveredExpressions(before, targetIndex));
+                    profile.Definition.Differential.Element[0].Constraint.Select(constraint => constraint.Key)
+                        .ShouldBe(before.Differential.Element[0].Constraint.Select(constraint => constraint.Key));
+                }
+
+                using UnsafeCodeTestFixture reorderedFixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+                FhirPackageComparisonPair reorderedPair = reorderedFixture.PreparePair(2, targetIndex);
+                DbStructureDefinition noise = reorderedFixture.AddStructure(reorderedPair.SourcePackage, "Unrelated");
+                reorderedFixture.AddElement(noise, "Unrelated");
+                reorderedFixture.AddOutcome(reorderedPair, noise);
+                DbStructureOutcome[] reorderedOutcomes = reorderedFixture.AddResourceOwnerGraph(reorderedPair, [.. resourceTypes.Reverse()]);
+                DbStructureOutcome observation = reorderedOutcomes.Single(outcome => outcome.SourceId == "Observation");
+                observation.Key.ShouldNotBe(outcomes[0].Key);
+                reorderedFixture.AddTrigger(observation, [new("Observation", null, false), new("Observation.code", null, false)]);
+                StructureFhirExporter.BuiltDefinitions reordered = Exporter(reorderedFixture).BuildDefinitions(Tracking(reorderedPair));
+                foreach (StructureFhirExporter.BuiltDefinition profile in reordered.Profiles)
+                {
+                    StructureDefinition before = built.Profiles.Single(candidate => candidate.Definition.Url == profile.Definition.Url).Definition;
+                    JsonNode.Parse(profile.Definition.ToJson())!["differential"]!["element"]![0]!["constraint"]!.ToJsonString()
+                        .ShouldBe(JsonNode.Parse(before.ToJson())!["differential"]!["element"]![0]!["constraint"]!.ToJsonString());
+                }
+            }
+        }
+        lengths[3].ShouldBeLessThan(lengths[0] * 16);
+
+        static JsonObject Container(string type, JsonObject child)
+        {
+            JsonObject resource = new() { ["resourceType"] = type, ["contained"] = new JsonArray(child),
+                ["implicitRules"] = UnsafeCodeConstants.ImplicitRules };
+            if (type == "Observation")
+            {
+                resource["status"] = "final";
+                resource["code"] = new JsonObject { ["text"] = "Safe observation" };
+            }
+            return resource;
+        }
+    }
+
+    [Fact]
+    public void NativeAndExtensionOccurrencesEnforceExactImplicitRules()
+    {
+        // Preserve the original characterization's R4-then-R4B key allocation.
+        foreach (int targetIndex in new[] { 0, 1 })
+        {
+            AssertNativeAndExtensionOccurrences(targetIndex);
+        }
+    }
+
+    private static void AssertNativeAndExtensionOccurrences(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateProfileInputs(initializeIndices: targetIndex == 0);
+        fixture.WriteConfiguration("""[{"system":"http://hl7.org/fhir/filter-operator","code":"exists"}]""");
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
+        StructureDefinition profile = built.Profiles.ShouldHaveSingleItem().Definition;
+        string[] expressions = RecoveredExpressions(profile, targetIndex);
+        expressions.ShouldNotBeEmpty();
+        string extensionUrl = built.Extensions.Single(extension => extension.Definition.Id == "ext-R5-ValueSet.com.inc.fil.op").Definition.Url;
+        string.Join("\n", expressions).ShouldContain(".extension.where(url = " + UnsafeCodeConstraintEmitter.Literal(extensionUrl) + ")");
+        foreach (string? uri in new[] { null, "http://wrong", UnsafeCodeConstants.ImplicitRules })
+        {
+            foreach ((string code, string placement) in new[]
+            {
+                ("unsafe-demo", "extension"), ("unresolved", "extension"), ("=", "extension"), ("exists", "extension"),
+                ("=", "op"), ("exists", "op"),
+                ("unsafe-demo", "value"), ("unresolved", "value"), ("exists", "value"), ("=", "value"),
+                ("not-present", "absent"),
+            })
+            {
+                ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex, code == "not-present"
+                    ? "{\"resourceType\":\"ValueSet\",\"status\":\"active\"" + (uri is null ? "" : ",\"implicitRules\":" + JsonSerializer.Serialize(uri)) + "}"
+                    : FilterJson(code, uri, placement == "extension" ? extensionUrl : null, extensionOnFilter: true, valueOnly: placement == "value"));
+                bool unsafeCode = code is "unsafe-demo" or "unresolved" or "exists";
+                expressions.Select(expression => Evaluate(expression, instance)).All(result => result)
+                    .ShouldBe(!unsafeCode || uri == UnsafeCodeConstants.ImplicitRules);
+            }
+        }
+
+        profile.ImplicitRules.ShouldBeNull();
+        AssertOnlyConstraintDelta(built, targetIndex);
+        if (targetIndex == 0)
+        {
+            // Measured output is visible in the detailed test run, not an illustrative golden.
+            Console.WriteLine("MEASURED_CONSTRAINT_DIFF " + JsonSerializer.Serialize(new
+            {
+                canonical = profile.Url,
+                append = JsonNode.Parse(profile.ToJson())!["differential"]!["element"]![0]!["constraint"],
+            }));
+        }
+    }
+
+    private static void AssertOnlyConstraintDelta(StructureFhirExporter.BuiltDefinitions built, int targetIndex)
+    {
+        JsonArray expected = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestData", "XverUnsafeCodes", "Expected",
+            targetIndex == 0 ? "no-feature-r5-r4.json" : "no-feature-r5-r4b.json")))!.AsArray();
+        foreach (StructureFhirExporter.BuiltDefinition definition in built.Extensions.Concat(built.Profiles))
+        {
+            JsonObject actual = JsonNode.Parse(definition.Definition.ToJson())!.AsObject();
+            actual["date"] = "2000-01-01T00:00:00+00:00";
+            JsonObject root = actual["differential"]!["element"]![0]!.AsObject();
+            if (root["constraint"] is JsonArray constraints)
+            {
+                foreach (JsonNode? constraint in constraints.Where(constraint => constraint!["key"]!.GetValue<string>()
+                    .StartsWith("xv-unsafe-code-", StringComparison.Ordinal)).ToArray())
+                {
+                    constraints.Remove(constraint);
+                }
+                if (constraints.Count == 0) root.Remove("constraint");
+            }
+            actual.ToJsonString().ShouldBe(expected.Single(json => json!["id"]!.GetValue<string>() == definition.Definition.Id)!.ToJsonString());
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void PrimitiveExtensionWithoutScalarStillTriggers(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.extra", "code");
+        DbStructureDefinition target = fixture.Structure(pair.TargetPackage);
+        fixture.AddElement(target, "ValueSet.compose");
+        fixture.AddElement(target, "ValueSet.compose.include");
+        fixture.AddElement(target, "ValueSet.compose.include.filter");
+        fixture.AddTypedElement(target, UnsafeCodeTestFixture.FilterElement, "code");
+        DbElementOutcome extension = fixture.AddRepresentationOutcome(pair, source, UnsafeCodeTestFixture.FilterElement);
+        fixture.AddTrigger(outcome, SourcePath(source.Id));
+        string expression = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
+        foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
+        {
+            ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex, FilterJson("unsafe", uri, extension.GenUrl));
+            instance.Children("compose").Single().Children("include").Single().Children("filter").Single().Children("op").Single().Value.ShouldBeNull();
+            Evaluate(expression, instance).ShouldBe(uri == UnsafeCodeConstants.ImplicitRules);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    public void CodePredicatesKeepSystemVersionAndCodeOnOneOccurrence(int targetIndex, bool extension)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "CodeableConcept");
+        DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.useContext.value[x]", "CodeableConcept");
+        target.IsChoiceType = true;
+        DbElement.Update(fixture.Connection, [target]);
+        DbElementOutcome? ext = extension ? fixture.AddRepresentationOutcome(pair, source, "ValueSet") : null;
+        fixture.Connect(pair, outcome, source, target, ext);
+        fixture.AddTrigger(outcome, SourcePath(source.Id).Add(new("CodeableConcept.coding", "CodeableConcept", false)),
+            wildcard: true, versions: ["exempt"]);
+        string expression = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
+        foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
+        {
+            foreach ((string codings, bool unsafeCode) in new[]
+            {
+                ("[]", false),
+                ("[{\"system\":\"http://different\",\"code\":\"unsafe\"},{\"system\":\"" + UnsafeCodeTestFixture.FilterSystem + "\",\"code\":\"safe\"}]", false),
+                ("[{\"system\":\"" + UnsafeCodeTestFixture.FilterSystem + "\",\"version\":\"exempt\",\"code\":\"unsafe\"}]", false),
+                ("[{\"system\":\"" + UnsafeCodeTestFixture.FilterSystem + "\",\"code\":\"unsafe\"}]", true),
+                ("[{\"system\":\"" + UnsafeCodeTestFixture.FilterSystem + "\",\"version\":\"other\",\"code\":\"unsafe\"}]", true),
+                ("[{\"system\":\"" + UnsafeCodeTestFixture.FilterSystem + "\",\"code\":\"safe\"},{\"system\":\"" + UnsafeCodeTestFixture.FilterSystem + "\",\"code\":\"unsafe\"}]", true),
+            })
+            {
+                string concept = codings == "[]" ? "{\"text\":\"No coding\"}" : "{\"coding\":" + codings + "}";
+                string content = extension
+                    ? "\"extension\":[{\"url\":" + JsonSerializer.Serialize(ext!.GenUrl) + ",\"valueCodeableConcept\":" + concept + "}]"
+                    : "\"useContext\":[{\"code\":{\"system\":\"context\",\"code\":\"context\"},\"valueCodeableConcept\":" + concept + "}]";
+                Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex, "{\"resourceType\":\"ValueSet\",\"status\":\"active\"," + UriJson(uri) + content + "}"))
+                    .ShouldBe(!unsafeCode || uri == UnsafeCodeConstants.ImplicitRules);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void ExactVersionsDoNotMatchUnknownVersionsOrCrossMatchCodings(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "Coding");
+        DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.jurisdiction.coding", "Coding");
+        fixture.Connect(pair, outcome, source, target);
+        fixture.AddTrigger(outcome, SourcePath(source.Id), wildcard: false, versions: ["exact"]);
+        string expression = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
+        foreach (string? version in new[] { null, "other", "exact" })
+        {
+            string coding = "{\"system\":" + JsonSerializer.Serialize(UnsafeCodeTestFixture.FilterSystem) +
+                ",\"code\":\"unsafe\"" + (version is null ? "" : ",\"version\":" + JsonSerializer.Serialize(version)) + "}";
+            string other = "{\"system\":\"different\",\"code\":\"unsafe\",\"version\":\"exact\"}";
+            Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex,
+                "{\"resourceType\":\"ValueSet\",\"status\":\"active\",\"jurisdiction\":[{\"coding\":[" + other + "," + coding + "]}]}"))
+                .ShouldBe(version != "exact");
+        }
+    }
+
+    [Theory]
+    [InlineData(0, false, false)]
+    [InlineData(1, false, false)]
+    [InlineData(0, true, false)]
+    [InlineData(1, true, false)]
+    [InlineData(0, false, true)]
+    [InlineData(1, false, true)]
+    public void NativeModifierAndOverflowRepresentationsAreUnioned(int targetIndex, bool modifier, bool overflow)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.op", "code");
+        DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.status", "code");
+        DbElementOutcome ext = fixture.AddRepresentationOutcome(pair, source, "ValueSet", cardinalityOnly: overflow);
+        ext.DefineAsModifier = modifier;
+        DbElementOutcome.Update(fixture.Connection, [ext]);
+        fixture.Connect(pair, outcome, source, target, ext);
+        fixture.AddTrigger(outcome, SourcePath(source.Id), code: "draft");
+        StructureDefinition profile = Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition;
+        string expression = RecoveredExpressions(profile, targetIndex).ShouldHaveSingleItem();
+        foreach (bool native in new[] { false, true })
+        {
+            foreach (bool unsafeCode in new[] { false, true })
+            {
+                string content = native ? "" : ",\"" + (modifier ? "modifierExtension" : "extension") + "\":[{\"url\":" +
+                    JsonSerializer.Serialize(ext.GenUrl) + ",\"valueCode\":" + JsonSerializer.Serialize(unsafeCode ? "draft" : "safe") + "}]";
+                Evaluate(expression, UnsafeCodeTestFixture.TargetInstance(targetIndex,
+                    "{\"resourceType\":\"ValueSet\",\"status\":" + JsonSerializer.Serialize(native && unsafeCode ? "draft" : "active") + content + "}")).ShouldBe(!unsafeCode);
+            }
+        }
+
+        if (overflow)
+        {
+            profile.Differential.Element[0].Constraint[0].Severity.ShouldBe(ConstraintSeverity.Warning);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, "Quantity")]
+    [InlineData(1, "code")]
+    [InlineData(0, "opaque")]
+    [InlineData(1, "changed")]
+    public void IdentityErasureAndOpaqueSubstitutionsFailExplicitly(int targetIndex, string kind)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", kind == "opaque" ? "code" : "Coding");
+        DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.renamed", kind is "Quantity" or "code" ? kind : "Coding");
+        fixture.Connect(pair, outcome, source, target);
+        if (kind == "opaque")
+        {
+            DbElementOutcome ext = fixture.AddRepresentationOutcome(pair, source, "ValueSet");
+            ext.ExtensionSubstitutionUrl = "http://example.org/opaque";
+            DbElementOutcome.Update(fixture.Connection, [ext]);
+        }
+        else if (kind == "changed")
+        {
+            source.BindingValueSet = target.BindingValueSet = UnsafeCodeTestFixture.FilterValueSet;
+            DbElement.Update(fixture.Connection, [source, target]);
+            DbUnsafeCodeMapEvidence evidence = fixture.AddEvidence(pair, noMap: false);
+            evidence.TargetCode = "changed";
+            evidence.TargetSystem = UnsafeCodeTestFixture.FilterSystem;
+            DbUnsafeCodeMapEvidence.Update(fixture.Connection, [evidence]);
+        }
+        fixture.AddTrigger(outcome, SourcePath(source.Id));
+        InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Exporter(fixture).BuildDefinitions(Tracking(pair)));
+        error.Message.ShouldContain(outcome.GenUrl!);
+        error.Message.ShouldContain("R5->" + pair.TargetFhirSequence.ToRLiteral());
+        error.Message.ShouldContain(source.Id);
+        error.Message.ShouldContain(UnsafeCodeTestFixture.FilterSystem);
+        error.Message.ShouldContain("#unsafe");
+        error.Message.ShouldContain("provenance");
+        error.Message.ShouldContain(kind switch
+        {
+            "Quantity" => "ErasedVersion",
+            "code" => "ErasedIdentity",
+            "opaque" => "OpaqueSubstitution",
+            _ => "identity-changing native code mapping",
+        });
+    }
+
+    [Fact]
+    public void KeysEscapingAndConstraintOrderingAreStable()
+    {
+        StructureDefinition profile = new() { Url = "http://example.org/profile", Differential = new() { Element = [new() { Path = "ValueSet", ElementId = "ValueSet", Constraint = [new() { Key = "existing", Severity = ConstraintSeverity.Warning, Human = "unchanged", Expression = "true" }] }] } };
+        UnsafeCodeConstraintEmitter.Append(profile, [("b", "true"), ("a", "false"), ("a", "false")]);
+        profile.Differential.Element[0].Constraint[0].Expression.ShouldBe("true");
+        profile.Differential.Element[0].Constraint[0].Human.ShouldBe("unchanged");
+        profile.Differential.Element[0].Constraint[0].Severity.ShouldBe(ConstraintSeverity.Warning);
+        profile.Differential.Element[0].Constraint.Select(constraint => constraint.Key).ShouldBe(["existing", UnsafeCodeConstraintEmitter.Key("a"), UnsafeCodeConstraintEmitter.Key("b")]);
+        profile.Differential.Element[0].Constraint.ShouldAllBe(constraint => constraint.Key.Length <= 64);
+        Should.Throw<InvalidOperationException>(() => UnsafeCodeConstraintEmitter.Append(profile, [("a", "true")])).Message.ShouldContain("collision");
+        string special = "quote'\\\n\r\t\u0001";
+        string literal = UnsafeCodeConstraintEmitter.Literal(special);
+        Evaluate(literal + " = " + literal, UnsafeCodeTestFixture.TargetInstance(0, "{\"resourceType\":\"ValueSet\",\"status\":\"active\"}")).ShouldBeTrue();
+        string identifier = UnsafeCodeConstraintEmitter.Identifier("not-a`member\\\u0002");
+        Compiler.Compile("$this." + identifier + ".exists()").ShouldNotBeNull();
+        UnsafeCodeConstraintEmitter.Identifier("where").ShouldBe("where");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void SerializationPreservesExecutableConstraintAndR3Fields(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateProfileInputs();
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        StructureDefinition profile = Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition;
+        RecoveredExpressions(profile, targetIndex).ShouldNotBeEmpty();
+        string json = new CrossVersionExporter.StructureDefinitionToR3().ToJson(profile);
+        stu3::Hl7.Fhir.Model.StructureDefinition recovered = new stu3::Hl7.Fhir.Serialization.FhirJsonParser(
+            new ParserSettings { PermissiveParsing = true }).Parse<stu3::Hl7.Fhir.Model.StructureDefinition>(json);
+        ElementDefinition.ConstraintComponent[] before = [.. profile.Differential.Element[0].Constraint];
+        recovered.Differential.Element[0].Constraint.Count.ShouldBe(before.Length);
+        for (int i = 0; i < before.Length; i++)
+        {
+            recovered.Differential.Element[0].Constraint[i].Key.ShouldBe(before[i].Key);
+            recovered.Differential.Element[0].Constraint[i].Severity.ToString().ShouldBe(before[i].Severity.ToString());
+            recovered.Differential.Element[0].Constraint[i].Human.ShouldBe(before[i].Human);
+            recovered.Differential.Element[0].Constraint[i].Expression.ShouldBe(before[i].Expression);
+            recovered.Differential.Element[0].Constraint[i].Source.ShouldBe(before[i].Source);
+        }
+    }
+
+    private static string[] RecoveredExpressions(StructureDefinition profile, int targetIndex)
+    {
+        string json = profile.ToJson();
+        // The characterized exporter preserves legacy empty comments and warning
+        // constraints without human text. Use the supported tolerant parser for
+        // that metadata; target instances still use the strict POCO parser.
+        ParserSettings settings = new() { PermissiveParsing = true };
+        StructureDefinition recovered = targetIndex == 0
+            ? new r4::Hl7.Fhir.Serialization.FhirJsonParser(settings).Parse<StructureDefinition>(json)
+            : new r4b::Hl7.Fhir.Serialization.FhirJsonParser(settings).Parse<StructureDefinition>(json);
+        // Conformance POCOs are shared; the release-specific inspector is
+        // still required when deserializing profiles and their target instances.
+        ElementDefinition.ConstraintComponent[] before = [.. profile.Differential.Element[0].Constraint
+            .Where(constraint => constraint.Key.StartsWith("xv-unsafe-code-", StringComparison.Ordinal))];
+        ElementDefinition.ConstraintComponent[] after = [.. recovered.Differential.Element[0].Constraint
+            .Where(constraint => constraint.Key.StartsWith("xv-unsafe-code-", StringComparison.Ordinal))];
+        after.Length.ShouldBe(before.Length);
+        for (int i = 0; i < before.Length; i++)
+        {
+            after[i].Key.ShouldBe(before[i].Key);
+            after[i].Severity.ShouldBe(ConstraintSeverity.Error);
+            after[i].Human.ShouldBe(UnsafeCodeConstraintEmitter.Human);
+            after[i].Expression.ShouldBe(before[i].Expression);
+            after[i].Source.ShouldBe(profile.Url);
+        }
+        recovered.ImplicitRules.ShouldBeNull();
+        return recovered.ToTypedElement(targetIndex == 0 ? r4::Hl7.Fhir.Model.ModelInfo.ModelInspector : r4b::Hl7.Fhir.Model.ModelInfo.ModelInspector)
+            .Children("differential").Single().Children("element").SelectMany(element => element.Children("constraint"))
+            .Where(constraint => ((string)constraint.Children("key").Single().Value!).StartsWith("xv-unsafe-code-"))
+            .Select(constraint => (string)constraint.Children("expression").Single().Value!).ToArray();
+    }
+
+    private static bool Evaluate(string expression, ITypedElement instance)
+    {
+        CompiledExpression compiled = Compiler.Compile(expression);
+        ITypedElement result = compiled(instance, new EvaluationContext()).ShouldHaveSingleItem();
+        return result.Value.ShouldBeOfType<bool>();
+    }
+
+    private static string UriJson(string? uri) => uri is null ? "" : "\"implicitRules\":" + JsonSerializer.Serialize(uri) + ",";
+
+    private static string FilterJson(string code, string? uri, string? extension, bool extensionOnFilter = false, bool valueOnly = false) =>
+        "{\"resourceType\":\"ValueSet\",\"status\":\"active\"," + UriJson(uri) +
+        "\"compose\":{\"include\":[{\"filter\":[{\"property\":\"status\",\"value\":" + JsonSerializer.Serialize(valueOnly ? code : "active") + "," +
+        (extension is null ? "\"op\":" + JsonSerializer.Serialize(valueOnly ? "=" : code) : extensionOnFilter
+            ? "\"op\":\"=\",\"extension\":[{\"url\":" + JsonSerializer.Serialize(extension) + ",\"valueCode\":" + JsonSerializer.Serialize(code) + "}]"
+            : "\"_op\":{\"extension\":[{\"url\":" + JsonSerializer.Serialize(extension) + ",\"valueCode\":" + JsonSerializer.Serialize(code) + "}]}") + "}]}]}}";
+
     [Fact]
     public void NoFeatureDefinitionsMatchCharacterizedOutput()
     {
