@@ -303,6 +303,45 @@ attachments use the same decisions as construction, including cardinality
 overflow, Basic fallback, parent/nested contexts, and substitutions; the
 renderer never guesses a URL from an element suffix.
 
+### Construction and Projection
+
+Outcomes and native projection share internal
+`UnsafeCodeBindingScopeResolver` / `UnsafeCodeBindingScope` facts and the
+pure `UnsafeCodeEvidenceApplicability` matcher. Each stage caches frozen
+facts within its package-pair lifetime, including canonical/ValueSet
+versions, aggregate and per-canonical member slices, required-binding and
+completeness facts; regeneration creates a fresh resolver. Member identities
+keep code-system versions separate from ValueSet versions. The resolver
+receives pair-local ValueSets and a member-access delegate, not a database,
+configuration reader, or path walker.
+
+Outcomes retain effective-binding selection, precise versus potential
+evidence, primitive qualification and policy classification. The index
+retains actual native/extension attachment decisions and passes each native
+location's actual source and target enclosing binding elements to matching.
+Both map endpoints must pass independently:
+
+- **Direct binding:** preserve the conservative canonical check: a non-null
+  map URL equals the direct binding URL, and a supplied map ValueSet version
+  equals the binding version (an absent map version is a wildcard). Resolved
+  terminology membership is not required for this existing safety check.
+- **Imported scope:** require a resolved imported URL match, an exact
+  ValueSet-version match when supplied (otherwise a wildcard), and the
+  endpoint's qualified system/code in **that scope's own** member slice,
+  using existing system-version overlap rules. Aggregate outer or
+  sibling membership cannot supply this proof. Missing source qualification
+  uses the shared complete, uniquely scoped identity proof; missing imported
+  target qualification is not inferred from another scope.
+
+Direct/imported mixed endpoints are valid only when each passes its own
+branch. Unscoped map URLs remain native nonmatches; candidates require
+concrete source and target codes and must not be `ExplicitNoMap`.
+`SourceBinding` continues to mean the enclosing binding, not the imported
+map scope. Generated extension locations retain empty native transformation
+lists. The separate `BindingMembers` / `PreservesQualification` proof for
+erased carriers remains unchanged: imported applicability is not proof that
+an erased system or version can be recovered.
+
 `UnsafeCodeInputStore.ReadConstraintPlans` reads persisted triggers and
 provenance once per pair at `BuildProfiles` completion
 (`StructureFhirExporter.cs:1324-1327`, `DbUnsafeCodeClasses.cs:162-190`).
@@ -313,6 +352,15 @@ appends error-severity invariants to the existing resource-root
 differential. Stable `xv-unsafe-code-<digest>` keys use semantic profile,
 direction, owner, and source-path identities, never DB keys or timestamps;
 key collisions fail explicitly.
+
+Native transformations come from pair map evidence, **not** a trigger's
+`EvidenceKeysJson`: an independently eligible ordinary rule can persist an
+active trigger with no map evidence keys. Transformations are grouped by
+their six source/target system/version/code identity fields and retain an
+immutable union of responsible-map provenance, deduplicated and sorted by
+filename, ConceptMap id/canonical and group/source/target indices. Policy
+classification and persisted trigger/rule provenance remain distinct from
+the maps responsible for a representation's identity change.
 
 Each existential trigger implies that the **containing instance's**
 `implicitRules` contains exactly
@@ -340,6 +388,14 @@ identity-erasing native transformations, erased versions, ambiguous
 primitive systems, and opaque external substitutions are not permission to
 broaden or omit a constraint. Diagnostics include profile canonical,
 direction, source element/type-use path, qualified code, and provenance.
+For an applicable native transformation whose source matches the active
+trigger, any source/target system, system-version or code change blocks
+construction with `"identity-changing native code mapping"` and separate
+`Responsible map provenance`. This applies to imported native Coding maps
+as well as direct maps; distinct outer/imported ValueSet identities alone
+do not justify rejection of an identity-preserving map. No target-code
+predicate substitution, runtime conversion or trigger omission repairs an
+identity change.
 State preflight happens before all IG writes; projection diagnostics occur
 during definition construction and are not a promise of transactional
 rollback for every later export failure.
@@ -351,6 +407,90 @@ four R4B minima below are the sole characterized cardinality exception.
 R4/R4B tests evaluate expressions recovered from serialized profiles
 against target-release typed instances; the existing R3 conversion branch
 also preserves constraint key/severity/human/expression/source.
+
+## Measured Imported Native Mapping Contract
+
+Measured on `2026-11-06` for R5 → R4 (`4.0.1`) and R5 → R4B (`4.3.0`),
+with production baseline
+`e153f6ef797a0194b8a36ca1994818a07e08140e` before the correction. The staged
+fixture uses the actual native `ValueSet.jurisdiction` CodeableConcept and
+its `ValueSet.jurisdiction.coding` occurrence. Distinct source/target outer
+ValueSets compose-import uniquely resolved same-package inner
+`url|ValueSet-version` scopes; all relevant ValueSets have `CanExpand == false`.
+The combined map's own inner members are
+`urn:example:source|system-version-7#unsafe` →
+`urn:example:target|system-version-7#changed`.
+
+Ordinary independent input `input/ig-support/unsafe-code-mappings.json`,
+entry 0 (`{"system":"urn:example:source","code":"unsafe"}`), produces an
+active persisted wildcard-version trigger with empty map `EvidenceKeysJson`.
+Each projection probe is an independently staged twin with only that rule
+absent and zero triggers. Tests assert semantic correspondence of binding,
+map, comparison and representation-affecting outcome state, and the same
+native path/types/enclosing bindings; they do not delete the main trigger.
+
+On the baseline, both main builds succeeded and both corresponding probes
+retained no transformation. The exact recovered serialized condition was:
+
+```fhirpath
+($this.jurisdiction.coding.where($this.code.where($this = 'unsafe').exists() and $this.system.where($this = 'urn:example:source').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())
+```
+
+Strict target-release typed-instance evaluation returned exactly one Boolean
+for this condition: changed target Coding without the URI → **true**;
+configured source Coding without the URI → **false**. These are measured
+baseline observations of this newly emitted condition, not whole-profile
+validity or a permanent baseline behavior guarantee.
+
+| Direction | Baseline combined identity change | Corrected active identity changes | Identity-preserving imported control | Active source-nonmember control |
+|-|-|-|-|-|
+| R5 → R4 | Construction succeeds; changed/no URI true, source/no URI false | Construction rejects all four changes; probe retains map | Construction succeeds; one retained map | Construction succeeds; no retained map |
+| R5 → R4B | Construction succeeds; changed/no URI true, source/no URI false | Construction rejects all four changes; probe retains map | Construction succeeds; one retained map | Construction succeeds; no retained map |
+
+The four corrected cases are combined system/code, code-only, system-only
+and system-version-only changes. Each zero-trigger probe retains the
+applicable transformation and its map provenance, while the active main
+build rejects and leaves persisted triggers unchanged. No affected corrected
+profile exists to recover or publish; the intentional output delta is
+construction rejection, **not** a rewritten target predicate.
+
+The exact diagnostic assertions retain profile
+`http://hl7.org/fhir/5.0/StructureDefinition/profile-ValueSet`, direction
+`R5->R4` or `R5->R4B`, the serialized source/type-use path
+`ValueSet` / `ValueSet.jurisdiction` / `CodeableConcept.coding`, qualified
+trigger `urn:example:source|*#unsafe`, and the independent rule filename/entry.
+The reason is `identity-changing native code mapping`; separate
+`Responsible map provenance` identifies:
+
+| Direction | Map filename | ConceptMap id | ConceptMap canonical | Group/source/target indices |
+|-|-|-|-|-|
+| R5 → R4 | `input/codes/ConceptMap-R5-imported-native-R4.json` | `imported-native-R5-R4` | `http://example.org/ConceptMap/imported-native-R5-R4` | 0/0/0 |
+| R5 → R4B | `input/codes/ConceptMap-R5-imported-native-R4B.json` | `imported-native-R5-R4B` | `http://example.org/ConceptMap/imported-native-R5-R4B` | 0/0/0 |
+
+Input paths above use `/` for display. The diagnostic ends:
+`Regenerate load, compare, outcomes, and export after resolving the source-value representation.`
+
+Both active controls retain the baseline expression and unchanged
+key/severity/human/source. Unsafe missing/wrong URI → false; exact URI →
+true; safe-only/absent → true; mixed repetitions without URI → false
+(with the exact URI → true). The profile's own `ImplicitRules` remains null.
+The nonmember control keeps the unsafe source in a sibling outer include,
+not the mapped inner scope, so its active trigger is enforced without
+borrowing that imported transformation.
+
+Committed tests `ImportedIdentityChangingNativeMapBlocksConstruction`,
+`ImportedIdentityPreservingNativeMapEnforcesImplicitRules` and
+`ImportedSourceNonmemberDoesNotAcquireNativeTransformation` assert this
+matrix. Target member/ValueSet-version/system-version and actual-context
+controls, extension isolation, and reversed/repeated evidence tests also
+preserve scope-local applicability and deterministic responsible provenance.
+Existing `NoFeatureDefinitionsMatchCharacterizedOutput` and
+`AssertOnlyConstraintDelta` compare constructed/serialized definitions in
+memory after date normalization (removing only the added unsafe constraint
+for the latter). Those focused checks preserve naming, cardinalities, slice
+URLs, extension attachment and unaffected serialization; they are not a
+claim of broader Release/full-suite verification. This correction adds no
+public API, persisted format, dependency or CLI change.
 
 ## Measured Filter Artifact Diff
 
@@ -876,3 +1016,4 @@ Pieces of the export pipeline this spec claims to cover:
 
 ---
 *Legacy exporter references verified at `e36315a1c9d16450ba81457e4f888eff78d4ae42`; safety construction/preflight contracts and measured artifact deltas rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*
+*Shared imported applicability, responsible-map diagnostics and the measured R4/R4B matrix checked against `f7c00a6b4c96c092e0912e29610dddca16e46d4f` and its committed assertions on `2026-11-06`.*
