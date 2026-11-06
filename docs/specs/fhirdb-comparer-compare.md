@@ -71,6 +71,43 @@ flowchart TD
     RunSD --> End
 ```
 
+## Safety State at Reset and Pair Boundaries
+
+`DbMappingClasses` owns `DbUnsafeCodeInputState` and
+`DbUnsafeCodePairState`. Comparison/outcome resets never drop those state
+tables. Mutating lifecycle helpers may create empty state tables, but
+never synthesize completed input or outcome metadata.
+
+| Boundary | Persisted transition |
+|-|-|
+| Content reset | Invalidate inputs, comparisons, and safety outcomes before deleting package/terminology/structure/support content. |
+| Structure comparison reset | `DbComparisonClasses.DropTables` invalidates every pair's comparison and safety-outcome revisions before the first destructive operation. |
+| Pair starts | `StructureComparer` calls `BeginComparison` and captures the completed input revision if available. |
+| Pair finishes | After `applyCachedChanges`, `CompleteComparison` records a fresh comparison revision only if the input dependency is still current. |
+| Failed comparison/flush | No new comparison or outcome completion; errors propagate. |
+| Structure outcome reset | `DbOutcomeClasses.DropTables` invalidates all safety-outcome stamps and recreates triggers, retaining valid comparison revisions for the next evaluation. |
+| Vocabulary-only reset/work | Does not invalidate or certify structure comparison/safety results. |
+
+`specificPairs` and `maxStepSize` limit **regeneration**, not the preceding
+family-wide destructive reset. Previously current pairs outside the filter
+lose certification as well as comparison rows. Only selected, successfully
+flushed pairs regain it. Likewise, filtered structure outcome generation
+resets the whole structure outcome family; unprocessed pairs remain
+incomplete even if their comparison stamps are still valid.
+
+The narrow comparison stamp protects actual element-map provenance:
+`DbElementOutcomeTarget.ElementComparisonKey` →
+`DbElementComparison.ElementMappingKey` → authored `DbElementMapping.Key`.
+No structure-map key is substituted for that last link. Requiring the
+current input revision prevents outcomes from being certified over
+comparisons made before map reload. This bookkeeping does not change
+comparison relationships, transitive selection, or terminology semantics.
+
+Tests cover failed inserts and invalidation even when the first drop fails;
+last-write completion is not a promise of an all-or-nothing transaction.
+See `UnsafeCodeOutcomeTests` and
+`UnsafeCodePipelineTests.ActualFilteredRegenerationInvalidatesOtherPersistedPairs`.
+
 ## Dependencies & Interactions
 
 ### Called Methods
@@ -209,4 +246,4 @@ comparer.Compare(
    - Returning a summary object could make the number of processed pairs and written rows observable to callers without requiring log parsing.
 
 ---
-*Verified against commit `d02100974b2dc1b05ecf1af69c29095e6973f4c8` on `2026-06-04`.*
+*Legacy comparer references verified at `d02100974b2dc1b05ecf1af69c29095e6973f4c8`; reset/revision bookkeeping rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*

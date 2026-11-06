@@ -7,7 +7,7 @@
 ## Invocation & Preconditions
 
 - Direct callers from `ProcessCommand`: `outcomes` calls `GenerateOutcomes()` (`XVerProcessor.cs:372-382`); `outcomes-vs` calls `GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet)` (`XVerProcessor.cs:384-394`); `outcomes-sd` calls `GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource)` (`XVerProcessor.cs:396-405`); the default full pipeline calls `LoadDatabase`, map/substitution/type loaders, `CompareInDatabase`, `GenerateOutcomes`, and `ExportOutcomes` (`XVerProcessor.cs:421-428`).
-- Each `outcomes*` command runs `LoadDatabase`, `LoadFhirCrossVersionMaps`, `LoadExtensionSubstitutions`, and `LoadFhirTypeValueSets` only when `_config.ReloadDatabase == true` (`XVerProcessor.cs:372-405`). The default full pipeline always runs those loaders and `CompareInDatabase` first (`XVerProcessor.cs:421-427`).
+- With `ReloadDatabase == true`, each `outcomes*` command runs `LoadDatabase`, `LoadFhirCrossVersionMaps`, `LoadExtensionSubstitutions`, and `LoadFhirTypeValueSets`, then **comparison of the same requested family**, then outcomes. `outcomes-vs` remains vocabulary-only. The default pipeline runs loaders → comparison → outcomes → export (`XVerProcessor.ExecuteOutcomeCommand` / `ProcessCommand`).
 - `GenerateOutcomes` calls `LoadDatabase(false)` if `_db is null` and throws if `_db` is still null (`XVerProcessor.cs:619-627`).
 - Preconditions: loaded DB, populated comparison rows, cross-version maps, extension substitutions, and FHIR-type ValueSets. The outcome generators read comparison/content tables, and `ElementOutcomeGenerator` directly reads `DbExtensionSubstitution` rows (`ElementOutcomeGenerator.cs:262-301`).
 
@@ -35,13 +35,98 @@ public void GenerateOutcomes(
 - Structure generation also records cross-version **cardinality-only** extension needs alongside data-type extensions: the `DbElementOutcome.RequiresCardinalityDefinition` / `RequiresCardinalitySlice` flags (`DbOutcomeClasses.cs:438-439`), the parsed `CardinalityExtensionContexts` list (`DbOutcomeClasses.cs:582-600`), `GetCombinedContexts()` which unions extension and cardinality contexts (`DbOutcomeClasses.cs:602-630`), and the per-target `DbElementOutcomeTarget.CardinalityContext*` fields (`DbOutcomeClasses.cs:825-828`).
 - The enum declarations are documentation/vocabulary for now; the row classes do not have an `OutcomeAction` column and generation does not assign the enum constants (`DbOutcomeClasses.cs:7-144,292-832`).
 
+## Unsafe-Code Safety Outcomes
+
+After final structure/element outcome persistence and content-reference
+post-processing, `StructureOutcomeGenerator` invokes
+`UnsafeCodeOutcomeGenerator.GenerateForPair`. It consumes persisted
+annotations, authored evidence, rules, and the actual contributing
+element-comparison/mapping contexts. It does not reread configuration.
+
+For one qualified source code, contributing directed context, and destination:
+
+```text
+A = true annotation on the applicable directed element target
+N = relevant authored explicit noMap: true
+M = rules matching source system/code/effective source system version
+eligible(r) = !r.noMapOnly || N
+exempt = an eligible rule excludes the destination release
+         or an applicable authored relationship
+unsafe = !exempt && ((A && N) || any eligible rule in M)
+```
+
+Eligibility is checked **before** exemptions: an ineligible `noMapOnly`
+entry supplies neither a trigger nor an exemption. Eligible exemptions
+override both positive mechanisms for this code/context/destination.
+Unrelated mappings, scopes, codes, targets, or reverse directions cannot
+cancel another trigger; surviving contexts are unioned. Missing maps and
+inferred failure are not explicit `N`. Configuration can independently
+qualify a code without either annotation or no-map, unless gated by
+`noMapOnly`.
+
+All identities use exact ordinal matching. Source code-system version,
+ValueSet canonical version, destination full FHIR release, and generated IG
+version remain separate. Version-qualified canonicals are split into URL
+and version. Wildcard/exact overlaps are normalized into disjoint version
+matches: an exact-version exemption subtracts that version from a wildcard
+trigger. Unknown instance version cannot satisfy an exact-version entry,
+but remains covered by wildcard rules unless excluded. Only authoritative,
+applicable source context can supply a missing version.
+
+### Resource uses and qualification
+
+Traversal covers actual resource uses of inherited/nested datatypes,
+choices, repeated elements, and content references, including cycles.
+`Coding`, `CodeableConcept.coding`, `CodeableReference.concept`, and
+quantity-style system/code carriers retain qualified identities without
+requiring a primitive binding. Primitive codes require authoritative,
+unique source binding qualification. A proven different system/version or
+non-member is a non-match; missing/ambiguous qualification for an applicable
+candidate is a blocking outcome error, **not** a presumed safe value.
+Errors identify element, direction, candidate identity, and the missing
+binding/scope context. Resource-valued child uses have their own owners;
+references are not followed to external resources.
+
+`DbUnsafeCodeTrigger` stores owning structure outcome, directed context,
+semantic source/type-use path (`SourcePathJson`), qualified identity,
+source version, wildcard/exact version match (`IsWildcardVersion`,
+`VersionsJson`), and evidence/rule/annotation provenance keys. Arbitrary
+versions and paths use lossless JSON, not comma splitting. No FHIRPath is
+stored. Rendering is deferred to the typed construction boundary described
+in [export](./xver-exporter-export.md#typed-construction-and-instance-invariants).
+
+### Completion and failure
+
+Before selected structure outcomes begin, `BeginOutcomes` requires a
+completed compatible input and a successful comparison revision against
+that input. Old element-map provenance is rejected. After triggers flush,
+`CompleteOutcomes` rechecks dependencies and writes
+`OutcomeInputRevision`, `OutcomeComparisonRevision`, and
+`OutcomeFormatVersion` **last**. A successful evaluation with **zero
+triggers** writes the same completion stamp; it is different from never
+evaluated, failed, stale, or incompatible state.
+
+Structure outcome reset invalidates all pair outcome stamps and recreates
+the trigger table but preserves comparisons. A pair filter does not narrow
+this destructive reset: excluded pairs stay incomplete. Insert errors or
+mid-pass dependency changes propagate without completion; partial rows
+cannot certify readiness. Vocabulary-only outcomes neither require safety
+prerequisites nor reset existing structure triggers/stamps.
+
+`PairFacts` loads rules, evidence, annotations, elements, types, comparisons,
+outcomes, and binding data once per pair into dictionaries/lookups
+(`UnsafeCodeOutcomeGenerator.cs:241-283`); binding/context/evidence
+resolution is memoized. The rule/element classifier loops use these
+in-memory collections rather than issuing a query for every rule at every
+element. This is a query-placement inspection, not a timing claim.
+
 ## Algorithm
 
 1. **Dispatch in `XVerProcessor.GenerateOutcomes`** (`XVerProcessor.cs:619-660`): lazy-load DB, throw if absent, construct `OutcomeGenerator`, and dispatch by `artifactFilter` into vocabulary, structures, or both.
 2. **Inside `OutcomeGenerator.GenerateOutcomes`** (`OutcomeGenerator.cs:32-53`): drop/create selected tables, instantiate `ValueSetOutcomeGenerator` when `processValueSets`, and instantiate `StructureOutcomeGenerator` when `processStructures`.
 3. **`ValueSetOutcomeGenerator.CreateOutcomesForValueSets`** (`ValueSetOutcomeGenerator.cs:42-77`): load packages ordered by version, build closer-first stepped pairs in both directions, apply `specificPairs`, then per pair run `buildOutcomes(packagePair)` and `applyCachedChanges(packagePair)`.
 4. **ValueSet `buildOutcomes`** (`ValueSetOutcomeGenerator.cs:112-735`): load source/target ValueSets, concepts, comparisons, and concept comparisons; skip non-expandable/excluded URLs; create no-map outcomes for source ValueSets with no usable target; otherwise compute concept coverage across all targets, determine whether a generated cross-version definition is needed, and emit ValueSet plus concept outcomes.
-5. **`StructureOutcomeGenerator.CreateOutcomesForStructures`** (`StructureOutcomeGenerator.cs:64-110`): use the same closer-first pair schedule, create an `ElementOutcomeGenerator` per pair, run structure `buildOutcomes`, flush caches, run `elementOutcomeGenerator.DoPostProcessing(packagePair)`, and flush again.
+5. **`StructureOutcomeGenerator.CreateOutcomesForStructures`**: use the same closer-first pair schedule, validate/begin safety dependencies, create an `ElementOutcomeGenerator` per pair, run structure `buildOutcomes`, flush caches, run `elementOutcomeGenerator.DoPostProcessing(packagePair)`, flush again, then classify/persist safety triggers and complete the pair.
 6. **Structure `buildOutcomes`** (`StructureOutcomeGenerator.cs:158-580`): load structures, roots, and structure comparisons; skip primitives; create tracking records for mapped/no-map structures; call `ElementOutcomeGenerator.ProcessSourceStructure`; then emit mapped or no-map `DbStructureOutcome` rows.
 7. **`ElementOutcomeGenerator` constructor** (`ElementOutcomeGenerator.cs:124-301`): load source/target elements, comparisons, type comparisons, types, resource type sets, Basic/Extension path lookup dictionaries, and `_extensionSubstitutionsByElementId`. Extension substitutions include source-sequence-specific and global rows; exact IDs, cleaned `[x]` IDs, expanded context IDs, and cleaned context IDs all become keys (`ElementOutcomeGenerator.cs:262-301`).
 8. **Element classifier** (`ElementOutcomeGenerator.cs:435-1704`): `ProcessSourceStructure` filters ignorable elements, computes mapping completeness, checks required ValueSet binding mappings, then `createOutcomes` walks elements in resource order and decides target rows, cross-version requirement, Basic/Extension replacements, extension substitutions, alternate-reference/canonical substitutions, legal contexts, and final `DbElementOutcome` fields. `createOutcomes` also decides cross-version **cardinality-only** extensions: when a source element permits more repetitions than its mapped target it sets `requiresCardDefinition` (`ElementOutcomeGenerator.cs:967-973`), propagates `RequiresCardinalitySlice` to children of a cardinality parent/ancestor (`ElementOutcomeGenerator.cs:975-988`), fills the per-target `CardinalityContext*` fields at each `DbElementOutcomeTarget` creation path (`ElementOutcomeGenerator.cs:640-643,720-723,920-923`), and stores `RequiresCardinalityDefinition`/`RequiresCardinalitySlice` plus the distinct `CardinalityExtensionContexts` on the summary row (`ElementOutcomeGenerator.cs:1609-1610,1645`).
@@ -116,7 +201,7 @@ Every rule above has a source citation. `cited` means the rationale is directly 
 ## Failure Modes & Edge Cases
 
 - `GenerateOutcomes` throws when `LoadDatabase(false)` fails to populate `_db` (`XVerProcessor.cs:619-627`).
-- Outcome generators do not validate that comparison rows exist; a DB with empty comparison tables will still drop/recreate outcome tables and then produce empty or mostly no-map outputs depending on source content (`OutcomeGenerator.cs:38-53`; `ValueSetOutcomeGenerator.cs:122-140`; `StructureOutcomeGenerator.cs:179-187`).
+- Structure safety requires current completed input/comparison revisions before evaluation; an empty table is not proof of readiness. Vocabulary-only generation retains its existing comparison behavior and has no structure-safety prerequisite.
 - Re-running `outcomes*` always wipes the selected outcome tables first (`OutcomeGenerator.cs:38-40`).
 - Extension-substitution conflicts are silent; the last dictionary write for a key wins (`ElementOutcomeGenerator.cs:269-301`).
 - Source id/extension/modifierExtension elements are skipped, not written as explicit `IsElementId` / `IsExtension` rows (`ElementOutcomeGenerator.cs:347-357,412-414`).
@@ -157,4 +242,4 @@ Every rule above has a source citation. `cited` means the rationale is directly 
 - Related `ConfigXVer` options: `ReloadDatabase`, `XverArtifactVersion`, `CrossVersionMapSourcePath`.
 
 ---
-*Verified against commit `e36315a1c9d16450ba81457e4f888eff78d4ae42` on `2026-06-12`.*
+*Legacy outcome references verified at `e36315a1c9d16450ba81457e4f888eff78d4ae42`; safety outcomes and reload routing rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*

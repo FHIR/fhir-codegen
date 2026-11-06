@@ -654,15 +654,15 @@ public class UnsafeCodeProfileTests
 
         profile.ImplicitRules.ShouldBeNull();
         AssertOnlyConstraintDelta(built, targetIndex);
-        if (targetIndex == 0)
+        // Measured output is visible in the detailed test run, not an illustrative golden.
+        Console.WriteLine("MEASURED_CONSTRAINT_DIFF " + JsonSerializer.Serialize(new
         {
-            // Measured output is visible in the detailed test run, not an illustrative golden.
-            Console.WriteLine("MEASURED_CONSTRAINT_DIFF " + JsonSerializer.Serialize(new
-            {
-                canonical = profile.Url,
-                append = JsonNode.Parse(profile.ToJson())!["differential"]!["element"]![0]!["constraint"],
-            }));
-        }
+            target = pair.TargetPackage.PackageVersion,
+            canonical = profile.Url,
+            expressionChars = expressions.Sum(expression => expression.Length),
+            implications = expressions.Sum(expression => expression.Split(" implies ", StringSplitOptions.None).Length - 1),
+            append = JsonNode.Parse(profile.ToJson())!["differential"]!["element"]![0]!["constraint"],
+        }));
     }
 
     private static void AssertOnlyConstraintDelta(StructureFhirExporter.BuiltDefinitions built, int targetIndex)

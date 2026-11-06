@@ -12,8 +12,10 @@ already-computed `DbStructureOutcome` / `DbValueSetOutcome` /
 for each one.
 
 `XVerExporter.Export` is a thin orchestrator. It instantiates an
-`IgExporter` to build the IG package skeletons (one cross-version IG per
-package pair, plus one validation IG per allowed package), then dispatches
+`IgExporter`, computes its side-effect-free schedule, and validates every
+scheduled structure pair's persisted safety completion before materializing
+IG package skeletons (one cross-version IG per package pair, plus one
+validation IG per allowed package), then dispatches
 to four content exporters that fill those skeletons with FHIR resources
 and page content:
 
@@ -135,22 +137,24 @@ public XVerExporter(IDbConnection db, ConfigXVer config)
 
 ### Exceptions
 
-`XVerExporter.Export` itself does not throw. Failures originate in the
-component exporters — see *Error Handling* below.
+`XVerExporter.Export` rejects missing/incomplete/incompatible/stale safety
+state before any IG writes when structures are requested. Component
+exporters can also throw — see *Error Handling* below.
 
 ## Detailed Algorithm
 
-The body of `XVerExporter.Export` is small enough to quote verbatim
-(`XVerExporter.cs:69-118`):
+The orchestration in `XVerExporter.Export` is:
 
 1. **Construct `IgExporter`** with `_db`, `_loggerFactory`, `_outputPath`,
    `_crossVersionSourcePath`, `this` (the `XVerExporter` instance, so the
    child exporters can read its `_crossDefinitionVersion` and version
    knobs), and `_config`.
-2. **Call `igExporter.CreateInitialXVerIgs(includeIgScripts, maxStepSize, specificPairs)`**
-   (`IgExporter.cs:610`). This builds the package list, builds the
-   `(source, target)` pair list with the stepped algorithm described
-   below, and emits one `XVerIgExportTrackingRecord` per cross-version
+2. **Build schedule, preflight, then materialize.** Call
+   `igExporter.BuildExportSchedule(maxStepSize, specificPairs)`. If
+   `processStructures`, call `UnsafeCodeInputStore.RequireExportReady` on
+   **all** `schedule.PackagePairs`. Only then call the internal
+   `CreateInitialXVerIgs(schedule, includeIgScripts)` overload. This emits
+   one `XVerIgExportTrackingRecord` per cross-version
    pair plus one `ValidationIgExportTrackingRecord` per allowed package,
    wrapped in an `XVerExportTrackingRecord`.
 3. **Vocabulary phase (if `processVocabulary`):**
@@ -184,11 +188,12 @@ The body of `XVerExporter.Export` is small enough to quote verbatim
 The four content exporters all take the same `XVerExportTrackingRecord`
 argument and iterate `tr.XVerIgs`. They never iterate validation IGs.
 
-### `IgExporter.CreateInitialXVerIgs` package-pair generation
+### `IgExporter.BuildExportSchedule` package-pair generation
 
 This is the only non-trivial scheduling decision in the pipeline and
 worth surfacing here because every downstream exporter walks the
-resulting pair list (`IgExporter.cs:610-684`):
+resulting pair list. The public `CreateInitialXVerIgs` signature is retained
+as a delegating wrapper; orchestration uses the schedule overload:
 
 1. Load `_packages` via `DbFhirPackage.SelectList(..., orderByProperties: [nameof(DbFhirPackage.PackageVersion)])`.
 2. `maxStepSize ??= _packages.Count - 1`.
@@ -201,7 +206,8 @@ resulting pair list (`IgExporter.cs:610-684`):
      - If `_allowedExportVersions` contains `sourcePackage.DefinitionFhirSequence`
        *and* (`specificPairs` is null or contains the reverse pair):
        append `FhirPackageComparisonPair(targetPackage, sourcePackage)`.
-4. For each pair in the resulting list, call `createInitialXVerIg(pair, includeScripts)`.
+4. Record the resulting pair list in the schedule. At materialization,
+   for each pair call `createInitialXVerIg(pair, includeScripts)`.
    Each `createInitialXVerIg` (`IgExporter.cs:1830`) also seeds a per-IG
    `.gitignore` at the IG root, copied from
    `<crossVersionSourcePath>/input/ig-support/gitignore.txt` when that file
@@ -210,11 +216,30 @@ resulting pair list (`IgExporter.cs:610-684`):
    `_allowedExportVersions`) if `specificPairs` is non-null.
 6. For each package in `_packages`: skip unless it's in
    `_allowedExportVersions` (and in `targetFhirVersions` when filtering);
-   otherwise call `createInitialValidationIg(package, includeScripts)`.
+   otherwise add it to the validation schedule and, at materialization,
+   call `createInitialValidationIg(package, includeScripts)`.
 
 The stepped algorithm means closer-version pairs are emitted first
 within the tracking record's `XVerIgs` list. Downstream exporters
 preserve that order.
+
+Scheduling and `IgExporter` construction create no output directory.
+Preflight uses exactly this schedule, not a second approximation of
+version flags, pair filters, or step windows. It checks compatible feature
+schema/format, completed input revision, comparison revision against that
+input, and safety-outcome input/comparison/format stamps. A completed
+zero-trigger result is valid; absent rows/stamps are not proof of safety.
+Failure is read-only and protects existing IG sentinel content from the
+materializer's destructive directory reset as well as preventing fresh
+output creation. A later invalid pair blocks the entire scheduled structure
+export before even vocabulary output in a combined run. Vocabulary-only
+export bypasses this prerequisite and never creates missing safety state.
+
+Old caches are not migrated or automatically recomputed. Diagnostics name
+the existing load → compare → outcomes → export recovery sequence.
+Unrelated database errors retain their cause. Explicit reload-enabled
+`export` runs those prerequisites in `XVerProcessor` before entering this
+method; a non-reload export remains an error on stale state.
 
 ### `IgExporter` configuration loading
 
@@ -242,7 +267,9 @@ things relevant to `Export`:
 ```mermaid
 flowchart TD
     Start([XVerExporter.Export]) --> NewIg[new IgExporter]
-    NewIg --> CreateIgs[igExporter.CreateInitialXVerIgs<br/>builds tr.XVerIgs and tr.ValidationIgs]
+    NewIg --> Schedule[BuildExportSchedule<br/>no writes]
+    Schedule --> Preflight[If structures: validate ALL scheduled pairs]
+    Preflight --> CreateIgs[CreateInitialXVerIgs schedule overload<br/>builds tr.XVerIgs and tr.ValidationIgs]
 
     CreateIgs --> Vocab{processVocabulary?}
     Vocab -->|yes| VFhir[VocabularyFhirExporter.Export<br/>CodeSystem + ValueSet + ConceptMap JSON]
@@ -256,6 +283,199 @@ flowchart TD
     SPage --> Final
     Final --> End([Done])
 ```
+
+## Typed Construction and Instance Invariants
+
+`StructureFhirExporter.BuildDefinitions` constructs definitions in memory:
+extensions first, then profiles. `BuildExtensions`/`BuildProfiles` share
+`ProfileRepresentationIndex` decisions with the actual differential
+builder. Serialization, directory writes, file records, and logging remain
+in the public export shell. Construction order, `GetName` allocation,
+generated IDs/URLs, and `EdOutcomeMapTargets` mapping provenance are
+preserved.
+
+Typed steps describe native members, narrowed choices, generated or
+modifier extensions, fixed child-extension URLs, value types, repeated
+content references, and resource-owner transitions. The index records
+native fields even when unchanged fields are omitted from the differential,
+and composes datatype locations at every actual use site. Extension
+attachments use the same decisions as construction, including cardinality
+overflow, Basic fallback, parent/nested contexts, and substitutions; the
+renderer never guesses a URL from an element suffix.
+
+`UnsafeCodeInputStore.ReadConstraintPlans` reads persisted triggers and
+provenance once per pair at `BuildProfiles` completion
+(`StructureFhirExporter.cs:1324-1327`, `DbUnsafeCodeClasses.cs:162-190`).
+`UnsafeCodeConstraintEmitter` has no database or configuration reader and
+does not reclassify policy or exclusions. It groups semantic occurrences,
+unions observable representations, sorts/deduplicates predicates, and
+appends error-severity invariants to the existing resource-root
+differential. Stable `xv-unsafe-code-<digest>` keys use semantic profile,
+direction, owner, and source-path identities, never DB keys or timestamps;
+key collisions fail explicitly.
+
+Each existential trigger implies that the **containing instance's**
+`implicitRules` contains exactly
+`https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code`.
+Safe-only, exempt, and absent-code instances pass this invariant without
+the URI. Unsafe-only or mixed repetitions fail with missing/wrong URI and
+pass with the exact URI. Coding system/version/code predicates stay on the
+same occurrence. Collection-safe `where(...).exists()` yields a Boolean,
+not empty optional-value equality; `first()` cannot mask unsafe repetitions.
+Primitive metadata-only `_op.extension` remains reachable without scalar
+`op`.
+
+Recursive selectors include the initial occurrence and descendants.
+Resource-valued transitions use symbolic closure over the finite union
+of typed owner edges, not expanded cycle trails. Each reached owner is
+filtered/checked using **its own** `implicitRules`; a parent cannot satisfy
+a child, nor vice versa. External resource references are not followed.
+Same/mutual recursion and owner-closure growth are covered by existing
+deep instance tests.
+
+An applicable identity that cannot be qualified is a blocking **outcome**
+error. An active classified trigger that cannot be projected precisely is
+a blocking **export construction** error: missing representations,
+identity-erasing native transformations, erased versions, ambiguous
+primitive systems, and opaque external substitutions are not permission to
+broaden or omit a constraint. Diagnostics include profile canonical,
+direction, source element/type-use path, qualified code, and provenance.
+State preflight happens before all IG writes; projection diagnostics occur
+during definition construction and are not a promise of transactional
+rollback for every later export failure.
+
+The StructureDefinition's own `implicitRules` remains **unset**. Passing
+this new invariant does not assert that all bindings/cardinalities or
+other constraints pass, and does not relax them. The separately approved
+four R4B minima below are the sole characterized cardinality exception.
+R4/R4B tests evaluate expressions recovered from serialized profiles
+against target-release typed instances; the existing R3 conversion branch
+also preserves constraint key/severity/human/expression/source.
+
+## Measured Filter Artifact Diff
+
+Re-measured on `2026-11-05`, after the owner-closure and explicit-primary-key
+fixes, by
+`UnsafeCodeProfileTests.NativeAndExtensionOccurrencesEnforceExactImplicitRules`.
+The fixture runs production load → comparison → outcomes → construction
+for R5 → R4 (`4.0.1`) and R5 → R4B (`4.3.0`), with annotations plus the
+configured `filter-operator#exists` rule. Both serialized expressions
+still contain **2,338 characters and nine implications**.
+
+These are complete feature deltas against the no-feature artifacts
+(`CreateNoFeatureInputs`); `AssertOnlyConstraintDelta` removes only the new
+root constraint and normalizes dates, then compares every profile and
+extension field to the characterized JSON. The `extension` selectors below
+use the actual constructed canonical, not an illustrative attachment.
+The native `.value` alternative comes from the authored secondary element
+mapping, not a new inference about code spelling.
+
+R5 → R4, `StructureDefinition-profile-ValueSet.json`, canonical
+`http://hl7.org/fhir/5.0/StructureDefinition/profile-ValueSet`, append at
+`differential.element[id = "ValueSet"].constraint` (previously absent):
+
+```diff
++ {
++   "key": "xv-unsafe-code-f35715412d78ebd024235024db504128",
++   "severity": "error",
++   "human": "Using an unsafe cross-version code requires the omitted-mandatory-interversion-code implicit rule.",
++   "expression": "($this.compose.include.filter.extension.where(url = 'http://hl7.org/fhir/5.0/StructureDefinition/extension-ValueSet.compose.include.filter.op').value.ofType(code).where($this.where($this = 'exists').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.extension.where(url = 'http://hl7.org/fhir/5.0/StructureDefinition/extension-ValueSet.compose.include.filter.op').value.ofType(code).where($this.where($this = 'unresolved').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.extension.where(url = 'http://hl7.org/fhir/5.0/StructureDefinition/extension-ValueSet.compose.include.filter.op').value.ofType(code).where($this.where($this = 'unsafe-demo').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.op.where($this.where($this = 'exists').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.op.where($this.where($this = 'unresolved').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.op.where($this.where($this = 'unsafe-demo').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.value.where($this.where($this = 'exists').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.value.where($this.where($this = 'unresolved').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.value.where($this.where($this = 'unsafe-demo').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())",
++   "source": "http://hl7.org/fhir/5.0/StructureDefinition/profile-ValueSet"
++ }
+```
+
+R5 → R4B, same filename/canonical and root selector, complete append:
+
+```diff
++ {
++   "key": "xv-unsafe-code-0bb79cb23c7d30132edb7130fdb68c8e",
++   "severity": "error",
++   "human": "Using an unsafe cross-version code requires the omitted-mandatory-interversion-code implicit rule.",
++   "expression": "($this.compose.include.filter.extension.where(url = 'http://hl7.org/fhir/5.0/StructureDefinition/extension-ValueSet.compose.include.filter.op').value.ofType(code).where($this.where($this = 'exists').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.extension.where(url = 'http://hl7.org/fhir/5.0/StructureDefinition/extension-ValueSet.compose.include.filter.op').value.ofType(code).where($this.where($this = 'unresolved').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.extension.where(url = 'http://hl7.org/fhir/5.0/StructureDefinition/extension-ValueSet.compose.include.filter.op').value.ofType(code).where($this.where($this = 'unsafe-demo').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.op.where($this.where($this = 'exists').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.op.where($this.where($this = 'unresolved').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.op.where($this.where($this = 'unsafe-demo').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.value.where($this.where($this = 'exists').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.value.where($this.where($this = 'unresolved').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists()) and ($this.compose.include.filter.value.where($this.where($this = 'unsafe-demo').exists()).exists() implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())",
++   "source": "http://hl7.org/fhir/5.0/StructureDefinition/profile-ValueSet"
++ }
+```
+
+Both three-extension sets, other profile fields, existing constraints,
+bindings, metadata, ordering, and mapping provenance remain unchanged
+after date normalization against their approved no-feature baselines.
+In particular there is no StructureDefinition-level `implicitRules`.
+
+### Separate approved R4B cardinality delta
+
+The explicit-primary-key insertion correction at
+`88af2c4e4fb0f6f770297f0e1209efc212317af6` has a separately approved
+`accept-cardinality-change` characterization delta, **not** a consequence
+of adding the safety invariant. In the R5 → R4B no-feature
+`profile-ValueSet` (same canonical above), these are the only four changed
+JSON fields:
+
+| `differential.element[id = ...].min` | Before | After |
+|-|-|-|
+| `ValueSet.compose.include.filter.extension` | 1 | 0 |
+| `ValueSet.compose.include.filter.extension:op` | 1 | 0 |
+| `ValueSet.compose.include.filter.value.extension` | 1 | 0 |
+| `ValueSet.compose.include.filter.value.extension:value` | 1 | 0 |
+
+The R4 golden is unchanged. All three R4B extension definitions, every
+other R4B profile field, and other characterized artifact content remain
+unchanged. No additional binding or cardinality relaxation is authorized.
+The invariant's passing result remains only the conditional URI check.
+
+### Many-rule and persisted-stage checks
+
+`UnsafeCodePipelineTests.RepresentativeRuleSetDoesNotDuplicateOutput`
+parses an actual 100-entry configuration, then reloads the same SQLite
+database with 200 reordered/duplicate entries, explicit versus omitted
+defaults, duplicate/reordered exclusion sets, and reversed map targets.
+Both destinations retain **100 normalized rules, 100 triggers, one
+constraint, and 79,595 expression characters**. Shifted outcome keys and
+repeated construction produce identical constraint JSON. Unsafe extension
+instances still require the URI; safe instances do not.
+
+The input-mechanism and configuration-lifetime tests dispose/reopen
+connections to the **same file-backed SQLite database** after each load,
+comparison, outcome generation, and build, constructing fresh services.
+An edit without reload retains policy; a full reload/compare/outcomes
+switches it; removal clears old rules and completes a real zero-trigger
+evaluation. No manually seeded safety-completion stamp substitutes for
+these production stages.
+
+## Compatibility, Public API, and Rollback
+
+Six additive row/helper families are **public**, not internal-only:
+
+| Public partial row | Public generated helper |
+|-|-|
+| `DbUnsafeCodeElementAnnotation` | `DbUnsafeCodeElementAnnotationExtensions` |
+| `DbUnsafeCodeMapEvidence` | `DbUnsafeCodeMapEvidenceExtensions` |
+| `DbUnsafeCodeRule` | `DbUnsafeCodeRuleExtensions` |
+| `DbUnsafeCodeTrigger` | `DbUnsafeCodeTriggerExtensions` |
+| `DbUnsafeCodeInputState` | `DbUnsafeCodeInputStateExtensions` |
+| `DbUnsafeCodePairState` | `DbUnsafeCodePairStateExtensions` |
+
+They expose scalar/serialized persisted data and generated SQLite
+create/drop/select/insert/update helpers under the existing generator
+visibility contract. Policy, selector, construction, and lifecycle
+services remain internal; no existing public member is removed.
+These are accepted additive NuGet API/schema additions, while the
+conditional validation invariant and the four approved R4B minima are
+observable generated-output changes requiring release notes/consumer
+compatibility review. No new dependency or CLI option is introduced.
+
+Regenerate content → maps → comparisons → outcomes → exports with the
+new binary. In particular databases produced before the explicit-key fix
+can contain detached references even if tables exist; they require
+regeneration, not automatic migration. Old/missing/incompatible safety
+schema is rejected on structure export.
+
+For rollback, restore the previous binary and its matching pre-change
+database/artifacts together, or regenerate with that binary. Do not mix
+feature completion metadata or new generated row consumers with an older
+assembly, nor retain stale post-change profiles while claiming the old
+validation contract. Rolling back removes enforcement and the approved
+output delta; it is not equivalent to exempting a code in a newly loaded
+policy.
 
 ## Data Models
 
@@ -374,35 +594,33 @@ roughly of the form:
 
 ```text
 {OutputDirectory}/
-├── fhir/                                          # set up by IgExporter
-│   ├── hl7.fhir.uv.xver-r4.r5/                   # one tree per cross-version pair
-│   │   ├── ig.ini
-│   │   ├── input/
-│   │   │   ├── ImplementationGuide-*.json
-│   │   │   ├── includes/menu.xml
-│   │   │   ├── pagecontent/
-│   │   │   │   ├── index-vs.md                   # VocabularyPageExporter
-│   │   │   │   ├── lookup-vs-*.md                # VocabularyPageExporter
-│   │   │   │   ├── index-resources.md            # StructurePageExporter
-│   │   │   │   ├── index-types.md                # StructurePageExporter
-│   │   │   │   └── lookup-{resource|type}-*.md   # StructurePageExporter
-│   │   │   ├── vocabulary/
-│   │   │   │   ├── CodeSystem-*.json             # VocabularyFhirExporter
-│   │   │   │   └── ValueSet-*.json               # VocabularyFhirExporter
-│   │   │   ├── vocab-maps/
-│   │   │   │   └── ConceptMap-*.json             # VocabularyFhirExporter
-│   │   │   ├── extensions/
-│   │   │   │   └── StructureDefinition-ext-*.json # StructureFhirExporter
-│   │   │   ├── profiles/
-│   │   │   │   └── StructureDefinition-*.json    # StructureFhirExporter
-│   │   │   ├── resource-maps/
-│   │   │   │   └── ConceptMap-*.json             # StructureFhirExporter
-│   │   │   └── element-maps/
-│   │   │       └── ConceptMap-*.json             # StructureFhirExporter
-│   │   └── package.json
-│   ├── hl7.fhir.uv.xver-r5.r4/                   # reverse direction
-│   └── hl7.fhir.uv.xver-validation-r5/           # per-version validation IG
-└── ...
+├── hl7.fhir.uv.xver-r4.r5/                   # one tree per cross-version pair
+│   ├── ig.ini
+│   ├── input/
+│   │   ├── ImplementationGuide-*.json
+│   │   ├── includes/menu.xml
+│   │   ├── pagecontent/
+│   │   │   ├── index-vs.md                   # VocabularyPageExporter
+│   │   │   ├── lookup-vs-*.md                # VocabularyPageExporter
+│   │   │   ├── index-resources.md            # StructurePageExporter
+│   │   │   ├── index-types.md                # StructurePageExporter
+│   │   │   └── lookup-{resource|type}-*.md   # StructurePageExporter
+│   │   ├── vocabulary/
+│   │   │   ├── CodeSystem-*.json             # VocabularyFhirExporter
+│   │   │   └── ValueSet-*.json               # VocabularyFhirExporter
+│   │   ├── vocab-maps/
+│   │   │   └── ConceptMap-*.json             # VocabularyFhirExporter
+│   │   ├── extensions/
+│   │   │   └── StructureDefinition-ext-*.json # StructureFhirExporter
+│   │   ├── profiles/
+│   │   │   └── StructureDefinition-*.json    # StructureFhirExporter
+│   │   ├── resource-maps/
+│   │   │   └── ConceptMap-*.json             # StructureFhirExporter
+│   │   └── element-maps/
+│   │       └── ConceptMap-*.json             # StructureFhirExporter
+│   └── package.json
+├── hl7.fhir.uv.xver-r5.r4/                   # reverse direction
+└── hl7.fhir.uv.xver-validation-r5/           # per-version validation IG
 ```
 
 The exact directory and file naming is owned by `IgExporter`; the
@@ -417,13 +635,11 @@ outcomes that were classified by `GenerateOutcomes`. The authoritative
 enums live in
 `src/Fhir.CodeGen.Comparison/Models/DbOutcomeClasses.cs` —
 `OutcomeValueSetActionCodes`, `OutcomeValueSetConceptActionCodes`,
-`OutcomeStructureActionCodes`, `OutcomeElementActionCodes`. The
-deep-dive of how those values are assigned (and the decision tree that
-produces them) lives in
-[`xver-generate-outcomes.md`](./xver-generate-outcomes.md); each
-exporter's behavior is then a straightforward switch on the outcome
-value, which the per-exporter sections above describe in their
-algorithm bullets.
+`OutcomeStructureActionCodes`, `OutcomeElementActionCodes`. These name
+conceptual categories; active rows encode decisions through fields/flags,
+not an assigned action enum. The decision tree lives in
+[`xver-generate-outcomes.md`](./xver-generate-outcomes.md); exporters
+consume those persisted fields.
 
 `xver-export-outcomes.md` covers the pipeline-level decisions that drive
 which exporters run; this spec covers what each exporter does given
@@ -471,8 +687,8 @@ are computed).
 
 ## Error Handling
 
-`XVerExporter.Export` itself contains no error handling; the component
-exporters raise exceptions on missing tracking-record state. Notable
+`XVerExporter.Export` propagates safety-preflight errors before writes;
+the component exporters also raise exceptions on missing tracking-record state. Notable
 sites:
 
 - `StructureFhirExporter.Export` throws if the target package's
@@ -514,7 +730,7 @@ sites:
 ### CLI / API entry path
 
 ```text
-fhir-codegen ... xver export    (or  "outcomes"  for the full final pair)
+fhir-codegen ... xver export    ("outcomes" generates but does not export)
   → Program.DoXVer                                            (Program.cs:~345)
     → XVerProcessor.ProcessCommand("export")                  (XVerProcessor.cs:256)
       → XVerProcessor.ExportOutcomes(...)                     (XVerProcessor.cs:557)
@@ -659,4 +875,4 @@ Pieces of the export pipeline this spec claims to cover:
   `IgExporter`.
 
 ---
-*Verified against commit `e36315a1c9d16450ba81457e4f888eff78d4ae42` on `2026-06-12`.*
+*Legacy exporter references verified at `e36315a1c9d16450ba81457e4f888eff78d4ae42`; safety construction/preflight contracts and measured artifact deltas rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*

@@ -12,6 +12,11 @@ Direct callers in `ProcessCommand` are:
 - `compare-vs`: performs the same conditional reload and calls `CompareInDatabase(FhirArtifactClassEnum.ValueSet)` (`XVerProcessor.cs:348-357`).
 - `compare-sd`: performs the same conditional reload and calls `CompareInDatabase(FhirArtifactClassEnum.Resource)` (`XVerProcessor.cs:360-369`).
 - Default full pipeline: always runs `LoadDatabase(_config.ReloadDatabase)`, `LoadFhirCrossVersionMaps()`, `LoadExtensionSubstitutions()`, and `LoadFhirTypeValueSets()` before `CompareInDatabase()`, then continues to outcome generation and export (`XVerProcessor.cs:421-428`).
+- Reload-enabled `outcomes`, `outcomes-sd`, and `outcomes-vs` also run
+  comparison after those four load steps, using respectively both families,
+  structures only, and vocabulary only. Reload-enabled `export` runs both
+  comparison and outcomes before export. `ProcessCommand` uses the shared
+  `ExecuteOutcomeCommand` dispatch seam for this ordering.
 
 Each `compare*` subcommand therefore calls the four load steps first only when `_config.ReloadDatabase == true`; otherwise it assumes an already-loaded database is available. `CompareInDatabase` has a fallback precondition check: if `_db` is `null`, it calls `LoadDatabase(false)` (`XVerProcessor.cs:673-676`), then throws if `_db` is still `null` (`XVerProcessor.cs:678-681`).
 
@@ -50,6 +55,43 @@ When structure comparison is requested, the affected tables are:
 - `DbElementTypeComparison`
 
 The table set comes from `DbComparisonClasses.DropTables` / `CreateTables`, which conditionally drop or create the value-set tables when `forValueSets` is true and the structure tables when `forStructures` is true (`DbComparisonClasses.cs:32-70`).
+
+## Safety Comparison Revisions and Provenance
+
+The comparison algorithm, relationships, and target selection are unchanged.
+Safety classification is a separate outcome pass; annotations and configured
+rules do not change comparison decisions.
+
+`StructureComparer.CompareStructures` calls
+`UnsafeCodeInputStore.BeginComparison` before each directed pair, clearing
+its old comparison/outcome certification. Only after the pair's final
+structure/element/type cache flush does `CompleteComparison` assign a new
+comparison revision against the **completed input revision** captured at
+the start. Missing/incomplete/incompatible inputs, changed dependencies,
+and failed flushes cannot certify the pair. Ordinary comparison can still
+run without a safety snapshot, but it does not manufacture one.
+Vocabulary-only comparison neither requires nor certifies structure safety.
+
+`DbUnsafeCodePairState.InputRevision` and `ComparisonRevision` bind later
+outcomes to the exact map snapshot used by comparison. This is necessary
+because `DbElementOutcomeTarget.ElementComparisonKey` points to
+`DbElementComparison`, whose `ElementMappingKey` must identify the actual
+authored `DbElementMapping.Key`. `ElementComparer` now persists that
+element-map key, not a numerically coincident structure-map key; inferred
+or transitive rows with no contributing explicit element map leave it
+absent. Regenerating outcomes after a map reload **without rerunning
+comparison** is rejected rather than trusting obsolete mapping provenance.
+
+The reset is family-wide even with `specificPairs` or `maxStepSize`:
+all structure comparison/outcome stamps are invalidated before destructive
+deletion; only actually completed pairs receive new revisions. An excluded
+pair is not current just because it has no rows. Outcome resets retain
+comparison revisions; vocabulary-only resets retain structure revisions.
+See [reset bookkeeping](./fhirdb-comparer-compare.md#safety-state-at-reset-and-pair-boundaries).
+
+Recovery is load maps → compare → outcomes → export. Persisted caches from
+before this feature or the explicit-primary-key insertion correction must
+be regenerated; there is no inferred migration or export-time repair.
 
 ## Algorithm
 
@@ -111,4 +153,4 @@ The table set comes from `DbComparisonClasses.DropTables` / `CreateTables`, whic
 - Related `ConfigXVer` options: `ReloadDatabase`.
 
 ---
-*Verified against commit `d02100974b2dc1b05ecf1af69c29095e6973f4c8` on `2026-06-04`.*
+*Legacy comparison references verified at `d02100974b2dc1b05ecf1af69c29095e6973f4c8`; safety revisions and command routing rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*

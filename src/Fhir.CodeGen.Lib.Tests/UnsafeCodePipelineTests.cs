@@ -3,6 +3,7 @@
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
 
+using System.Text.Json;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.CompareTool;
@@ -11,6 +12,8 @@ using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.Outcomes;
 using Fhir.CodeGen.Comparison.XVer;
 using Fhir.CodeGen.Lib.Configuration;
+using Hl7.Fhir.Model;
+using Hl7.Fhir.Serialization;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -20,6 +23,239 @@ namespace Fhir.CodeGen.Lib.Tests;
 [Collection(UnsafeCodeProfileCollection.Name)]
 public class UnsafeCodePipelineTests
 {
+    [Theory]
+    [InlineData(0, "configuration")]
+    [InlineData(1, "configuration")]
+    [InlineData(0, "annotation")]
+    [InlineData(1, "annotation")]
+    [InlineData(0, "combined-exempt")]
+    [InlineData(1, "combined-exempt")]
+    public void LoadCompareOutcomesAndBuildHonorBothInputMechanisms(int targetIndex, string mechanism)
+    {
+        using UnsafeCodeTestFixture fixture = mechanism == "configuration"
+            ? UnsafeCodeTestFixture.CreateNoFeatureInputs(persistDatabase: true) : UnsafeCodeTestFixture.CreateProfileInputs(persistDatabase: true);
+        if (mechanism != "annotation")
+        {
+            fixture.WriteConfiguration(mechanism == "configuration"
+                ? """[{"system":"http://hl7.org/fhir/filter-operator","code":"exists"}]"""
+                : """
+                    [
+                    {"system":"http://hl7.org/fhir/filter-operator","code":"exists"},
+                    {"system":"http://hl7.org/fhir/filter-operator","code":"unsafe-demo","excludedVersion":["4.0.1","4.3.0"]}
+                    ]
+                    """);
+        }
+
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        fixture.ConnectionReopens.ShouldBe(3);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+        fixture.ConnectionReopens.ShouldBe(4);
+        StructureDefinition profile = built.Profiles.ShouldHaveSingleItem().Definition;
+        ElementDefinition.ConstraintComponent[] constraints = UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex);
+        constraints.ShouldHaveSingleItem();
+        string extension = built.Extensions.Single(item => item.Definition.Id == "ext-R5-ValueSet.com.inc.fil.op").Definition.Url;
+        constraints[0].Expression.ShouldContain(extension);
+        foreach ((string? code, bool unsafeCode) in new (string?, bool)[]
+        {
+            (null, false), ("=", false), ("unresolved", mechanism != "configuration"),
+            ("unsafe-demo", mechanism == "annotation"), ("exists", mechanism != "annotation"),
+        })
+        {
+            foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
+            {
+                foreach (bool mixed in new[] { false, true })
+                {
+                    UnsafeCodeTestFixture.EvaluateFilter(constraints, targetIndex, code, uri, extension, mixed)
+                        .ShouldBe(!unsafeCode || uri == UnsafeCodeConstants.ImplicitRules);
+                }
+            }
+        }
+        profile.ImplicitRules.ShouldBeNull();
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void ConfigurationChangesRequireSnapshotRegeneration(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateNoFeatureInputs(persistDatabase: true);
+        fixture.WriteConfiguration("""[{"system":"http://hl7.org/fhir/filter-operator","code":"exists"}]""");
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        string firstRevision = fixture.InputState.CompletedInputRevision!;
+        string firstComparison = fixture.PairState(pair).ComparisonRevision!;
+        string[] initial = Constraints();
+        string[] initialElements = ElementComparisons();
+        Check("exists", false);
+        fixture.WriteConfiguration("""[{"system":"http://hl7.org/fhir/filter-operator","code":"="}]""");
+        Constraints().ShouldBe(initial);
+        Check("exists", false);
+        Check("=", true);
+
+        fixture.WriteConfiguration("{ invalid preflight");
+        Should.Throw<InvalidDataException>(() => fixture.LoadProfileMaps());
+        fixture.InputState.CompletedInputRevision.ShouldBe(firstRevision);
+        fixture.PairState(pair).ComparisonRevision.ShouldBe(firstComparison);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        Constraints().ShouldBe(initial);
+
+        fixture.WriteConfiguration("""[{"system":"http://hl7.org/fhir/filter-operator","code":"="}]""");
+        fixture.LoadProfileMaps();
+        fixture.InputState.CompletedInputRevision.ShouldNotBe(firstRevision);
+        Should.Throw<InvalidOperationException>(() => UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]));
+        Should.Throw<InvalidOperationException>(() => new OutcomeGenerator(fixture.Connection, NullLoggerFactory.Instance)
+            .GenerateOutcomes(processValueSets: false, specificPairs: [pair.SequencePair]));
+        fixture.CompareProfilePair(pair);
+        fixture.PairState(pair).ComparisonRevision.ShouldNotBe(firstComparison);
+        fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
+        fixture.GenerateProfileOutcomes(pair);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        AssertPackageSlotsAndMappedComparisons();
+        ElementComparisons().ShouldBe(initialElements);
+        Check("exists", true);
+        Check("=", false);
+        Constraints().ShouldNotBe(initial);
+        AssertPackageSlotsAndMappedComparisons();
+
+        File.Delete(fixture.ConfigurationFilename);
+        fixture.LoadCompareAndGenerate(targetIndex).SequencePair.ShouldBe(pair.SequencePair);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        DbUnsafeCodeRule.SelectList(fixture.Connection).ShouldBeEmpty();
+        DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldBeEmpty();
+        fixture.PairState(pair).OutcomeFormatVersion.ShouldBe(UnsafeCodeConstants.OutcomeFormatVersion);
+        Constraints().ShouldBeEmpty();
+        Check("=", true);
+        AssertPackageSlotsAndMappedComparisons();
+        fixture.ConnectionReopens.ShouldBeGreaterThan(12);
+
+        string[] Constraints() => UnsafeCodeTestFixture.SerializedConstraints(
+            fixture.BuildDefinitions(pair).Profiles.ShouldHaveSingleItem().Definition, targetIndex)
+            .Select(constraint => constraint.ToJson()).ToArray();
+
+        void Check(string code, bool expected) => UnsafeCodeTestFixture.EvaluateFilter(
+            UnsafeCodeTestFixture.SerializedConstraints(fixture.BuildDefinitions(pair).Profiles.ShouldHaveSingleItem().Definition, targetIndex),
+            targetIndex, code).ShouldBe(expected);
+
+        void AssertPackageSlotsAndMappedComparisons()
+        {
+            List<DbFhirPackage> packages = DbFhirPackage.SelectList(fixture.Connection, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
+            packages.Count.ShouldBe(5);
+            packages.Select(package => package.DefinitionFhirSequence).Distinct().Count().ShouldBe(5);
+            DbStructureComparison.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey,
+                TargetFhirPackageKey: pair.TargetPackageKey).ShouldContain(comparison =>
+                    comparison.SourceStructureKey == fixture.Structure(pair.SourcePackage).Key &&
+                    comparison.TargetStructureKey == fixture.Structure(pair.TargetPackage).Key);
+        }
+
+        string[] ElementComparisons() => DbElementComparison.SelectList(fixture.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            .Select(comparison => comparison.SourceElementId + " -> " + comparison.TargetElementId + " " + comparison.Relationship)
+            .Order(StringComparer.Ordinal).ToArray();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void RepresentativeRuleSetDoesNotDuplicateOutput(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateNoFeatureInputs(persistDatabase: true);
+        string[] entries = [.. Enumerable.Range(0, 100).Select(index =>
+            $$"""{"system":"{{UnsafeCodeTestFixture.FilterSystem}}","code":"configured-{{index:D3}}","excludedRelationship":["equivalent","source-is-narrower-than-target"],"excludedVersion":["1.0.2","3.0.2"]}""")];
+        string? expected = null;
+        int firstOutcomeKey = 0;
+        int triggerCount = 0;
+        int expressionLength = 0;
+        foreach (bool reordered in new[] { false, true })
+        {
+            if (reordered)
+            {
+                foreach (string filename in Directory.GetFiles(Path.Combine(fixture.SourceRoot, "input", "elements"), "*.json"))
+                {
+                    ConceptMap map = new FhirJsonParser().Parse<ConceptMap>(File.ReadAllText(filename));
+                    foreach (ConceptMap.SourceElementComponent element in map.Group.SelectMany(group => group.Element))
+                    {
+                        element.Target.Reverse();
+                    }
+                    File.WriteAllText(filename, map.ToJson());
+                }
+            }
+
+            string[] input = reordered
+                ? [.. entries.Reverse().SelectMany(entry => new[] { entry, entry.Replace(
+                    "\"excludedVersion\":[\"1.0.2\",\"3.0.2\"]",
+                    "\"noMapOnly\":false,\"excludedVersion\":[\"3.0.2\",\"1.0.2\",\"3.0.2\"]", StringComparison.Ordinal) })]
+                : entries;
+            string json = "[" + string.Join(",", input) + "]";
+            using (JsonDocument document = JsonDocument.Parse(json))
+            {
+                document.RootElement.GetArrayLength().ShouldBe(reordered ? 200 : 100);
+            }
+            fixture.WriteConfiguration(json);
+            FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+            DbUnsafeCodeRule.SelectList(fixture.Connection).Count.ShouldBe(100);
+            List<DbUnsafeCodeTrigger> triggers = DbUnsafeCodeTrigger.SelectList(fixture.Connection);
+            triggers.Count.ShouldBe(100);
+            triggers.Select(trigger => trigger.Code).Distinct().Count().ShouldBe(100);
+            UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+            StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+            StructureDefinition profile = built.Profiles.ShouldHaveSingleItem().Definition;
+            string extension = built.Extensions.Single(item => item.Definition.Id == "ext-R5-ValueSet.com.inc.fil.op").Definition.Url;
+            ElementDefinition.ConstraintComponent constraint = UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex).ShouldHaveSingleItem();
+            UnsafeCodeTestFixture.SerializedConstraints(fixture.BuildDefinitions(pair).Profiles.ShouldHaveSingleItem().Definition, targetIndex)
+                .ShouldHaveSingleItem().ToJson().ShouldBe(constraint.ToJson());
+            if (reordered)
+            {
+                triggers[0].StructureOutcomeKey.ShouldNotBe(firstOutcomeKey);
+                triggers.Count.ShouldBe(triggerCount);
+                constraint.Expression.Length.ShouldBe(expressionLength);
+                constraint.ToJson().ShouldBe(expected);
+            }
+            else
+            {
+                firstOutcomeKey = triggers[0].StructureOutcomeKey;
+                triggerCount = triggers.Count;
+                expressionLength = constraint.Expression.Length;
+                expected = constraint.ToJson();
+            }
+
+            UnsafeCodeTestFixture.EvaluateFilter([constraint], targetIndex, "configured-099", extension: extension).ShouldBeFalse();
+            UnsafeCodeTestFixture.EvaluateFilter([constraint], targetIndex, "configured-099", UnsafeCodeConstants.ImplicitRules, extension).ShouldBeTrue();
+            UnsafeCodeTestFixture.EvaluateFilter([constraint], targetIndex, "=").ShouldBeTrue();
+            Console.WriteLine($"MANY_RULES target={pair.TargetPackage.PackageVersion} entries={input.Length} rules=100 triggers={triggers.Count} constraints=1 expressionChars={constraint.Expression.Length}");
+        }
+    }
+
+    [Fact]
+    public void ActualFilteredRegenerationInvalidatesOtherPersistedPairs()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateProfileInputs(persistDatabase: true);
+        fixture.LoadProfileMaps();
+        FhirPackageComparisonPair r4 = new(fixture.Packages[2], fixture.Packages[0]);
+        FhirPackageComparisonPair r4b = new(fixture.Packages[2], fixture.Packages[1]);
+        fixture.CompareProfilePair(r4);
+        fixture.GenerateProfileOutcomes(r4, r4b);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [r4, r4b]);
+        DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldContain(trigger => trigger.TargetFhirPackageKey == r4.TargetPackageKey);
+        DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldContain(trigger => trigger.TargetFhirPackageKey == r4b.TargetPackageKey);
+        string r4bComparison = fixture.PairState(r4b).ComparisonRevision!;
+
+        fixture.GenerateProfileOutcomes(r4b);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [r4b]);
+        fixture.PairState(r4).ComparisonRevision.ShouldNotBeNull();
+        fixture.PairState(r4).OutcomeInputRevision.ShouldBeNull();
+        Should.Throw<InvalidOperationException>(() => UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [r4]));
+
+        fixture.CompareProfilePairs(r4b);
+        fixture.PairState(r4).ComparisonRevision.ShouldBeNull();
+        fixture.PairState(r4b).ComparisonRevision.ShouldNotBe(r4bComparison);
+        fixture.PairState(r4b).OutcomeInputRevision.ShouldBeNull();
+        fixture.GenerateProfileOutcomes(r4b);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [r4b]);
+        Should.Throw<InvalidOperationException>(() => UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [r4]));
+        fixture.BuildDefinitions(r4b).Profiles.ShouldHaveSingleItem();
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]

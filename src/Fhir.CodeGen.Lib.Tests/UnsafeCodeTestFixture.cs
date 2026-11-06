@@ -13,11 +13,16 @@ using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.CompareTool;
 using Fhir.CodeGen.Comparison.CrossVersionSource;
+using Fhir.CodeGen.Comparison.Exporter;
 using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.Outcomes;
+using Fhir.CodeGen.Lib.Configuration;
 using Hl7.Fhir.ElementModel;
+using Hl7.Fhir.FhirPath;
 using Hl7.Fhir.Introspection;
 using Hl7.Fhir.Serialization;
+using Hl7.FhirPath;
+using Hl7.FhirPath.Expressions;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using BindingStrength = Hl7.Fhir.Model.BindingStrength;
@@ -33,20 +38,26 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal const string FilterValueSet = "http://hl7.org/fhir/ValueSet/filter-operator";
     internal const string FilterElement = "ValueSet.compose.include.filter.op";
 
-    internal SqliteConnection Connection { get; }
+    private readonly bool _persistDatabase;
+
+    internal SqliteConnection Connection { get; private set; }
+    internal int ConnectionReopens { get; private set; }
     internal string SourceRoot { get; }
     internal string ConfigurationFilename => Path.Combine(SourceRoot, "input", "ig-support", "unsafe-code-mappings.json");
     internal List<DbFhirPackage> Packages { get; } = [];
     internal DbUnsafeCodeInputState InputState => DbUnsafeCodeInputState.SelectSingle(Connection, Key: 1)!;
 
-    internal UnsafeCodeTestFixture(bool initializeIndices = false)
+    internal UnsafeCodeTestFixture(bool initializeIndices = false, bool persistDatabase = false)
     {
-        Connection = new("Data Source=:memory:");
-        Connection.Open();
+        _persistDatabase = persistDatabase;
         SourceRoot = Path.Combine(Path.GetTempPath(), "fhir-codegen-unsafe-" + Guid.NewGuid().ToString("N"));
+        Connection = new(persistDatabase
+            ? new SqliteConnectionStringBuilder { DataSource = Path.Combine(SourceRoot, "snapshot.sqlite"), Pooling = false }.ToString()
+            : "Data Source=:memory:");
         try
         {
             Directory.CreateDirectory(SourceRoot);
+            Connection.Open();
             string input = Path.Combine(AppContext.BaseDirectory, "TestData", "XverUnsafeCodes");
             foreach (string filename in Directory.GetFiles(Path.Combine(input, "input"), "*", SearchOption.AllDirectories))
             {
@@ -94,9 +105,9 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal bool Load() => new MappingLoader(Connection, NullLoggerFactory.Instance).TryLoadCrossVersionSourceMaps(SourceRoot, false);
 
-    internal static UnsafeCodeTestFixture CreateProfileInputs(bool initializeIndices = true)
+    internal static UnsafeCodeTestFixture CreateProfileInputs(bool initializeIndices = true, bool persistDatabase = false)
     {
-        UnsafeCodeTestFixture fixture = new(initializeIndices);
+        UnsafeCodeTestFixture fixture = new(initializeIndices, persistDatabase);
         foreach (DbFhirPackage package in fixture.Packages)
         {
             DbStructureDefinition code = fixture.AddStructure(package, "code", FhirArtifactClassEnum.PrimitiveType);
@@ -132,9 +143,9 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         return fixture;
     }
 
-    internal static UnsafeCodeTestFixture CreateNoFeatureInputs(bool initializeIndices = true)
+    internal static UnsafeCodeTestFixture CreateNoFeatureInputs(bool initializeIndices = true, bool persistDatabase = false)
     {
-        UnsafeCodeTestFixture fixture = CreateProfileInputs(initializeIndices);
+        UnsafeCodeTestFixture fixture = CreateProfileInputs(initializeIndices, persistDatabase);
         foreach (string filename in Directory.GetFiles(Path.Combine(fixture.SourceRoot, "input", "elements"), "*.json"))
         {
             ConceptMap map = new FhirJsonParser().Parse<ConceptMap>(File.ReadAllText(filename));
@@ -159,8 +170,80 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         LoadProfileMaps();
         FhirPackageComparisonPair pair = new(Packages[2], Packages[targetIndex]);
         CompareProfilePair(pair);
-        new OutcomeGenerator(Connection, NullLoggerFactory.Instance).GenerateOutcomes(processValueSets: false, specificPairs: [pair.SequencePair]);
+        GenerateProfileOutcomes(pair);
         return pair;
+    }
+
+    internal void GenerateProfileOutcomes(params FhirPackageComparisonPair[] pairs)
+    {
+        new OutcomeGenerator(Connection, NullLoggerFactory.Instance).GenerateOutcomes(processValueSets: false,
+            specificPairs: pairs.Select(pair => pair.SequencePair).ToHashSet());
+        ReopenPersistedDatabase();
+    }
+
+    internal StructureFhirExporter.BuiltDefinitions BuildDefinitions(FhirPackageComparisonPair pair)
+    {
+        StructureFhirExporter.BuiltDefinitions built = new StructureFhirExporter(new XVerExporter(Connection, new ConfigXVer { XverArtifactVersion = "0.1.0-test" }),
+            Connection, NullLoggerFactory.Instance).BuildDefinitions(new IgExporter.XVerIgExportTrackingRecord
+            {
+                PackagePair = pair,
+                PackageId = "hl7.fhir.uv.xver-r5." + pair.TargetFhirSequence.ToRLiteral().ToLowerInvariant(),
+            });
+        ReopenPersistedDatabase();
+        return built;
+    }
+
+    private void ReopenPersistedDatabase()
+    {
+        if (!_persistDatabase)
+        {
+            return;
+        }
+
+        string connectionString = Connection.ConnectionString;
+        Connection.Dispose();
+        Connection = new(connectionString);
+        Connection.Open();
+        ConnectionReopens++;
+    }
+
+    internal static Hl7.Fhir.Model.ElementDefinition.ConstraintComponent[] SerializedConstraints(
+        Hl7.Fhir.Model.StructureDefinition profile, int targetIndex)
+    {
+        ParserSettings settings = new() { PermissiveParsing = true };
+        Hl7.Fhir.Model.StructureDefinition recovered = targetIndex == 0
+            ? new r4::Hl7.Fhir.Serialization.FhirJsonParser(settings).Parse<Hl7.Fhir.Model.StructureDefinition>(profile.ToJson())
+            : new r4b::Hl7.Fhir.Serialization.FhirJsonParser(settings).Parse<Hl7.Fhir.Model.StructureDefinition>(profile.ToJson());
+        return [.. recovered.Differential.Element.SelectMany(element => element.Constraint)
+            .Where(constraint => constraint.Key.StartsWith("xv-unsafe-code-", StringComparison.Ordinal))];
+    }
+
+    internal static bool EvaluateFilter(
+        Hl7.Fhir.Model.ElementDefinition.ConstraintComponent[] constraints, int targetIndex, string? code,
+        string? uri = null, string? extension = null, bool mixed = false)
+    {
+        string filter = "{\"property\":\"status\",\"op\":" + JsonSerializer.Serialize(extension is null ? code : "=") +
+            ",\"value\":\"active\"" + (extension is null ? "" : ",\"extension\":[{\"url\":" +
+                JsonSerializer.Serialize(extension) + ",\"valueCode\":" + JsonSerializer.Serialize(code) + "}]") + "}";
+        string json = "{\"resourceType\":\"ValueSet\",\"status\":\"active\"" +
+            (uri is null ? "" : ",\"implicitRules\":" + JsonSerializer.Serialize(uri)) +
+            (code is null ? "" : ",\"compose\":{\"include\":[{\"filter\":[" +
+                (mixed ? "{\"property\":\"status\",\"op\":\"=\",\"value\":\"active\"}," : "") + filter + "]}]}") + "}";
+        ITypedElement instance = TargetInstance(targetIndex, json);
+        FhirPathCompiler compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+        bool valid = true;
+        foreach (Hl7.Fhir.Model.ElementDefinition.ConstraintComponent constraint in constraints)
+        {
+            ITypedElement[] results = [.. compiler.Compile(constraint.Expression)(instance, new EvaluationContext())];
+            if (results.Length != 1 || results[0].Value is not bool result)
+            {
+                throw new InvalidOperationException("The serialized invariant did not return exactly one Boolean.");
+            }
+
+            valid &= result;
+        }
+
+        return valid;
     }
 
     internal void LoadProfileMaps()
@@ -191,16 +274,22 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             throw new InvalidOperationException("The synthetic cross-version maps did not load.");
         }
 
+        ReopenPersistedDatabase();
     }
 
     internal void CompareProfilePair(FhirPackageComparisonPair pair)
     {
+        CompareProfilePairs(new(Packages[2], Packages[1]), new(Packages[1], Packages[0]), pair);
+    }
+
+    internal void CompareProfilePairs(params FhirPackageComparisonPair[] pairs)
+    {
         // Match FhirDbComparer.Compare's reset boundary when reusing a database.
         DbComparisonClasses.DropTables(Connection, forValueSets: false);
         DbComparisonClasses.CreateTables(Connection);
-        new StructureComparer(Connection, NullLoggerFactory.Instance).CompareStructures(specificPairs:
-            [(FhirReleases.FhirSequenceCodes.R5, FhirReleases.FhirSequenceCodes.R4B),
-                (FhirReleases.FhirSequenceCodes.R4B, FhirReleases.FhirSequenceCodes.R4), pair.SequencePair]);
+        new StructureComparer(Connection, NullLoggerFactory.Instance).CompareStructures(
+            specificPairs: pairs.Select(pair => pair.SequencePair).ToHashSet());
+        ReopenPersistedDatabase();
     }
 
     internal static UnsafeCodeTestFixture CreateRepresentationInputs()
