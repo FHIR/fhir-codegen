@@ -87,6 +87,47 @@ Errors identify element, direction, candidate identity, and the missing
 binding/scope context. Resource-valued child uses have their own owners;
 references are not followed to external resources.
 
+At effective native Coding/boolean and Coding/code choices, the safety
+unit is an independently classified **source type use**. Boolean supplies
+no safety use. Coding retains typed qualification; the choice's primitive
+code alternative calls `PrimitiveIdentity` separately for every candidate
+system/code group, using the original occurrence and contributing
+`MappingUse.Source` binding. Neither the code datatype root nor Coding's
+qualification supplies that identity. Carrier-owned `.code` suppression
+still applies to actual carrier child edges, not to the mixed choice's
+primitive alternative. Quantity comparator and other non-H2 identities
+retain their ordinary paths.
+
+An internal immutable `UnsafeCodeSourceUse` retains the original occurrence
+path, effective source type, exact `TypeProfile ?? TypeName` token, resolved
+source root element Id and typed/primitive qualification kind. Its selected
+path appends one terminal datatype-value endpoint using the unchanged
+`UnsafeCodePathStep` vocabulary. For example:
+
+```text
+Parameters / Parameters.parameter / Parameters.parameter.value[x]
+  / (ElementId="Coding", TypeName="Coding", IsContentReference=false)
+```
+
+Primitive code appends `("code", "code", false)` instead. A profiled Coding
+uses its uniquely resolved source root's actual element Id and exact
+canonical/version token, not the profile basename. An incoming typed-child
+prefix is retained in full. Pure normalization consumes immutable
+declaration/root facts supplied by the caller and rejects nonterminal,
+duplicate, reference, undeclared, missing, ambiguous or resource endpoints.
+Ordinary typed-child steps such as `("Coding.code", "Coding", false)`
+remain traversal, not selected values.
+
+Selected paths, identity/version matches and provenance normalize
+independently. Equal code literals do not collapse different systems,
+versions or selected paths. Collection precedes trigger insertion and
+completion remains last: a failed primitive qualification leaves **no
+inserted triggers** and all outcome completion stamps unset. A complete
+authoritative nonmember or version nonmatch removes only that primitive
+use, leaving typed Coding classification independent. Context element IDs
+remain those of the original contributing map, never the endpoint root.
+No public API, JSON fields, columns or format constants change.
+
 `DbUnsafeCodeTrigger` stores owning structure outcome, directed context,
 semantic source/type-use path (`SourcePathJson`), qualified identity,
 source version, wildcard/exact version match (`IsWildcardVersion`,

@@ -342,6 +342,61 @@ lists. The separate `BindingMembers` / `PreservesQualification` proof for
 erased carriers remains unchanged: imported applicability is not proof that
 an erased system or version can be recovered.
 
+### Selected datatype values and legacy H2 paths
+
+`ResolveSafety` normalizes the terminal declared datatype-value endpoint
+before the shared `ResolveOccurrence` walk. Ordinary `Resolve` and
+`Occurrences` still use that same core and shared `BuildLocations` without
+source selection. The endpoint contributes no member, repeat, resource
+owner, recursion edge or direct-use change. Incoming typed-child prefixes,
+binding contexts, ordinary attachments and owner discovery retain their
+existing meaning.
+
+Selection restricts final **source** enumeration before carrier/state
+construction. Effective rows are reconciled with effective aggregate
+declarations/count through the base chain; an available Coding row cannot
+hide aggregate code. Complete rows with unique exact source roots are the
+normal proof. Aggregate-only unprofiled declarations may supply a unique
+root fallback, but missing/conflicting metadata cannot certify absence.
+Profile roots resolve by source package, canonical/version and structure
+identity, never the first matching basename. Actual target comparisons
+and declared target rows determine target types; a source profile canonical
+is never rendered in `ofType(...)`.
+
+Every applicable selected native/extension attachment survives, including
+failed states. Missing selected comparisons/roots, explicit unmapped
+selected types, opaque attachments and identity-erasing/unsupported
+substitutions remain failures. Observable Coding cannot excuse another
+failed attachment. Enclosing bindings, `MatchProjection`,
+`BindingMembers`/`PreservesQualification`, native transformations and H1
+responsible-map provenance are unchanged. The emitter calls safety
+resolution only, rejects an empty result and validates every location; it
+does not qualify primitives, read policy or skip unsupported carriers.
+
+An active legacy broad Coding/boolean path may select Coding **in memory
+only**, on complete source proof, retaining the persisted path and old key.
+A broad Coding/code path returns `AmbiguousSourceUse`, including when code
+is declared only in aggregate metadata. Completion stamps do not prove
+independent primitive qualification. Incomplete/conflicting legacy H2
+facts and malformed selected endpoints fail contextually. Diagnostics keep
+the original path, qualified identity and provenance and end:
+`Regenerate load, compare, outcomes, and export after resolving the source-value representation.`
+Single-use/unaffected paths and empty plan input retain their behavior.
+No export-side writes, migration, global format invalidation, policy
+reclassification or rewrite-on-read is introduced.
+
+New selected paths round-trip through existing `SourcePathJson` and
+`ReadConstraintPlans`, while context element IDs remain the original map
+IDs. Coding/code produces distinct deterministic Coding and primitive
+invariants. Its qualified two-rule fixture has **three active plans**:
+two typed Coding identities (null SourceVersion; the version-qualified
+identity requires runtime Coding.version), and one primitive identity
+qualified as `urn:example:primitive|primitive-v1#unsafe` from the original
+choice binding. The ValueSet version remains distinct from system version.
+Older binaries cannot consume the new endpoint semantics safely; regenerate
+with a compatible producer before downgrade. JSON/schema compatibility is
+not binary semantic compatibility.
+
 `UnsafeCodeInputStore.ReadConstraintPlans` reads persisted triggers and
 provenance once per pair at `BuildProfiles` completion
 (`StructureFhirExporter.cs:1324-1327`, `DbUnsafeCodeClasses.cs:162-190`).
@@ -1163,3 +1218,77 @@ No active profile, serialized invariant or recovered Boolean evaluation
 exists for these rejected builds. These baseline facts confirm the two H2
 hypotheses; they do not establish correction, whole-profile conformance,
 Release readiness or permission to publish affected output.
+
+## Coordinated H2 Phase 2 Verification
+
+Measured in the primary checkout on `2026-11-06`, at parent production
+SHA `f983786e82262a7f723eda2093ebb16a435542bb` plus the uncommitted Phase 2
+producer/consumer/test patch. The two original/current baseline measurements
+above are unchanged; this is not their production identity and is not the
+Phase 3 recovered-condition matrix.
+
+Final documented commands and results:
+
+```powershell
+dotnet test src\Fhir.CodeGen.Lib.Tests\Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName~UnsafeCodeOutcomeTests"
+# 125 passed, 0 failed/skipped; 37 seconds
+dotnet test src\Fhir.CodeGen.Lib.Tests\Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName~UnsafeCodeProfileTests"
+# 158 passed, 0 failed/skipped; 6 minutes 57 seconds
+dotnet build fhir-codegen.sln -c Release
+# 0 errors, 1 documented CS3021 warning; 14.85 seconds
+```
+
+For both R4 and R4B, `NativeMixedCodingBooleanSelectsOnlyCoding` retains both
+authored alternatives and ordinary Coding/boolean locations, but safety
+resolution returns one observable Coding location and one constructed
+invariant. Its path ends `("Coding", "Coding", false)` and its native
+steps remain parameter/value/ofType(Coding). Serialized-condition checks
+return one Boolean: true/false boolean controls pass, configured unsafe
+Coding without the URI fails. Complete broad legacy Coding/boolean plans
+select the same location in memory and retain the old semantic key.
+
+`MixedCodingCodeQualifiesPrimitiveIndependently` and
+`SelectedMixedCodingCodeRetainsIndependentCarriers` measure three plans and
+two invariant keys per destination: Coding for `urn:example:codes#unsafe`,
+Coding for `urn:example:primitive|primitive-v1#unsafe`, and primitive code
+for that latter identity with its independently qualified SourceVersion
+`primitive-v1`. Each selected path resolves to its own observable carrier;
+the version-qualified Coding predicate retains runtime version matching,
+while the scalar predicate does not invent system/version fields. All rows
+keep original choice context IDs, independent rule provenance and empty
+evidence/annotation keys. Equal unsafe literals remain distinct identities.
+
+Missing binding, multiple applicable systems and unknown exact system
+version all fail outcomes with the existing primitive identity diagnostic,
+zero inserted triggers and null outcome stamps; comparison stays completed.
+For missing binding the first applicable candidate is
+`urn:example:codes|#unsafe`; the other two variants reach
+`urn:example:primitive|#unsafe`. Proven nonmember/version nonmatch keeps the
+two Coding plans only. Reopened plan/schema assertions retain full paths,
+version matches, contexts/provenance, format 1 and unchanged trigger
+columns; construction leaves persisted safety state byte-identical.
+
+Focused safety-boundary checks reject broad legacy Coding/code with
+`AmbiguousSourceUse` even when the code row is missing but aggregate code
+remains. Invalid endpoints, missing selected comparisons and Coding mapped
+to boolean reject contextually; the latter retains `ErasedIdentity`.
+An added opaque attachment remains alongside observable Coding and rejects
+with `OpaqueSubstitution`, not a carrier-based omission. All retain the
+existing recovery suffix. Pure normalizer theories cover incoming typed
+prefixes, exact profiled root/canonical version, primitive selection,
+ordinary typed children and malformed/incomplete/ambiguous/resource uses.
+Existing H1, direct, erased, recursion and owner class controls pass.
+
+Earlier scoped attempts were corrected, not counted as passing coverage:
+the initial outcome class had 120 passed/2 diagnostic assertion failures
+(missing binding reports the first candidate); two subsequent compilations
+stopped on a misplaced helper and a test-helper property name. The first
+profile class passed 156 tests before the final controls were added. Its
+next run had 156 passed/2 failures: an immutable-array reference-equality
+assertion and a fixture-disposal `snapshot.sqlite` lock, already documented
+as a baseline fixture issue above. Semantic field assertions replaced the
+reference comparison; the full final rerun passed all 158 without fixture
+disposal changes. No failure was waived, no export inputs/stamps were
+rewritten by construction, and no generated artifact was written to disk.
+Full-suite verification and the complete Phase 3 compatibility/evaluation
+matrices remain pending.

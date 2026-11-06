@@ -38,24 +38,22 @@ public sealed class UnsafeCodeProfileCollection
 public class UnsafeCodeProfileTests
 {
     [Theory]
-    [InlineData(0, "boolean")]
-    [InlineData(1, "boolean")]
-    [InlineData(0, "code")]
-    [InlineData(1, "code")]
-    public void MixedChoiceBaselineObservation(int targetIndex, string alternative)
+    [InlineData(0)]
+    [InlineData(1)]
+    public void NativeMixedCodingBooleanSelectsOnlyCoding(int targetIndex)
     {
         using UnsafeCodeTestFixture main = UnsafeCodeTestFixture.CreateMixedChoiceInputs(
-            targetIndex, alternative, "qualified", enableRules: true);
+            targetIndex, "boolean", "qualified", enableRules: true);
         FhirPackageComparisonPair pair = main.LoadCompareAndGenerate(targetIndex);
-        UnsafeCodeOutcomeTests.AssertMixedChoiceSetup(main, pair, alternative, "qualified");
+        UnsafeCodeOutcomeTests.AssertMixedChoiceSetup(main, pair, "boolean", "qualified");
         UnsafeCodeInputStore.RequireExportReady(main.Connection, [pair]);
         main.ConnectionReopens.ShouldBe(3);
-        main.WriteMixedChoiceStageObservation(pair, alternative, "qualified");
+        main.WriteMixedChoiceStageObservation(pair, "boolean", "qualified");
         DbStructureOutcome outcome = DbStructureOutcome.SelectList(main.Connection,
             SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
             .Single(row => row.SourceId == "Parameters");
         DbUnsafeCodeTrigger[] triggers = [.. DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)];
-        triggers.ShouldNotBeEmpty();
+        triggers.ShouldHaveSingleItem();
         DbUnsafeCodeTrigger trigger = triggers.Single(row => row.System == UnsafeCodeTestFixture.MixedCodingSystem);
         trigger.SourceElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
         trigger.TargetElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
@@ -74,29 +72,56 @@ public class UnsafeCodeProfileTests
             .Single(candidate => candidate.Row.Key == trigger.Key);
         plan.Provenance.Replace('\\', '/').ShouldBe("input/ig-support/unsafe-code-mappings.json entry 0");
         ImmutableArray<UnsafeCodePathStep> path = plan.SourcePath;
-        path.Select(step => step.ElementId).ShouldBe(["Parameters", "Parameters.parameter", UnsafeCodeTestFixture.MixedChoiceElement]);
-        path.ShouldAllBe(step => step.TypeName == null && !step.IsContentReference);
+        path.ShouldBe(ImmutableArray.Create<UnsafeCodePathStep>(new("Parameters", null, false),
+            new("Parameters.parameter", null, false), new(UnsafeCodeTestFixture.MixedChoiceElement, null, false), new("Coding", "Coding", false)));
         string persistedTriggers = JsonSerializer.Serialize(triggers);
         string persistedStamp = JsonSerializer.Serialize(main.PairState(pair));
         SortedDictionary<string, string[]> mainState = main.MixedChoiceRepresentationState();
-        StructureFhirExporter.BuiltDefinitions? built = null;
-        Exception? failure = Record.Exception(() => built = main.BuildDefinitions(pair));
+        StructureFhirExporter.BuiltDefinitions built = main.BuildDefinitions(pair);
+        UnsafeCodeSafetyResolution selected = built.Representations.ResolveSafety(outcome.Key, path);
+        selected.Failure.ShouldBeNull();
+        RepresentationLocation selectedCoding = selected.Locations.ShouldHaveSingleItem();
+        selectedCoding.SourceType.ShouldBe("Coding");
+        selectedCoding.TargetType.ShouldBe("Coding");
+        selectedCoding.State.ShouldBe(RepresentationState.Observable);
+        selectedCoding.Carrier!.Kind.ShouldBe(CodeCarrierKind.Coding);
+        selectedCoding.Steps.ShouldBe(ImmutableArray.Create<RepresentationStep>(new MemberStep("parameter"),
+            new MemberStep("value"), new ChoiceStep("Coding")));
+        selectedCoding.Transformations.ShouldBeEmpty();
+        selectedCoding.SourceBinding.ShouldBe(new UnsafeCodeCanonical(null, null));
+        UnsafeCodeSafetyResolution legacy = built.Representations.ResolveSafety(outcome.Key, path[..^1]);
+        legacy.Failure.ShouldBeNull();
+        RepresentationLocation legacyCoding = legacy.Locations.ShouldHaveSingleItem();
+        legacyCoding.Steps.ShouldBe(selectedCoding.Steps);
+        legacyCoding.SourceType.ShouldBe(selectedCoding.SourceType);
+        legacyCoding.TargetType.ShouldBe(selectedCoding.TargetType);
+        legacyCoding.State.ShouldBe(selectedCoding.State);
+        legacyCoding.SourceElementId.ShouldBe(selectedCoding.SourceElementId);
+        legacyCoding.SourceBinding.ShouldBe(selectedCoding.SourceBinding);
+        legacyCoding.Carrier!.Kind.ShouldBe(selectedCoding.Carrier.Kind);
+        legacyCoding.Carrier.System.ShouldBe(selectedCoding.Carrier.System);
+        legacyCoding.Carrier.Version.ShouldBe(selectedCoding.Carrier.Version);
+        legacyCoding.Carrier.Code.ShouldBe(selectedCoding.Carrier.Code);
+        legacyCoding.Transformations.ShouldBeEmpty();
+        StructureDefinition activeProfile = built.Profiles.Single(profile => profile.Definition.Type == "Parameters").Definition;
+        activeProfile.ImplicitRules.ShouldBeNull();
+        ElementDefinition.ConstraintComponent condition = UnsafeCodeTestFixture.SerializedConstraints(activeProfile, targetIndex).ShouldHaveSingleItem();
+        condition.Severity.ShouldBe(ConstraintSeverity.Error);
+        condition.Human.ShouldBe(UnsafeCodeConstraintEmitter.Human);
+        condition.Source.ShouldBe(activeProfile.Url);
+        condition.Key.ShouldStartWith("xv-unsafe-code-");
+        condition.Expression.ShouldContain(".ofType(Coding)");
+        condition.Expression.ShouldNotContain("boolean");
         UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_CONSTRUCTION", new
         {
-            target = pair.TargetFhirSequence.ToRLiteral(), alternative,
-            result = failure is null ? "constructed" : "rejected", diagnostic = failure?.Message, path, plan.Provenance,
+            target = pair.TargetFhirSequence.ToRLiteral(), alternative = "boolean",
+            result = "constructed", path, plan.Provenance, condition.Key, condition.Expression,
         });
-        if (failure is not null)
-        {
-            failure.ShouldBeOfType<InvalidOperationException>();
-            failure.Message.ShouldContain("Regenerate load, compare, outcomes, and export after resolving the source-value representation.");
-            failure.Message.ShouldContain(UnsafeCodeTestFixture.MixedChoiceElement);
-        }
         JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)).ShouldBe(persistedTriggers);
         JsonSerializer.Serialize(main.PairState(pair)).ShouldBe(persistedStamp);
 
         using UnsafeCodeTestFixture twin = UnsafeCodeTestFixture.CreateMixedChoiceInputs(
-            targetIndex, alternative, "qualified", enableRules: false);
+            targetIndex, "boolean", "qualified", enableRules: false);
         FhirPackageComparisonPair twinPair = twin.LoadCompareAndGenerate(targetIndex);
         UnsafeCodeInputStore.RequireExportReady(twin.Connection, [twinPair]);
         DbUnsafeCodeTrigger.SelectList(twin.Connection).ShouldBeEmpty();
@@ -113,9 +138,9 @@ public class UnsafeCodeProfileTests
         DbStructureOutcome twinOutcome = DbStructureOutcome.SelectList(twin.Connection,
             SourceFhirPackageKey: twinPair.SourcePackageKey, TargetFhirPackageKey: twinPair.TargetPackageKey)
             .Single(row => row.SourceId == "Parameters");
-        ImmutableArray<RepresentationLocation> locations = twinBuilt.Representations.Resolve(twinOutcome.Key, path);
+        ImmutableArray<RepresentationLocation> locations = twinBuilt.Representations.Resolve(twinOutcome.Key, path[..^1]);
         locations.Select(location => location.SourceType).Order(StringComparer.Ordinal)
-            .ShouldBe(new[] { "Coding", alternative }.Order(StringComparer.Ordinal));
+            .ShouldBe(new[] { "Coding", "boolean" }.Order(StringComparer.Ordinal));
         locations.ShouldAllBe(location => location.SourceType == location.TargetType);
         RepresentationLocation coding = locations.Single(location => location.SourceType == "Coding");
         coding.State.ShouldBe(RepresentationState.Observable);
@@ -123,7 +148,7 @@ public class UnsafeCodeProfileTests
         coding.Transformations.ShouldBeEmpty();
         UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_PROJECTION", new
         {
-            target = pair.TargetFhirSequence.ToRLiteral(), alternative, path,
+            target = pair.TargetFhirSequence.ToRLiteral(), alternative = "boolean", path,
             tables = twinState.Select(entry => new { table = entry.Key, rows = entry.Value.Length }),
             locations = locations.Select(location => new
             {
@@ -135,28 +160,185 @@ public class UnsafeCodeProfileTests
                 differential = inactiveProfile.Differential.Element.Select(element => new
                     { element.ElementId, element.Path, types = element.Type.Select(type => type.Code) }) },
         });
-        foreach (string parameter in alternative == "boolean"
-            ? new[] { """{"name":"control","valueBoolean":true}""", """{"name":"control","valueBoolean":false}""",
-                """{"name":"control","valueCoding":{"system":"urn:example:codes","code":"unsafe"}}""" }
-            : new[] { """{"name":"control","valueCode":"unsafe"}""",
-                """{"name":"control","valueCoding":{"system":"urn:example:codes","code":"unsafe"}}""" })
+        foreach ((string parameter, bool expected) in new[]
+        {
+            ("""{"name":"control","valueBoolean":true}""", true),
+            ("""{"name":"control","valueBoolean":false}""", true),
+            ("""{"name":"control","valueCoding":{"system":"urn:example:codes","code":"unsafe"}}""", false),
+        })
         {
             ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex,
                 """{"resourceType":"Parameters","parameter":[""" + parameter + "]}");
             instance.Children("parameter").ShouldHaveSingleItem().Children("value").ShouldHaveSingleItem();
-            if (built is not null)
-            {
-                StructureDefinition profile = built.Profiles.Single(candidate => candidate.Definition.Type == "Parameters").Definition;
-                foreach (ElementDefinition.ConstraintComponent constraint in UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex))
-                {
-                    ITypedElement[] results = [.. Compiler.Compile(constraint.Expression)(instance, new EvaluationContext())];
-                    results.ShouldHaveSingleItem().Value.ShouldBeOfType<bool>();
-                    UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_RECOVERED", new
-                        { targetIndex, alternative, parameter, constraint.Key, constraint.Expression, result = results[0].Value });
-                }
-            }
+            ITypedElement[] results = [.. Compiler.Compile(condition.Expression)(instance, new EvaluationContext())];
+            results.ShouldHaveSingleItem().Value.ShouldBeOfType<bool>().ShouldBe(expected);
         }
         JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)).ShouldBe(persistedTriggers);
+
+        UnsafeCodeConstraintPlan broad = plan with { SourcePath = path[..^1] };
+        activeProfile.Differential.Element[0].Constraint.Clear();
+        UnsafeCodeConstraintEmitter.Attach(built.Profiles, built.Representations, [broad], "R5->" + pair.TargetFhirSequence.ToRLiteral());
+        string legacyIdentity = JsonSerializer.Serialize(new
+        {
+            Profile = activeProfile.Url,
+            Direction = "R5->" + pair.TargetFhirSequence.ToRLiteral(),
+            Owners = Array.Empty<string>(),
+            SourcePath = broad.SourcePath,
+        });
+        activeProfile.Differential.Element[0].Constraint.ShouldHaveSingleItem().Key.ShouldBe(UnsafeCodeConstraintEmitter.Key(legacyIdentity));
+        JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)).ShouldBe(persistedTriggers);
+        JsonSerializer.Serialize(main.PairState(pair)).ShouldBe(persistedStamp);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void SelectedMixedCodingCodeRetainsIndependentCarriers(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, "code", "qualified", enableRules: true);
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        IReadOnlyList<UnsafeCodeConstraintPlan> plans = UnsafeCodeOutcomeTests.AssertSelectedMixedPlans(fixture, pair, primitive: true);
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+        foreach (UnsafeCodeConstraintPlan plan in plans)
+        {
+            UnsafeCodeSafetyResolution resolution = built.Representations.ResolveSafety(plan.Row.StructureOutcomeKey, plan.SourcePath);
+            resolution.Failure.ShouldBeNull();
+            RepresentationLocation location = resolution.Locations.ShouldHaveSingleItem();
+            location.State.ShouldBe(RepresentationState.Observable);
+            location.SourceType.ShouldBe(plan.SourcePath[^1].TypeName);
+            location.SourceType.ShouldBe(location.TargetType);
+            location.Carrier!.Kind.ShouldBe(location.SourceType == "code" ? CodeCarrierKind.Primitive : CodeCarrierKind.Coding);
+            location.SourceBinding.ShouldBe(new UnsafeCodeCanonical("http://example.org/ValueSet/mixed-choice-primitive", "primitive-valueset-v3"));
+            location.SourceElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
+            location.Transformations.ShouldBeEmpty();
+        }
+
+        StructureDefinition profile = built.Profiles.Single(candidate => candidate.Definition.Type == "Parameters").Definition;
+        IReadOnlyList<ElementDefinition.ConstraintComponent> conditions = UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex);
+        conditions.Count.ShouldBe(2);
+        conditions.Select(condition => condition.Key).Distinct().Count().ShouldBe(2);
+        conditions.ShouldContain(condition => condition.Expression.Contains(".ofType(code)", StringComparison.Ordinal) &&
+            !condition.Expression.Contains(".version", StringComparison.Ordinal));
+        conditions.ShouldContain(condition => condition.Expression.Contains(".ofType(Coding)", StringComparison.Ordinal) &&
+            condition.Expression.Contains(".version.where($this = 'primitive-v1')", StringComparison.Ordinal));
+        foreach (ElementDefinition.ConstraintComponent condition in conditions)
+        {
+            ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex,
+                """{"resourceType":"Parameters","parameter":[{"name":"control","valueCode":"unsafe"}]}""");
+            ITypedElement[] results = [.. Compiler.Compile(condition.Expression)(instance, new EvaluationContext())];
+            results.ShouldHaveSingleItem().Value.ShouldBeOfType<bool>();
+        }
+
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+    }
+
+    [Theory]
+    [InlineData(0, "legacy-code")]
+    [InlineData(1, "legacy-code")]
+    [InlineData(0, "legacy-missing-code-row")]
+    [InlineData(1, "legacy-missing-code-row")]
+    [InlineData(0, "invalid-endpoint")]
+    [InlineData(1, "invalid-endpoint")]
+    [InlineData(0, "missing-comparison")]
+    [InlineData(1, "missing-comparison")]
+    [InlineData(0, "unsupported-target")]
+    [InlineData(1, "unsupported-target")]
+    [InlineData(0, "opaque-attachment")]
+    [InlineData(1, "opaque-attachment")]
+    public void MixedChoiceSafetyFailuresRetainContextAndRecovery(int targetIndex, string scenario)
+    {
+        bool legacy = scenario.StartsWith("legacy", StringComparison.Ordinal);
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(
+            targetIndex, legacy ? "code" : "boolean", "qualified", enableRules: true);
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        UnsafeCodeConstraintPlan plan = UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey)
+            .Single(candidate => candidate.Row.System == UnsafeCodeTestFixture.MixedCodingSystem);
+        if (legacy)
+        {
+            plan = plan with { SourcePath = plan.SourcePath[..^1] };
+        }
+        else if (scenario == "invalid-endpoint")
+        {
+            plan = plan with { SourcePath = plan.SourcePath.SetItem(plan.SourcePath.Length - 1, new("boolean", "Coding", false)) };
+        }
+
+        if (scenario == "legacy-missing-code-row")
+        {
+            DbElement source = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: UnsafeCodeTestFixture.MixedChoiceElement)!;
+            DbElementType code = DbElementType.SelectList(fixture.Connection, ElementKey: source.Key).Single(type => type.TypeName == "code");
+            DbElementType.Delete(fixture.Connection, Key: code.Key);
+        }
+        if (scenario is "missing-comparison" or "unsupported-target")
+        {
+            DbElementTypeComparison comparison = DbElementTypeComparison.SelectList(fixture.Connection,
+                SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey,
+                SourceElementId: UnsafeCodeTestFixture.MixedChoiceElement).Single(row => row.SourceTypeLiteral == "Coding");
+            if (scenario == "missing-comparison")
+            {
+                DbElementTypeComparison.Delete(fixture.Connection, Key: comparison.Key);
+            }
+            else
+            {
+                DbElementType boolean = DbElementType.SelectList(fixture.Connection, ElementKey: comparison.TargetElementKey)
+                    .Single(type => type.TypeName == "boolean");
+                comparison.TargetElementTypeKey = boolean.Key;
+                comparison.TargetTypeLiteral = "boolean";
+                DbElementTypeComparison.Update(fixture.Connection, [comparison]);
+            }
+        }
+
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        // Construction of this independently staged inactive twin gives an attachment index
+        // without deleting or rewriting the main's persisted active plans.
+        using UnsafeCodeTestFixture twin = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex,
+            legacy ? "code" : "boolean", "qualified", enableRules: false);
+        FhirPackageComparisonPair twinPair = twin.LoadCompareAndGenerate(targetIndex);
+        if (scenario == "legacy-missing-code-row")
+        {
+            DbElement source = DbElement.SelectSingle(twin.Connection, FhirPackageKey: twinPair.SourcePackageKey, Id: UnsafeCodeTestFixture.MixedChoiceElement)!;
+            DbElementType code = DbElementType.SelectList(twin.Connection, ElementKey: source.Key).Single(type => type.TypeName == "code");
+            DbElementType.Delete(twin.Connection, Key: code.Key);
+        }
+        StructureFhirExporter.BuiltDefinitions twinBuilt = twin.BuildDefinitions(twinPair);
+        if (scenario is "missing-comparison" or "unsupported-target")
+        {
+            InvalidOperationException failure = Should.Throw<InvalidOperationException>(() => fixture.BuildDefinitions(pair));
+            failure.Message.ShouldContain(scenario == "missing-comparison" ? "Missing" : "ErasedIdentity");
+            failure.Message.ShouldContain(JsonSerializer.Serialize(plan.SourcePath));
+            failure.Message.ShouldContain(plan.ProfileCanonical);
+            failure.Message.ShouldContain(plan.Provenance);
+            failure.Message.ShouldEndWith("Regenerate load, compare, outcomes, and export after resolving the source-value representation.");
+            fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+            return;
+        }
+
+        DbStructureOutcome twinOutcome = DbStructureOutcome.SelectList(twin.Connection, SourceFhirPackageKey: twinPair.SourcePackageKey,
+            TargetFhirPackageKey: twinPair.TargetPackageKey).Single(row => row.SourceId == "Parameters");
+        DbUnsafeCodeTrigger row = plan.Row;
+        row.StructureOutcomeKey = twinOutcome.Key;
+        if (scenario == "opaque-attachment")
+        {
+            DbElement choice = DbElement.SelectSingle(twin.Connection, FhirPackageKey: twinPair.SourcePackageKey,
+                Id: UnsafeCodeTestFixture.MixedChoiceElement)!;
+            DbElementOutcome source = DbElementOutcome.SelectList(twin.Connection, SourceFhirPackageKey: twinPair.SourcePackageKey,
+                TargetFhirPackageKey: twinPair.TargetPackageKey).Single(element => element.SourceElementKey == choice.Key);
+            twinBuilt.Representations.Attach(twinOutcome, source, new("Parameters.parameter.extension", "urn:example:opaque"));
+            UnsafeCodeSafetyResolution resolution = twinBuilt.Representations.ResolveSafety(twinOutcome.Key, plan.SourcePath);
+            resolution.Failure.ShouldBeNull();
+            resolution.Locations.Length.ShouldBe(2);
+            resolution.Locations.ShouldContain(location => location.State == RepresentationState.Observable && location.TargetType == "Coding");
+            resolution.Locations.ShouldContain(location => location.State == RepresentationState.OpaqueSubstitution && location.SourceType == "Coding");
+        }
+        InvalidOperationException error = Should.Throw<InvalidOperationException>(() =>
+            UnsafeCodeConstraintEmitter.Attach(twinBuilt.Profiles, twinBuilt.Representations, [plan], "R5->" + pair.TargetFhirSequence.ToRLiteral()));
+        error.Message.ShouldContain(legacy ? "AmbiguousSourceUse" : scenario == "opaque-attachment" ? "OpaqueSubstitution" : "InvalidSourceUse");
+        error.Message.ShouldContain(JsonSerializer.Serialize(plan.SourcePath));
+        error.Message.ShouldContain(plan.ProfileCanonical);
+        error.Message.ShouldContain("qualified code urn:example:codes|*#unsafe");
+        error.Message.ShouldContain(plan.Provenance);
+        error.Message.ShouldEndWith("Regenerate load, compare, outcomes, and export after resolving the source-value representation.");
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
     }
 
     private static readonly FhirPathCompiler Compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());

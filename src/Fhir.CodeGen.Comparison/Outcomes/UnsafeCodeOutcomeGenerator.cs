@@ -61,7 +61,26 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                 bool carrier = typeNames.Any(IsCarrier);
                 ImmutableArray<MappingUse> childContexts = carrier || typeNames.Any(name => name is "CodeableConcept" or "CodeableReference")
                     ? contexts : [];
-                if (carrier)
+                bool mixedSafety = facts.HasNativeTarget(element) && typeNames.Length == 2 && typeNames.Contains("Coding", StringComparer.Ordinal) &&
+                    typeNames.Any(name => name is "boolean" or "code");
+                if (mixedSafety)
+                {
+                    UnsafeCodeEffectiveTypeFacts sourceFacts = facts.SourceUseFacts(element);
+                    foreach (UnsafeCodeTypeFact type in sourceFacts.Types.Where(type => type.SourceTypeName is "Coding" or "code"))
+                    {
+                        UnsafeCodeSourceUseNormalization normalized = UnsafeCodeSourceUseNormalizer.Normalize(
+                            path.Add(new(type.Roots.Length == 1 ? type.Roots[0].ElementId : type.SourceTypeName, type.TypeUseToken, false)),
+                            new Dictionary<int, UnsafeCodeEffectiveTypeFacts> { [path.Length] = sourceFacts });
+                        if (normalized.Failure is not null || normalized.SourceUse is null)
+                        {
+                            throw new InvalidOperationException($"Unsafe-code type graph is unresolved for {element.Id} ({type.TypeUseToken}), pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: {normalized.Failure}. Reload source definitions and regenerate comparisons and outcomes.");
+                        }
+
+                        Classify(element, normalized.SourceUse.SelectedPath, contexts,
+                            normalized.SourceUse.QualificationKind == UnsafeCodeQualificationKind.Typed);
+                    }
+                }
+                else if (carrier)
                 {
                     Classify(element, path, contexts, true);
                 }
@@ -361,6 +380,41 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
 
             return names;
         }
+
+        internal UnsafeCodeEffectiveTypeFacts SourceUseFacts(DbElement element)
+        {
+            DbElement aggregate = BaseChain(element).FirstOrDefault(basis => basis.DistinctTypes.Any(name => name.Length > 0)) ?? element;
+            DbElementType[] rows = Types(element);
+            ImmutableArray<UnsafeCodeTypeFact> types = rows.Length == 0
+                ? [.. aggregate.DistinctTypes.Where(name => name.Length > 0).Select(name =>
+                    new UnsafeCodeTypeFact(null, name, name, name, ResolveRoots(name, null, null)))]
+                : [.. rows.Select(row => new UnsafeCodeTypeFact(row.Key, row.TypeName ?? string.Empty,
+                    row.TypeProfile ?? row.TypeName ?? row.Literal, row.Literal,
+                    ResolveRoots(row.TypeName, row.TypeProfile, row.TypeProfileStructureKey ??
+                        (row.TypeProfile is null ? row.TypeStructureKey : null))))];
+            return new(types, [.. aggregate.DistinctTypes.Where(name => name.Length > 0)], aggregate.DistinctTypeCount);
+
+            ImmutableArray<UnsafeCodeRootFact> ResolveRoots(string? name, string? profile, int? key)
+            {
+                UnsafeCodeCanonical canonical = UnsafeCodeCanonical.Parse(profile);
+                DbStructureDefinition[] matches = [.. Structures.Values.Where(structure =>
+                    structure.FhirPackageKey == element.FhirPackageKey && (profile is not null
+                        ? structure.UnversionedUrl == canonical.Url && (canonical.Version is null || structure.Version == canonical.Version)
+                        : structure.Name == name && structure.ArtifactClass != FhirArtifactClassEnum.Profile))];
+                if (matches.Length != 1 || key is not null && matches[0].Key != key ||
+                    matches[0].ArtifactClass is not (FhirArtifactClassEnum.PrimitiveType or FhirArtifactClassEnum.ComplexType or FhirArtifactClassEnum.Profile))
+                {
+                    return [];
+                }
+
+                return [.. Roots[matches[0].Key].Select(root => new UnsafeCodeRootFact(matches[0].Key, root.Id, IsResource(matches[0].Key)))];
+            }
+        }
+
+        internal bool HasNativeTarget(DbElement element) => BaseChain(element).Any(basis =>
+            _targets[basis.Key].Any(target => target.ElementComparisonKey is int key &&
+                _comparisons.TryGetValue(key, out DbElementComparison? comparison) && !comparison.NotMapped &&
+                comparison.TargetElementKey is not null));
 
         internal IEnumerable<(string? TypeName, int StructureKey)> TypeStructures(DbElement element)
         {

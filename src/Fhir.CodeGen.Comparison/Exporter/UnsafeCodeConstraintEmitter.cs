@@ -78,7 +78,13 @@ internal static class UnsafeCodeConstraintEmitter
                     List<string> predicates = [];
                     foreach (UnsafeCodeConstraintPlan plan in group)
                     {
-                        ImmutableArray<RepresentationLocation> locations = index.Resolve(owner.OutcomeKey, plan.SourcePath);
+                        UnsafeCodeSafetyResolution resolution = index.ResolveSafety(owner.OutcomeKey, plan.SourcePath);
+                        if (resolution.Failure is not null)
+                        {
+                            throw Diagnostic(profile.Definition.Url, direction, plan, resolution.Failure);
+                        }
+
+                        ImmutableArray<RepresentationLocation> locations = resolution.Locations;
                         if (locations.IsEmpty)
                         {
                             throw Diagnostic(profile.Definition.Url, direction, plan, "Missing");

@@ -3,10 +3,12 @@
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
 
+using System.Collections.Immutable;
 using System.Text.Json;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.CompareTool;
+using Fhir.CodeGen.Comparison.Exporter;
 using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.Outcomes;
 using Fhir.CodeGen.Comparison.Terminology;
@@ -20,15 +22,25 @@ namespace Fhir.CodeGen.Lib.Tests;
 public class UnsafeCodeOutcomeTests
 {
     [Theory]
-    [InlineData(0, "qualified")]
-    [InlineData(1, "qualified")]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void MixedCodingCodeQualifiesPrimitiveIndependently(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, "code", "qualified", enableRules: true);
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        AssertMixedChoiceSetup(fixture, pair, "code", "qualified");
+        AssertSelectedMixedPlans(fixture, pair, primitive: true);
+        fixture.WriteMixedChoiceStageObservation(pair, "code", "qualified");
+    }
+
+    [Theory]
     [InlineData(0, "missing-binding")]
     [InlineData(1, "missing-binding")]
     [InlineData(0, "multi-system")]
     [InlineData(1, "multi-system")]
     [InlineData(0, "unknown-version")]
     [InlineData(1, "unknown-version")]
-    public void MixedChoicePrimitiveBaselineObservation(int targetIndex, string qualification)
+    public void MixedChoicePrimitiveQualificationFailsWithoutCompletion(int targetIndex, string qualification)
     {
         using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(
             targetIndex, "code", qualification, enableRules: true);
@@ -36,35 +48,197 @@ public class UnsafeCodeOutcomeTests
         FhirPackageComparisonPair pair = new(fixture.Packages[2], fixture.Packages[targetIndex]);
         fixture.CompareProfilePair(pair);
         AssertMixedChoiceSetup(fixture, pair, "code", qualification);
-        Exception? failure = Record.Exception(() => fixture.GenerateProfileOutcomes(pair));
+        InvalidOperationException failure = Should.Throw<InvalidOperationException>(() => fixture.GenerateProfileOutcomes(pair));
         fixture.WriteMixedChoiceStageObservation(pair, "code", qualification);
         DbUnsafeCodeTrigger[] triggers = [.. DbUnsafeCodeTrigger.SelectList(fixture.Connection)];
         DbUnsafeCodePairState state = fixture.PairState(pair);
         state.ComparisonRevision.ShouldNotBeNull();
-        if (failure is not null)
-        {
-            failure.ShouldBeOfType<InvalidOperationException>();
-            failure.Message.ShouldContain("Unsafe-code identity is ambiguous for primitive " + UnsafeCodeTestFixture.MixedChoiceElement);
-            state.OutcomeInputRevision.ShouldBeNull();
-            state.OutcomeComparisonRevision.ShouldBeNull();
-            state.OutcomeFormatVersion.ShouldBeNull();
-            triggers.ShouldBeEmpty("collection precedes insertion; no partial Coding trigger is persisted");
-        }
-        else
-        {
-            UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
-            state.OutcomeInputRevision.ShouldBe(fixture.InputState.CompletedInputRevision);
-            state.OutcomeComparisonRevision.ShouldBe(state.ComparisonRevision);
-            state.OutcomeFormatVersion.ShouldBe(UnsafeCodeConstants.OutcomeFormatVersion);
-            triggers.ShouldContain(trigger => trigger.System == UnsafeCodeTestFixture.MixedCodingSystem &&
-                trigger.Code == "unsafe" && trigger.SourceElementId == UnsafeCodeTestFixture.MixedChoiceElement);
-        }
+        DbStructureOutcome outcome = DbStructureOutcome.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey,
+            TargetFhirPackageKey: pair.TargetPackageKey).Single(row => row.SourceId == "Parameters");
+        string candidateSystem = qualification == "missing-binding" ? UnsafeCodeTestFixture.MixedCodingSystem : UnsafeCodeTestFixture.MixedPrimitiveSystem;
+        failure.Message.ShouldBe($"Unsafe-code identity is ambiguous for primitive {UnsafeCodeTestFixture.MixedChoiceElement} in resource outcome {outcome.Key}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}, candidate {candidateSystem}|#unsafe. Supply an authoritative unique source binding/system version and regenerate outcomes.");
+        state.OutcomeInputRevision.ShouldBeNull();
+        state.OutcomeComparisonRevision.ShouldBeNull();
+        state.OutcomeFormatVersion.ShouldBeNull();
+        triggers.ShouldBeEmpty("collection precedes insertion; no partial Coding trigger is persisted");
         UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_PRIMITIVE", new
         {
             target = pair.TargetFhirSequence.ToRLiteral(), qualification,
-            result = failure is null ? "completed" : "incomplete", diagnostic = failure?.Message,
+            result = "incomplete", diagnostic = failure.Message,
             triggers, state,
         });
+    }
+
+    [Theory]
+    [InlineData(0, "nonmember")]
+    [InlineData(1, "nonmember")]
+    [InlineData(0, "version-nonmatch")]
+    [InlineData(1, "version-nonmatch")]
+    public void MixedChoicePrimitiveNonmemberOrVersionNonmatchKeepsCoding(int targetIndex, string qualification)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, "code", qualification, enableRules: true);
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        AssertSelectedMixedPlans(fixture, pair, primitive: false);
+    }
+
+    internal static IReadOnlyList<UnsafeCodeConstraintPlan> AssertSelectedMixedPlans(
+        UnsafeCodeTestFixture fixture, FhirPackageComparisonPair pair, bool primitive)
+    {
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        DbUnsafeCodePairState state = fixture.PairState(pair);
+        state.OutcomeInputRevision.ShouldBe(fixture.InputState.CompletedInputRevision);
+        state.OutcomeComparisonRevision.ShouldBe(state.ComparisonRevision);
+        state.OutcomeFormatVersion.ShouldBe(UnsafeCodeConstants.OutcomeFormatVersion);
+        IReadOnlyList<UnsafeCodeConstraintPlan> plans = UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+        plans.Count.ShouldBe(primitive ? 3 : 2);
+        plans.Select(plan => plan.Row.Code).ShouldAllBe(code => code == "unsafe");
+        plans.Count(plan => plan.SourcePath[^1].TypeName == "Coding").ShouldBe(2);
+        plans.Count(plan => plan.SourcePath[^1].TypeName == "code").ShouldBe(primitive ? 1 : 0);
+        foreach (UnsafeCodeConstraintPlan plan in plans)
+        {
+            plan.SourcePath.ShouldBe(ImmutableArray.Create<UnsafeCodePathStep>(new("Parameters", null, false),
+                new("Parameters.parameter", null, false), new(UnsafeCodeTestFixture.MixedChoiceElement, null, false),
+                new(plan.SourcePath[^1].TypeName!, plan.SourcePath[^1].TypeName, false)));
+            plan.Row.SourceElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
+            plan.Row.TargetElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
+            plan.Row.SourceFhirPackageKey.ShouldBe(pair.SourcePackageKey);
+            plan.Row.TargetFhirPackageKey.ShouldBe(pair.TargetPackageKey);
+            plan.Row.SourceVersion.ShouldBe(plan.SourcePath[^1].TypeName == "code" ? UnsafeCodeTestFixture.MixedPrimitiveVersion : null);
+            plan.Row.EvidenceKeysJson.ShouldBe("[]");
+            plan.Row.AnnotationKeysJson.ShouldBe("[]");
+            int ruleKey = JsonSerializer.Deserialize<int[]>(plan.Row.RuleKeysJson)!.ShouldHaveSingleItem();
+            DbUnsafeCodeRule rule = DbUnsafeCodeRule.SelectSingle(fixture.Connection, Key: ruleKey)!;
+            rule.System.ShouldBe(plan.Row.System);
+            rule.Code.ShouldBe(plan.Row.Code);
+            rule.EntryIndex.ShouldBe(plan.Row.System == UnsafeCodeTestFixture.MixedCodingSystem ? 0 : 1);
+            rule.SourceRelativeFilename.Replace('\\', '/').ShouldBe("input/ig-support/unsafe-code-mappings.json");
+            plan.Provenance.Replace('\\', '/').ShouldBe("input/ig-support/unsafe-code-mappings.json entry " + rule.EntryIndex);
+            plan.VersionMatch.IsWildcard.ShouldBe(rule.EntryIndex == 0);
+            plan.VersionMatch.Versions.ShouldBe(rule.EntryIndex == 0 ? [] : [UnsafeCodeTestFixture.MixedPrimitiveVersion]);
+            plan.VersionMatch.Matches(UnsafeCodeTestFixture.MixedPrimitiveVersion).ShouldBeTrue();
+            plan.VersionMatch.Matches("primitive-v2").ShouldBe(rule.EntryIndex == 0);
+            plan.VersionMatch.Matches(null).ShouldBe(rule.EntryIndex == 0);
+        }
+
+        return plans;
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void SelectedMixedChoicePathsRoundTripWithoutSchemaChange(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, "code", "qualified", enableRules: true);
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        IReadOnlyList<UnsafeCodeConstraintPlan> plans = AssertSelectedMixedPlans(fixture, pair, primitive: true);
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        string schema = fixture.SchemaSnapshot();
+        string recovered = JsonSerializer.Serialize(plans);
+        foreach (UnsafeCodeConstraintPlan plan in plans)
+        {
+            using JsonDocument json = JsonDocument.Parse(plan.Row.SourcePathJson);
+            json.RootElement.GetArrayLength().ShouldBe(4);
+            foreach (JsonElement step in json.RootElement.EnumerateArray())
+            {
+                step.EnumerateObject().Select(property => property.Name).ShouldBe(["ElementId", "TypeName", "IsContentReference"]);
+            }
+        }
+
+        UnsafeCodeConstants.OutcomeFormatVersion.ShouldBe(1);
+        fixture.InputState.FormatVersion.ShouldBe(1);
+        using (SqliteCommand columns = fixture.Connection.CreateCommand())
+        {
+            columns.CommandText = "PRAGMA table_info(UnsafeCodeTriggers)";
+            using SqliteDataReader reader = columns.ExecuteReader();
+            List<string> names = [];
+            while (reader.Read())
+            {
+                names.Add(reader.GetString(1));
+            }
+
+            names.ShouldBe(["Key", "StructureOutcomeKey", "SourceFhirPackageKey", "TargetFhirPackageKey",
+                "SourceElementId", "TargetElementId", "SourcePathJson", "System", "Code", "SourceVersion",
+                "IsWildcardVersion", "VersionsJson", "EvidenceKeysJson", "RuleKeysJson", "AnnotationKeysJson"]);
+        }
+        StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+        fixture.ConnectionReopens.ShouldBe(4);
+        built.Profiles.Single(profile => profile.Definition.Type == "Parameters").Definition.Differential.Element[0].Constraint.Count.ShouldBe(2);
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+        fixture.SchemaSnapshot().ShouldBe(schema);
+        JsonSerializer.Serialize(UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey)).ShouldBe(recovered);
+    }
+
+    [Theory]
+    [InlineData("ordinary", true)]
+    [InlineData("incoming", true)]
+    [InlineData("profile", true)]
+    [InlineData("nonterminal", false)]
+    [InlineData("duplicate", false)]
+    [InlineData("reference", false)]
+    [InlineData("missing", false)]
+    [InlineData("undeclared", false)]
+    [InlineData("ambiguous", false)]
+    [InlineData("resource", false)]
+    [InlineData("conflicting-version", false)]
+    [InlineData("primitive", true)]
+    [InlineData("count-conflict", false)]
+    [InlineData("duplicate-declaration", false)]
+    public void SourceUseNormalizationPreservesOrdinaryPrefixes(string scenario, bool valid)
+    {
+        ImmutableArray<UnsafeCodePathStep> prefix = [new("Parameters", null, false),
+            new("Parameters.parameter", null, false), new("Wrapper.value[x]", "Wrapper", false)];
+        string token = scenario is "profile" or "conflicting-version" ? "http://example.org/CodingProfile|v1" : "Coding";
+        UnsafeCodeTypeFact coding = new(1, "Coding", token, token == "Coding" ? "Coding" : "Coding[" + token + "]",
+            scenario == "missing" ? [] : scenario == "ambiguous"
+                ? [new(10, "Coding", false), new(11, "Coding", false)] : [new(10, "Coding", scenario == "resource")]);
+        UnsafeCodeEffectiveTypeFacts facts = new([coding, new(2, "boolean", "boolean", "boolean", [new(12, "boolean", false)])],
+            [coding.Literal, "boolean"], 2);
+        if (scenario == "primitive")
+        {
+            coding = new(1, "code", "code", "code", [new(10, "code", false)]);
+            facts = facts with { Types = [coding, facts.Types[1]], Declarations = ["code", "boolean"] };
+            token = "code";
+        }
+        if (scenario == "count-conflict")
+        {
+            facts = facts with { DeclaredCount = 1 };
+        }
+        if (scenario == "duplicate-declaration")
+        {
+            facts = facts with { Types = [coding, coding, facts.Types[1]] };
+        }
+        ImmutableArray<UnsafeCodePathStep> path = prefix.Add(new(scenario == "ordinary" ? "Coding.code" : coding.Roots.FirstOrDefault()?.ElementId ?? "Coding",
+            scenario == "undeclared" ? "string" : scenario == "conflicting-version" ? "http://example.org/CodingProfile|v2" : token,
+            scenario == "reference"));
+        if (scenario is "nonterminal" or "duplicate")
+        {
+            path = path.Add(new(scenario == "duplicate" ? "Coding" : "Coding.code", "Coding", false));
+        }
+
+        UnsafeCodeSourceUseNormalization normalized = UnsafeCodeSourceUseNormalizer.Normalize(path,
+            new Dictionary<int, UnsafeCodeEffectiveTypeFacts> { [prefix.Length] = facts });
+        if (!valid)
+        {
+            normalized.Failure.ShouldNotBeNull();
+            normalized.SourceUse.ShouldBeNull();
+            return;
+        }
+
+        normalized.Failure.ShouldBeNull();
+        if (scenario == "ordinary")
+        {
+            normalized.SourceUse.ShouldBeNull();
+            normalized.OccurrencePath.ShouldBe(path);
+        }
+        else
+        {
+            normalized.OccurrencePath.ShouldBe(prefix);
+            normalized.SourceUse!.TypeUseToken.ShouldBe(token);
+            normalized.SourceUse.RootElementId.ShouldBe(scenario == "primitive" ? "code" : "Coding");
+            normalized.SourceUse.SourceTypeName.ShouldBe(scenario == "primitive" ? "code" : "Coding");
+            normalized.SourceUse.QualificationKind.ShouldBe(scenario == "primitive" ? UnsafeCodeQualificationKind.Primitive : UnsafeCodeQualificationKind.Typed);
+            normalized.SourceUse.SelectedPath.ShouldBe(path);
+        }
     }
 
     internal static void AssertMixedChoiceSetup(

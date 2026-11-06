@@ -137,6 +137,8 @@ internal sealed record RepresentationOccurrence(
     ImmutableArray<UnsafeCodePathStep> SourcePath,
     ImmutableArray<RepresentationLocation> Locations);
 
+internal sealed record UnsafeCodeSafetyResolution(ImmutableArray<RepresentationLocation> Locations, string? Failure = null);
+
 internal sealed class ProfileRepresentationIndex
 {
     internal const string DatatypeMetadataUrl = "http://hl7.org/fhir/StructureDefinition/_datatype";
@@ -282,11 +284,122 @@ internal sealed class ProfileRepresentationIndex
         internal DbElement? TargetBindingElement { get; init; }
     }
 
-    internal ImmutableArray<RepresentationLocation> Resolve(int outcomeKey, IReadOnlyList<UnsafeCodePathStep> sourcePath)
+    private sealed record ResolvedOccurrence(
+        DbElement? Source, List<Projection> Projections, DbElement Target, string? MissingType);
+
+    internal ImmutableArray<RepresentationLocation> Resolve(int outcomeKey, IReadOnlyList<UnsafeCodePathStep> sourcePath) =>
+        BuildLocations(ResolveOccurrence(outcomeKey, sourcePath));
+
+    internal UnsafeCodeSafetyResolution ResolveSafety(int outcomeKey, ImmutableArray<UnsafeCodePathStep> sourcePath)
+    {
+        if (!_profiles.TryGetValue(outcomeKey, out (DbStructureOutcome Outcome, DbElement Target) profile))
+        {
+            return new([], "Missing resource profile");
+        }
+
+        Dictionary<int, UnsafeCodeEffectiveTypeFacts> precedingFacts = [];
+        DbElement? source = null;
+        for (int i = 0; i < sourcePath.Length; i++)
+        {
+            UnsafeCodeEffectiveTypeFacts? facts = source is null ? null : SourceUseFacts(source);
+            if (facts is not null)
+            {
+                precedingFacts[i] = facts;
+            }
+
+            if (UnsafeCodeSourceUseNormalizer.IsEndpointCandidate(sourcePath[i], facts))
+            {
+                break;
+            }
+
+            source = FindSource(profile.Outcome, sourcePath[i], source);
+            if (source is null)
+            {
+                return new([], "InvalidSourceUse: missing source occurrence");
+            }
+        }
+
+        UnsafeCodeSourceUseNormalization normalized = UnsafeCodeSourceUseNormalizer.Normalize(sourcePath, precedingFacts);
+        if (normalized.Failure is not null)
+        {
+            return new([], normalized.Failure);
+        }
+
+        UnsafeCodeSourceUse? selection = normalized.SourceUse;
+        UnsafeCodeTypeFact? selected = null;
+        if (selection is not null)
+        {
+            selected = precedingFacts[sourcePath.Length - 1].Types.Single(type => type.TypeUseToken == selection.TypeUseToken);
+        }
+        else if (source is not null)
+        {
+            UnsafeCodeEffectiveTypeFacts facts = SourceUseFacts(source);
+            if (facts.TypeNames.Contains("Coding", StringComparer.Ordinal) && facts.TypeNames.Contains("code", StringComparer.Ordinal))
+            {
+                return new([], "AmbiguousSourceUse: legacy Coding/code path cannot certify independent primitive qualification");
+            }
+
+            if (facts.TypeNames.Contains("Coding", StringComparer.Ordinal) &&
+                (facts.TypeNames.Contains("boolean", StringComparer.Ordinal) ||
+                    facts.TypeNames.Length == 1 && source.IsChoiceType && facts.DeclaredCount != 1))
+            {
+                if (!facts.Complete || facts.TypeNames.Length != 2 || !facts.TypeNames.Contains("boolean", StringComparer.Ordinal))
+                {
+                    return new([], "InvalidSourceUse: incomplete or conflicting legacy source declarations");
+                }
+
+                UnsafeCodeTypeFact[] coding = [.. facts.Types.Where(type => type.SourceTypeName == "Coding")];
+                if (coding.Length != 1)
+                {
+                    return new([], "InvalidSourceUse: ambiguous legacy Coding declaration");
+                }
+
+                selected = coding[0];
+            }
+        }
+
+        return new(BuildLocations(ResolveOccurrence(outcomeKey, normalized.OccurrencePath), selected));
+    }
+
+    private UnsafeCodeEffectiveTypeFacts SourceUseFacts(DbElement element)
+    {
+        DbElement aggregate = BaseChain(element).FirstOrDefault(basis => basis.DistinctTypes.Any(name => name.Length > 0)) ?? element;
+        DbElementType[] rows = [.. Types(element)];
+        ImmutableArray<UnsafeCodeTypeFact> types = rows.Length == 0
+            ? [.. aggregate.DistinctTypes.Where(name => name.Length > 0).Select(name =>
+                new UnsafeCodeTypeFact(null, name, name, name, ResolveRoots(name, null, null)))]
+            : [.. rows.Select(row => new UnsafeCodeTypeFact(row.Key, row.TypeName ?? string.Empty,
+                row.TypeProfile ?? row.TypeName ?? row.Literal, row.Literal,
+                ResolveRoots(row.TypeName, row.TypeProfile, row.TypeProfileStructureKey ??
+                    (row.TypeProfile is null ? row.TypeStructureKey : null))))];
+        return new(types, [.. aggregate.DistinctTypes.Where(name => name.Length > 0)], aggregate.DistinctTypeCount);
+
+        ImmutableArray<UnsafeCodeRootFact> ResolveRoots(string? name, string? profile, int? key)
+        {
+            UnsafeCodeCanonical canonical = UnsafeCodeCanonical.Parse(profile);
+            DbStructureDefinition[] matches = [.. _structures.Values.Where(structure =>
+                structure.FhirPackageKey == element.FhirPackageKey && (profile is not null
+                    ? structure.UnversionedUrl == canonical.Url && (canonical.Version is null || structure.Version == canonical.Version)
+                    : structure.Name == name && structure.ArtifactClass != FhirArtifactClassEnum.Profile))];
+            if (matches.Length != 1 || key is not null && matches[0].Key != key ||
+                matches[0].ArtifactClass is not (FhirArtifactClassEnum.PrimitiveType or FhirArtifactClassEnum.ComplexType or FhirArtifactClassEnum.Profile))
+            {
+                return [];
+            }
+
+            return [.. _elements.Values.Where(root => root.FhirPackageKey == element.FhirPackageKey &&
+                    root.StructureKey == matches[0].Key && root.ParentElementKey is null && !root.Path.Contains('.', StringComparison.Ordinal))
+                .Select(root => new UnsafeCodeRootFact(matches[0].Key, root.Id,
+                    BaseChain(root).Any(basis => _structures.GetValueOrDefault(basis.StructureKey)?.ArtifactClass == FhirArtifactClassEnum.Resource ||
+                        IsResource(basis))))];
+        }
+    }
+
+    private ResolvedOccurrence? ResolveOccurrence(int outcomeKey, IReadOnlyList<UnsafeCodePathStep> sourcePath)
     {
         if (!_profiles.TryGetValue(outcomeKey, out (DbStructureOutcome Outcome, DbElement Target) profile) || sourcePath.Count == 0)
         {
-            return [];
+            return null;
         }
 
         List<Projection> projections = [new([], profile.Target, null)];
@@ -299,7 +412,7 @@ internal sealed class ProfileRepresentationIndex
             source = FindSource(profile.Outcome, step, source);
             if (source is null)
             {
-                return [new([], step.TypeName, null, RepresentationState.Missing, [])];
+                return new(null, [], profile.Target, step.TypeName);
             }
 
             if (i > 0)
@@ -379,37 +492,58 @@ internal sealed class ProfileRepresentationIndex
             }
         }
 
-        if (source is null || projections.Count == 0)
+        return new(source, projections, profile.Target, sourcePath[^1].TypeName);
+    }
+
+    private ImmutableArray<RepresentationLocation> BuildLocations(ResolvedOccurrence? occurrence, UnsafeCodeTypeFact? selected = null)
+    {
+        if (occurrence is null)
         {
-            return [new([], sourcePath[^1].TypeName, null, RepresentationState.Missing, [])];
+            return [];
+        }
+
+        DbElement? source = occurrence.Source;
+        if (source is null || occurrence.Projections.Count == 0)
+        {
+            return [new([], selected?.SourceTypeName ?? occurrence.MissingType, null, RepresentationState.Missing, [])];
         }
 
         List<RepresentationLocation> locations = [];
-        foreach (Projection projection in projections)
+        foreach (Projection projection in occurrence.Projections)
         {
             if (projection.Extension is RelativeExtensionNode extension)
             {
                 if (extension.IsOpaque)
                 {
-                    AddLocation(new(projection.Steps, source.DistinctTypeLiterals, null, RepresentationState.OpaqueSubstitution, []), projection);
+                    AddLocation(new(projection.Steps, selected?.SourceTypeName ?? source.DistinctTypeLiterals, null, RepresentationState.OpaqueSubstitution, []), projection);
                 }
                 else if (extension.ValueTypes.Count > 0)
                 {
                     foreach ((string sourceType, string targetType) in extension.ValueTypes)
                     {
+                        if (selected is not null && !SelectedExtensionType(sourceType))
+                        {
+                            continue;
+                        }
+
                         AddLocation(new(projection.Steps.Add(new MemberStep("value")).Add(new ChoiceStep(targetType)),
-                            sourceType, targetType, projection.State, []), projection);
+                            selected?.SourceTypeName ?? sourceType, targetType, projection.State, []), projection);
+                    }
+
+                    if (selected is not null && !extension.ValueTypes.Any(type => SelectedExtensionType(type.SourceType)))
+                    {
+                        AddLocation(new(projection.Steps, selected.SourceTypeName, null, RepresentationState.Missing, []), projection);
                     }
                 }
                 else
                 {
                     if (projection.State != RepresentationState.Observable)
                     {
-                        AddLocation(new(projection.Steps, source.DistinctTypeLiterals, null, projection.State, []), projection);
+                        AddLocation(new(projection.Steps, selected?.SourceTypeName ?? source.DistinctTypeLiterals, null, projection.State, []), projection);
                         continue;
                     }
 
-                    AddLocation(new(projection.Steps, source.DistinctTypeLiterals, extension.Datatype?.Name, projection.State, []), projection);
+                    AddLocation(new(projection.Steps, selected?.SourceTypeName ?? source.DistinctTypeLiterals, extension.Datatype?.Name, projection.State, []), projection);
                 }
             }
             else
@@ -426,6 +560,43 @@ internal sealed class ProfileRepresentationIndex
                 if (targetTypes.Length == 0 && projection.Native is not null)
                 {
                     targetTypes = projection.Native.DistinctTypeLiterals.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                }
+                if (selected is not null)
+                {
+                    if (projection.State != RepresentationState.Observable)
+                    {
+                        AddLocation(new(projection.Steps, selected.SourceTypeName, null, projection.State, transformations), projection);
+                        continue;
+                    }
+
+                    DbElementTypeComparison[] comparisons = [.. BaseChain(source).Select(basis => _typeComparisons[basis.Key])
+                        .FirstOrDefault(rows => rows.Any())?.Where(comparison =>
+                            projection.Native is not null && BaseChain(projection.Native).Any(target => target.Key == comparison.TargetElementKey) &&
+                            comparison.SourceTypeLiteral == selected.Literal &&
+                            (selected.RowKey is null || comparison.SourceElementTypeKey == selected.RowKey)) ?? []];
+                    if (comparisons.Length == 0)
+                    {
+                        AddLocation(new(projection.Steps, selected.SourceTypeName, null, RepresentationState.Missing, transformations), projection);
+                    }
+
+                    foreach (DbElementTypeComparison comparison in comparisons)
+                    {
+                        DbElementType? targetRow = comparison.TargetElementTypeKey is int key ? _typesByKey.GetValueOrDefault(key) : null;
+                        UnsafeCodeEffectiveTypeFacts? targetFacts = projection.Native is null ? null : SourceUseFacts(projection.Native);
+                        UnsafeCodeTypeFact[] targetUses = [.. targetFacts?.Types.Where(type =>
+                            targetRow is not null ? type.RowKey == targetRow.Key
+                                : type.RowKey is null && type.Literal == comparison.TargetTypeLiteral) ?? []];
+                        bool declaredTarget = targetFacts?.Complete == true && targetUses.Length == 1 &&
+                            comparison.TargetTypeLiteral == targetUses[0].Literal;
+                        string? actualType = declaredTarget ? targetUses[0].SourceTypeName : null;
+                        RepresentationState state = comparison.NotMapped || actualType is null
+                            ? RepresentationState.Missing : projection.State;
+                        ImmutableArray<RepresentationStep> steps = projection.Native?.IsChoiceType == true && actualType is not null
+                            ? projection.Steps.Add(new ChoiceStep(actualType)) : projection.Steps;
+                        AddLocation(new(steps, selected.SourceTypeName, actualType, state, transformations), projection);
+                    }
+
+                    continue;
                 }
                 IEnumerable<(string Source, string? Target)> types = Types(source)
                     .Select(type => (type.TypeName ?? type.Literal, targetTypes.Contains(type.TypeName ?? type.Literal, StringComparer.Ordinal)
@@ -451,7 +622,7 @@ internal sealed class ProfileRepresentationIndex
             }
         }
 
-        return [.. locations.Select(location => location with { Steps = WithOwners(location.Steps, profile.Target) })
+        return [.. locations.Select(location => location with { Steps = WithOwners(location.Steps, occurrence.Target) })
             .DistinctBy(location => (StepsKey(location.Steps), location.SourceType, location.TargetType, location.State, location.SourceBinding))];
 
         void AddLocation(RepresentationLocation location, Projection projection)
@@ -482,6 +653,10 @@ internal sealed class ProfileRepresentationIndex
                 SourceBinding = Binding(projection.SourceBindingElement ?? source),
             });
         }
+
+        bool SelectedExtensionType(string sourceType) => sourceType == selected!.Literal ||
+            sourceType == selected.TypeUseToken ||
+            sourceType == selected.SourceTypeName && Types(source).Count(type => type.TypeName == sourceType) <= 1;
     }
 
     private static CodeCarrierKind CarrierKind(string? type) => type switch

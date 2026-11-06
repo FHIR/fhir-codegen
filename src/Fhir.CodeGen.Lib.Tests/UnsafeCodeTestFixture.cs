@@ -136,7 +136,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(targetIndex);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(targetIndex, 1);
         if (primitiveAlternative is not ("boolean" or "code") ||
-            primitiveQualification is not ("qualified" or "missing-binding" or "multi-system" or "unknown-version"))
+            primitiveQualification is not ("qualified" or "missing-binding" or "multi-system" or "unknown-version" or "nonmember" or "version-nonmatch"))
         {
             throw new ArgumentException("Unknown mixed-choice input variant.");
         }
@@ -184,8 +184,10 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                         Include = [new()
                         {
                             System = MixedPrimitiveSystem,
-                            Version = source && primitiveQualification == "unknown-version" ? null : MixedPrimitiveVersion,
-                            Concept = [new() { Code = "safe" }, new() { Code = "unsafe" }],
+                            Version = source && primitiveQualification == "unknown-version" ? null
+                                : source && primitiveQualification == "version-nonmatch" ? "primitive-v2" : MixedPrimitiveVersion,
+                            Concept = source && primitiveQualification == "nonmember"
+                                ? [new() { Code = "safe" }] : [new() { Code = "safe" }, new() { Code = "unsafe" }],
                         }],
                     },
                 };
@@ -473,6 +475,30 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal static void WriteMixedChoiceObservation(string label, object observation)
     {
         Console.WriteLine(label + " " + JsonSerializer.Serialize(observation));
+    }
+
+    internal string SafetyPersistenceSnapshot() => JsonSerializer.Serialize(new
+    {
+        Input = DbUnsafeCodeInputState.SelectList(Connection),
+        Pairs = DbUnsafeCodePairState.SelectList(Connection),
+        Triggers = DbUnsafeCodeTrigger.SelectList(Connection),
+        Rules = DbUnsafeCodeRule.SelectList(Connection),
+        Evidence = DbUnsafeCodeMapEvidence.SelectList(Connection),
+        Annotations = DbUnsafeCodeElementAnnotation.SelectList(Connection),
+    });
+
+    internal string SchemaSnapshot()
+    {
+        using SqliteCommand command = Connection.CreateCommand();
+        command.CommandText = "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name";
+        using SqliteDataReader reader = command.ExecuteReader();
+        List<(string Name, string Sql)> schema = [];
+        while (reader.Read())
+        {
+            schema.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        return JsonSerializer.Serialize(schema.Select(table => new { table.Name, table.Sql }));
     }
 
     internal static UnsafeCodeTestFixture CreateProfileInputs(bool initializeIndices = true, bool persistDatabase = false)
