@@ -41,6 +41,232 @@ public class UnsafeCodeProfileTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
+    public void ImportedIdentityChangingNativeMapBaselineObservation(int targetIndex) =>
+        AssertImportedNativeObservation(targetIndex, UnsafeCodeTestFixture.ImportedNativeScenario.IdentityChanging);
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void ImportedIdentityPreservingNativeMapEnforcesImplicitRules(int targetIndex) =>
+        AssertImportedNativeObservation(targetIndex, UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving);
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void ImportedSourceNonmemberDoesNotAcquireNativeTransformation(int targetIndex) =>
+        AssertImportedNativeObservation(targetIndex, UnsafeCodeTestFixture.ImportedNativeScenario.SourceNonmember);
+
+    private static void AssertImportedNativeObservation(int targetIndex, UnsafeCodeTestFixture.ImportedNativeScenario scenario)
+    {
+        using UnsafeCodeTestFixture main = UnsafeCodeTestFixture.CreateImportedNativeCodingInputs(targetIndex, scenario, enableRule: true);
+        FhirPackageComparisonPair pair = main.LoadCompareAndGenerate(targetIndex);
+        UnsafeCodeInputStore.RequireExportReady(main.Connection, [pair]);
+        main.ConnectionReopens.ShouldBe(3);
+        DbValueSet sourceOuter = main.ImportedValueSet(pair.SourcePackage, "outer");
+        DbValueSet sourceInner = main.ImportedValueSet(pair.SourcePackage, "inner");
+        DbValueSet targetOuter = main.ImportedValueSet(pair.TargetPackage, "outer");
+        DbValueSet targetInner = main.ImportedValueSet(pair.TargetPackage, "inner");
+        foreach ((DbFhirPackage package, DbValueSet outer, DbValueSet inner) in new[]
+            { (pair.SourcePackage, sourceOuter, sourceInner), (pair.TargetPackage, targetOuter, targetInner) })
+        {
+            outer.FhirPackageKey.ShouldBe(package.Key);
+            inner.FhirPackageKey.ShouldBe(package.Key);
+            outer.CanExpand.ShouldBeFalse();
+            inner.CanExpand.ShouldBeFalse();
+            outer.Version.ShouldNotBe(UnsafeCodeTestFixture.ImportedSystemVersion);
+            inner.Version.ShouldNotBe(UnsafeCodeTestFixture.ImportedSystemVersion);
+            outer.Compose!.Include[0].ValueSet.ShouldBe([inner.VersionedUrl]);
+            DbValueSet.SelectList(main.Connection, FhirPackageKey: package.Key, UnversionedUrl: inner.UnversionedUrl, Version: inner.Version)
+                .ShouldHaveSingleItem().Key.ShouldBe(inner.Key);
+            DbValueSet.SelectList(main.Connection, FhirPackageKey: package.Key, UnversionedUrl: outer.UnversionedUrl, Version: outer.Version)
+                .ShouldHaveSingleItem().Key.ShouldBe(outer.Key);
+        }
+        sourceOuter.UnversionedUrl.ShouldNotBe(targetOuter.UnversionedUrl);
+        sourceInner.UnversionedUrl.ShouldNotBe(targetInner.UnversionedUrl);
+
+        DbUnsafeCodeMapEvidence map = DbUnsafeCodeMapEvidence.SelectList(main.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey).ShouldHaveSingleItem();
+        map.SourceValueSetUrl.ShouldBe(sourceInner.UnversionedUrl);
+        map.SourceValueSetVersion.ShouldBe(sourceInner.Version);
+        map.TargetValueSetUrl.ShouldBe(targetInner.UnversionedUrl);
+        map.TargetValueSetVersion.ShouldBe(targetInner.Version);
+        map.SourceSystem.ShouldBe(UnsafeCodeTestFixture.ImportedSourceSystem);
+        map.SourceCode.ShouldBe("unsafe");
+        map.SourceSystemVersion.ShouldBe(UnsafeCodeTestFixture.ImportedSystemVersion);
+        map.TargetSystem.ShouldBe(scenario == UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving
+            ? UnsafeCodeTestFixture.ImportedSourceSystem : "urn:example:target");
+        map.TargetCode.ShouldBe(scenario == UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving ? "unsafe" : "changed");
+        map.TargetSystemVersion.ShouldBe(UnsafeCodeTestFixture.ImportedSystemVersion);
+        map.ExplicitNoMap.ShouldBeFalse();
+        map.GroupIndex.ShouldBe(0);
+        map.SourceIndex.ShouldBe(0);
+        map.TargetIndex.ShouldBe(0);
+        string destination = targetIndex == 0 ? "R4" : "R4B";
+        map.ConceptMapId.ShouldBe("imported-native-R5-" + destination);
+        map.ConceptMapUrl.ShouldBe("http://example.org/ConceptMap/" + map.ConceptMapId);
+        map.SourceRelativeFilename.Replace('\\', '/').ShouldBe("input/codes/ConceptMap-R5-imported-native-" + destination + ".json");
+        bool sourceMember = sourceInner.Compose!.Include.Any(include => include.System == map.SourceSystem &&
+            include.Version == map.SourceSystemVersion && include.Concept.Any(concept => concept.Code == map.SourceCode));
+        sourceMember.ShouldBe(scenario != UnsafeCodeTestFixture.ImportedNativeScenario.SourceNonmember);
+        targetInner.Compose!.Include.ShouldContain(include => include.System == map.TargetSystem &&
+            include.Version == map.TargetSystemVersion && include.Concept.Any(concept => concept.Code == map.TargetCode));
+        if (!sourceMember)
+        {
+            sourceOuter.Compose!.Include.ShouldContain(include => include.System == map.SourceSystem &&
+                include.Version == map.SourceSystemVersion && include.Concept.Any(concept => concept.Code == map.SourceCode));
+        }
+
+        DbStructureOutcome outcome = DbStructureOutcome.SelectList(main.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            .Single(row => row.SourceId == "ValueSet");
+        DbUnsafeCodeTrigger[] triggers = [.. DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)];
+        Console.WriteLine("MEASURED_IMPORTED_NATIVE_STAGE " + JsonSerializer.Serialize(new
+        {
+            baseline = "e153f6ef797a0194b8a36ca1994818a07e08140e", destination, scenario = scenario.ToString(),
+            sourceOuter = sourceOuter.VersionedUrl, sourceInner = sourceInner.VersionedUrl,
+            targetOuter = targetOuter.VersionedUrl, targetInner = targetInner.VersionedUrl, sourceMember,
+            packages = new[] { pair.SourcePackage, pair.TargetPackage }.Select(package => new
+                { package.PackageId, package.PackageVersion, package.DefinitionFhirSequence }),
+            scopes = new[] { sourceOuter, sourceInner, targetOuter, targetInner }.Select(scope => new
+            {
+                scope.FhirPackageKey, scope.UnversionedUrl, scope.Version, scope.VersionedUrl, scope.CanExpand,
+                includes = scope.Compose!.Include.Select(include => new { include.System, include.Version, include.ValueSet,
+                    members = include.Concept.Select(concept => concept.Code) }),
+            }),
+            map, triggers, rules = DbUnsafeCodeRule.SelectList(main.Connection), state = main.PairState(pair),
+            comparisons = DbElementComparison.SelectList(main.Connection, SourceFhirPackageKey: pair.SourcePackageKey,
+                TargetFhirPackageKey: pair.TargetPackageKey).Select(comparison => new
+            {
+                comparison.SourceElementId, comparison.TargetElementId, comparison.Relationship, comparison.Steps,
+                comparison.ElementMappingKey, comparison.ContentKeys,
+                types = DbElementTypeComparison.SelectList(main.Connection, ElementComparisonKey: comparison.Key)
+                    .Select(type => new { type.SourceTypeLiteral, type.TargetTypeLiteral, type.Relationship }),
+                outcomes = DbElementOutcomeTarget.SelectList(main.Connection, ElementComparisonKey: comparison.Key),
+            }),
+        }));
+        triggers.ShouldNotBeEmpty();
+        triggers.ShouldAllBe(trigger => trigger.System == UnsafeCodeTestFixture.ImportedSourceSystem && trigger.Code == "unsafe" &&
+            trigger.EvidenceKeysJson == "[]" && trigger.AnnotationKeysJson == "[]" && trigger.IsWildcardVersion &&
+            trigger.SourceVersion == null && trigger.VersionsJson == "[]");
+        DbUnsafeCodeTrigger boundTrigger = triggers.Single(trigger => trigger.SourceElementId == UnsafeCodeTestFixture.ImportedNativeElement);
+        boundTrigger.TargetElementId.ShouldBe(UnsafeCodeTestFixture.ImportedNativeElement);
+        ImmutableArray<UnsafeCodePathStep> path = [.. JsonSerializer.Deserialize<UnsafeCodePathStep[]>(boundTrigger.SourcePathJson)!];
+        path.Select(step => step.ElementId).ShouldBe(["ValueSet", UnsafeCodeTestFixture.ImportedNativeElement, "CodeableConcept.coding"]);
+        foreach (DbUnsafeCodeTrigger trigger in triggers)
+        {
+            int key = JsonSerializer.Deserialize<int[]>(trigger.RuleKeysJson)!.ShouldHaveSingleItem();
+            DbUnsafeCodeRule rule = DbUnsafeCodeRule.SelectSingle(main.Connection, Key: key)!;
+            rule.System.ShouldBe(UnsafeCodeTestFixture.ImportedSourceSystem);
+            rule.Code.ShouldBe("unsafe");
+            rule.Version.ShouldBeNull();
+            rule.NoMapOnly.ShouldBeFalse();
+            rule.ExcludedRelationshipLiteral.ShouldBeEmpty();
+            rule.ExcludedVersionLiteral.ShouldBeEmpty();
+            rule.EntryIndex.ShouldBe(0);
+            rule.SourceRelativeFilename.Replace('\\', '/').ShouldBe("input/ig-support/unsafe-code-mappings.json");
+        }
+
+        foreach (string elementId in new[] { UnsafeCodeTestFixture.ImportedNativeElement, "CodeableConcept.coding", "Coding.system", "Coding.version", "Coding.code" })
+        {
+            DbElementComparison comparison = DbElementComparison.SelectList(main.Connection,
+                SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey, SourceElementId: elementId)
+                .ShouldHaveSingleItem();
+            comparison.TargetElementId.ShouldBe(elementId);
+            DbElementMapping.SelectList(main.Connection, SourceFhirPackageKey: pair.SourcePackageKey,
+                TargetFhirPackageKey: pair.TargetPackageKey, SourceElementId: elementId).ShouldHaveSingleItem()
+                .TargetElementId.ShouldBe(elementId);
+            comparison.TargetElementKey.ShouldNotBeNull();
+            DbElementTypeComparison.SelectList(main.Connection, ElementComparisonKey: comparison.Key)
+                .ShouldNotBeEmpty("contributing types for " + elementId);
+            DbElementOutcomeTarget.SelectList(main.Connection, ElementComparisonKey: comparison.Key).ShouldNotBeEmpty();
+        }
+        SortedDictionary<string, string[]> mainState = main.ImportedNativeSemanticState();
+        using UnsafeCodeTestFixture probe = UnsafeCodeTestFixture.CreateImportedNativeCodingInputs(targetIndex, scenario, enableRule: false);
+        FhirPackageComparisonPair probePair = probe.LoadCompareAndGenerate(targetIndex);
+        UnsafeCodeInputStore.RequireExportReady(probe.Connection, [probePair]);
+        DbUnsafeCodeTrigger.SelectList(probe.Connection).ShouldBeEmpty();
+        SortedDictionary<string, string[]> probeState = probe.ImportedNativeSemanticState();
+        probeState.Keys.ShouldBe(mainState.Keys);
+        foreach ((string table, string[] signatures) in mainState)
+        {
+            probeState[table].ShouldBe(signatures, "independently staged semantic correspondence: " + table);
+        }
+        DbStructureOutcome probeOutcome = DbStructureOutcome.SelectList(probe.Connection,
+            SourceFhirPackageKey: probePair.SourcePackageKey, TargetFhirPackageKey: probePair.TargetPackageKey)
+            .Single(row => row.SourceId == "ValueSet");
+        StructureFhirExporter.BuiltDefinitions probeBuilt = probe.BuildDefinitions(probePair);
+        RepresentationLocation native = probeBuilt.Representations.Resolve(probeOutcome.Key, path).ShouldHaveSingleItem();
+        native.State.ShouldBe(RepresentationState.Observable);
+        native.SourceType.ShouldBe("Coding");
+        native.TargetType.ShouldBe("Coding");
+        native.SourceBinding.ShouldBe(new UnsafeCodeCanonical(sourceOuter.UnversionedUrl, sourceOuter.Version));
+        native.Steps.ShouldAllBe(step => step is MemberStep);
+        native.Steps.Cast<MemberStep>().Select(step => step.Name).ShouldBe(["jurisdiction", "coding"]);
+        DbElement probeSourceBinding = DbElement.SelectSingle(probe.Connection, FhirPackageKey: probePair.SourcePackageKey, Id: UnsafeCodeTestFixture.ImportedNativeElement)!;
+        DbElement probeTargetBinding = DbElement.SelectSingle(probe.Connection, FhirPackageKey: probePair.TargetPackageKey, Id: UnsafeCodeTestFixture.ImportedNativeElement)!;
+        probeSourceBinding.BindingValueSet.ShouldBe(sourceOuter.VersionedUrl);
+        probeTargetBinding.BindingValueSet.ShouldBe(targetOuter.VersionedUrl);
+        probeSourceBinding.BindingValueSetKey.ShouldBe(probe.ImportedValueSet(probePair.SourcePackage, "outer").Key);
+        probeTargetBinding.BindingValueSetKey.ShouldBe(probe.ImportedValueSet(probePair.TargetPackage, "outer").Key);
+        Console.WriteLine("MEASURED_IMPORTED_NATIVE_PROBE " + JsonSerializer.Serialize(new
+        {
+            destination, scenario = scenario.ToString(), correspondingTables = mainState.Select(entry => new { table = entry.Key, rows = entry.Value.Length }),
+            sourceBinding = probeSourceBinding.BindingValueSet, targetBinding = probeTargetBinding.BindingValueSet,
+            native.State, native.SourceType, native.TargetType, path = native.Steps.Cast<MemberStep>().Select(step => step.Name), native.Transformations,
+        }));
+        if (scenario != UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving)
+        {
+            native.Transformations.ShouldBeEmpty();
+        }
+        StructureFhirExporter.BuiltDefinitions built;
+        try
+        {
+            built = main.BuildDefinitions(pair);
+        }
+        catch (Exception exception)
+        {
+            Console.WriteLine("MEASURED_IMPORTED_NATIVE_CONSTRUCTION " + JsonSerializer.Serialize(new
+                { destination, scenario = scenario.ToString(), result = "exception", diagnostic = exception.ToString() }));
+            throw;
+        }
+        JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key))
+            .ShouldBe(JsonSerializer.Serialize(triggers));
+        RepresentationLocation activeNative = built.Representations.Resolve(outcome.Key, path).ShouldHaveSingleItem();
+        activeNative.State.ShouldBe(native.State);
+        activeNative.SourceType.ShouldBe(native.SourceType);
+        activeNative.TargetType.ShouldBe(native.TargetType);
+        activeNative.SourceBinding.ShouldBe(native.SourceBinding);
+        activeNative.Steps.ShouldBe(native.Steps);
+        activeNative.Transformations.ShouldBe(native.Transformations);
+        StructureDefinition profile = built.Profiles.Single(candidate => candidate.Definition.Type == "ValueSet").Definition;
+        ElementDefinition.ConstraintComponent condition = UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex).ShouldHaveSingleItem();
+        RecoveredExpressions(profile, targetIndex).ShouldBe([condition.Expression]);
+        condition.Expression.ShouldBe("($this.jurisdiction.coding.where($this.code.where($this = 'unsafe').exists() and " +
+            "$this.system.where($this = 'urn:example:source').exists()).exists() implies implicitRules.where($this = " +
+            "'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())");
+        bool changedWithoutUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, "urn:example:target", "changed");
+        bool sourceWithoutUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe");
+        bool sourceWrongUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe", "http://wrong");
+        bool sourceExactUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe", UnsafeCodeConstants.ImplicitRules);
+        Console.WriteLine("MEASURED_CONSTRAINT_DIFF " + JsonSerializer.Serialize(new
+        {
+            baseline = "e153f6ef797a0194b8a36ca1994818a07e08140e", destination, scenario = scenario.ToString(),
+            construction = "succeeded", profile = profile.Url, condition.Key, condition.Expression,
+            condition = "newly emitted unsafe-code condition only; not whole-profile validity",
+            runtimeVersion = (string?)null, nativeTransformations = activeNative.Transformations,
+            condition.Severity, condition.Human, condition.Source,
+            changedWithoutUri, sourceWithoutUri, sourceWrongUri, sourceExactUri,
+        }));
+        changedWithoutUri.ShouldBeTrue();
+        sourceWithoutUri.ShouldBeFalse();
+        sourceWrongUri.ShouldBeFalse();
+        sourceExactUri.ShouldBeTrue();
+        profile.ImplicitRules.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
     public void PersistedPlansNotPolicyFilesDriveConstruction(int targetIndex)
     {
         using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateNoFeatureInputs();

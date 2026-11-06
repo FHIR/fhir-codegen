@@ -19,6 +19,243 @@ namespace Fhir.CodeGen.Lib.Tests;
 public class UnsafeCodeOutcomeTests
 {
     [Theory]
+    [InlineData("resolved-nested", false, "trigger")]
+    [InlineData("import-version-mismatch", false, "empty")]
+    [InlineData("wrong-package", false, "empty")]
+    [InlineData("key-url-fallback", false, "trigger")]
+    [InlineData("key-version-fallback", false, "trigger")]
+    [InlineData("key-package-fallback", false, "trigger")]
+    [InlineData("key-only-wrong-package", true, "ambiguous")]
+    [InlineData("sibling-member", false, "empty")]
+    [InlineData("missing-import", true, "ambiguous")]
+    [InlineData("ambiguous-import", true, "trigger")]
+    [InlineData("compose-cycle", true, "trigger")]
+    [InlineData("expansion", false, "trigger")]
+    [InlineData("exclude-typed-precise", true, "trigger")]
+    [InlineData("filter-current-precise", false, "trigger")]
+    [InlineData("missing-compose", true, "ambiguous")]
+    [InlineData("wildcard-system-version", false, "trigger")]
+    [InlineData("missing-system-qualified", false, "trigger")]
+    [InlineData("missing-system-ambiguous", true, "ambiguous")]
+    [InlineData("required-primitive-ambiguous", false, "ambiguous")]
+    [InlineData("required-primitive-incomplete", false, "ambiguous")]
+    [InlineData("unknown-direct-version-potential", true, "ambiguous")]
+    public void BindingScopeExtractionPreservesOutcomeSemantics(string scenario, bool typed, string expected)
+    {
+        const string systemVersion = "code-system-v1";
+        using UnsafeCodeTestFixture fixture = new();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        (DbStructureOutcome outcome, DbElement source, DbElement target) = BoundElements(fixture, pair,
+            systemVersion, typed ? "Coding" : "code");
+        fixture.Connect(pair, outcome, source, target);
+        fixture.AddAnnotation(pair, source, target);
+        fixture.AddRule(noMapOnly: true);
+        DbValueSet outer = DbValueSet.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: "filter-operator")!;
+        DbValueSet targetBinding = fixture.SetBinding(pair.TargetPackage, systemVersion: systemVersion, valueSetVersion: "target-vs");
+        DbValueSet inner = fixture.SetBinding(pair.SourcePackage, systemVersion: systemVersion);
+        inner.Id = "extraction-inner";
+        inner.UnversionedUrl = "http://example.org/ValueSet/extraction-inner";
+        inner.Version = "inner-valueset-v3";
+        inner.VersionedUrl = inner.UnversionedUrl + "|" + inner.Version;
+        inner.Compose = new() { Include = [new() { System = UnsafeCodeTestFixture.FilterSystem, Version = systemVersion,
+            Concept = [new() { Code = "unsafe" }] }] };
+        inner.Key = DbValueSet.Insert(fixture.Connection, inner);
+        outer.Compose = new() { Include = [new() { ValueSet = [inner.VersionedUrl] }] };
+        outer.CanExpand = false;
+        source.BindingValueSetKey = outer.Key;
+        DbUnsafeCodeMapEvidence map = fixture.AddEvidence(pair, sourceScope: inner.UnversionedUrl,
+            sourceVersion: inner.Version, targetVersion: targetBinding.Version);
+        map.SourceSystemVersion = systemVersion;
+        map.ConceptMapId = "extraction-map";
+        map.ConceptMapUrl = "http://example.org/ConceptMap/extraction-map";
+        switch (scenario)
+        {
+            case "resolved-nested":
+                DbValueSet middle = fixture.SetBinding(pair.SourcePackage, systemVersion: systemVersion);
+                middle.Id = "extraction-middle";
+                middle.UnversionedUrl = "http://example.org/ValueSet/extraction-middle";
+                middle.Version = "middle-valueset-v2";
+                middle.VersionedUrl = middle.UnversionedUrl + "|" + middle.Version;
+                middle.Compose = new() { Include = [new() { ValueSet = [inner.VersionedUrl] }] };
+                middle.Key = DbValueSet.Insert(fixture.Connection, middle);
+                outer.Compose.Include[0].ValueSet = [middle.VersionedUrl];
+                break;
+            case "import-version-mismatch":
+                outer.Compose.Include[0].ValueSet = [inner.UnversionedUrl + "|wrong-valueset-version"];
+                break;
+            case "wrong-package":
+                inner.FhirPackageKey = pair.TargetPackageKey;
+                break;
+            case "key-url-fallback":
+                source.BindingValueSetKey = inner.Key;
+                break;
+            case "key-version-fallback":
+                DbValueSet wrongVersion = fixture.SetBinding(pair.SourcePackage, systemVersion: systemVersion);
+                wrongVersion.Version = "wrong-outer-version";
+                wrongVersion.VersionedUrl = wrongVersion.UnversionedUrl + "|" + wrongVersion.Version;
+                wrongVersion.Key = DbValueSet.Insert(fixture.Connection, wrongVersion);
+                source.BindingValueSetKey = wrongVersion.Key;
+                break;
+            case "key-package-fallback":
+                source.BindingValueSetKey = targetBinding.Key;
+                break;
+            case "key-only-wrong-package":
+                source.BindingValueSetKey = targetBinding.Key;
+                source.BindingValueSet = null;
+                map.SourceValueSetUrl = null;
+                map.SourceValueSetVersion = null;
+                break;
+            case "sibling-member":
+                inner.Compose.Include[0].Concept = [new() { Code = "other" }];
+                outer.Compose.Include.Add(new() { System = UnsafeCodeTestFixture.FilterSystem, Version = systemVersion,
+                    Concept = [new() { Code = "unsafe" }] });
+                break;
+            case "missing-import":
+                outer.Compose.Include[0].ValueSet = ["http://example.org/ValueSet/missing|missing-v1"];
+                map.SourceValueSetUrl = outer.UnversionedUrl;
+                map.SourceValueSetVersion = outer.Version;
+                break;
+            case "ambiguous-import":
+                DbValueSet duplicate = fixture.SetBinding(pair.SourcePackage, systemVersion: systemVersion);
+                duplicate.Id = "extraction-other-version";
+                duplicate.UnversionedUrl = inner.UnversionedUrl;
+                duplicate.Version = "other-inner-version";
+                duplicate.VersionedUrl = duplicate.UnversionedUrl + "|" + duplicate.Version;
+                duplicate.Compose = inner.Compose;
+                duplicate.Key = DbValueSet.Insert(fixture.Connection, duplicate);
+                outer.Compose.Include[0].ValueSet = [inner.UnversionedUrl];
+                break;
+            case "compose-cycle":
+            case "required-primitive-incomplete":
+                inner.Compose.Include.Add(new() { ValueSet = [outer.VersionedUrl] });
+                break;
+            case "expansion":
+                inner.CanExpand = true;
+                inner.Compose = null;
+                DbValueSetConcept.Insert(fixture.Connection, new DbValueSetConcept
+                {
+                    FhirPackageKey = pair.SourcePackageKey, ValueSetKey = inner.Key, System = UnsafeCodeTestFixture.FilterSystem,
+                    SystemVersion = systemVersion, Code = "unsafe", Display = null, Inactive = false, Abstract = false, Properties = null,
+                });
+                break;
+            case "exclude-typed-precise":
+                inner.Compose.Exclude = [new() { System = UnsafeCodeTestFixture.FilterSystem, Concept = [new() { Code = "unsafe" }] }];
+                break;
+            case "filter-current-precise":
+                inner.Compose.Include[0].Filter = [new() { Property = "status", Op = FilterOperator.Equal, Value = "active" }];
+                break;
+            case "missing-compose":
+                inner.Compose = null;
+                break;
+            case "wildcard-system-version":
+                inner.Compose.Include[0].Version = null;
+                map.SourceSystemVersion = null;
+                break;
+            case "missing-system-qualified":
+                map.SourceSystem = null;
+                map.SourceSystemVersion = null;
+                break;
+            case "missing-system-ambiguous":
+            case "required-primitive-ambiguous":
+                inner.Compose.Include.Add(new() { System = "http://example.org/other-system", Version = systemVersion,
+                    Concept = [new() { Code = "unsafe" }] });
+                if (scenario == "missing-system-ambiguous")
+                {
+                    map.SourceSystem = null;
+                    map.SourceSystemVersion = null;
+                }
+                break;
+            case "unknown-direct-version-potential":
+                source.BindingValueSet = UnsafeCodeTestFixture.FilterValueSet;
+                source.BindingValueSetKey = null;
+                DbValueSet.Delete(fixture.Connection, Key: outer.Key);
+                map.SourceValueSetUrl = UnsafeCodeTestFixture.FilterValueSet;
+                map.SourceValueSetVersion = "source-vs";
+                break;
+            default:
+                throw new InvalidOperationException("Unknown extraction characterization: " + scenario);
+        }
+
+        if (scenario != "unknown-direct-version-potential")
+        {
+            DbValueSet.Update(fixture.Connection, [outer]);
+        }
+        DbValueSet.Update(fixture.Connection, [inner]);
+        DbElement.Update(fixture.Connection, [source]);
+        DbUnsafeCodeMapEvidence.Update(fixture.Connection, [map]);
+        if (expected == "ambiguous")
+        {
+            InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Generate(fixture, pair));
+            error.Message.ShouldContain("ambiguous");
+            error.Message.ShouldContain(source.Id);
+            error.Message.ShouldContain(scenario switch
+            {
+                "missing-system-ambiguous" => "the applicable authored no-map code has no qualified source system",
+                "required-primitive-ambiguous" or "required-primitive-incomplete" => "identity is ambiguous for primitive",
+                _ => "binding scope is ambiguous",
+            });
+            fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
+            fixture.PairState(pair).OutcomeComparisonRevision.ShouldBeNull();
+            fixture.PairState(pair).OutcomeFormatVersion.ShouldBeNull();
+            fixture.PairState(pair).ComparisonRevision.ShouldNotBeNull();
+            Triggers(fixture).ShouldBeEmpty();
+            Console.WriteLine("MEASURED_BINDING_SCOPE_OUTCOME " + JsonSerializer.Serialize(new
+                { scenario, typed, result = "incomplete", diagnostic = error.Message, source = source.BindingValueSet, map }));
+            return;
+        }
+
+        Generate(fixture, pair);
+        AssertCompleted(fixture, pair);
+        if (expected == "empty")
+        {
+            Triggers(fixture).ShouldBeEmpty();
+        }
+        else
+        {
+            DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
+            trigger.StructureOutcomeKey.ShouldBe(outcome.Key);
+            trigger.SourceFhirPackageKey.ShouldBe(pair.SourcePackageKey);
+            trigger.TargetFhirPackageKey.ShouldBe(pair.TargetPackageKey);
+            trigger.SourceElementId.ShouldBe(source.Id);
+            trigger.TargetElementId.ShouldBe(target.Id);
+            trigger.System.ShouldBe(UnsafeCodeTestFixture.FilterSystem);
+            trigger.Code.ShouldBe("unsafe");
+            bool wildcard = scenario == "wildcard-system-version";
+            trigger.SourceVersion.ShouldBe(typed || wildcard ? null : systemVersion);
+            trigger.IsWildcardVersion.ShouldBe(wildcard);
+            JsonSerializer.Deserialize<string[]>(trigger.VersionsJson).ShouldBe(wildcard ? [] : [systemVersion]);
+            JsonSerializer.Deserialize<UnsafeCodePathStep[]>(trigger.SourcePathJson)!.Select(step => step.ElementId)
+                .ShouldBe(["ValueSet", source.Id]);
+            JsonSerializer.Deserialize<int[]>(trigger.EvidenceKeysJson).ShouldBe([map.Key]);
+            JsonSerializer.Deserialize<int[]>(trigger.RuleKeysJson)!.ShouldHaveSingleItem()
+                .ShouldBe(DbUnsafeCodeRule.SelectList(fixture.Connection).ShouldHaveSingleItem().Key);
+            JsonSerializer.Deserialize<int[]>(trigger.AnnotationKeysJson)!.ShouldHaveSingleItem()
+                .ShouldBe(DbUnsafeCodeElementAnnotation.SelectList(fixture.Connection).ShouldHaveSingleItem().Key);
+        }
+
+        Console.WriteLine("MEASURED_BINDING_SCOPE_OUTCOME " + JsonSerializer.Serialize(new
+        {
+            scenario, typed, result = expected, completed = true, source = source.BindingValueSet, target = target.BindingValueSet,
+            sourceValueSets = DbValueSet.SelectList(fixture.Connection, FhirPackageKey: pair.SourcePackageKey)
+                .Select(row => new { row.Id, row.UnversionedUrl, row.Version, row.CanExpand,
+                    includes = row.Compose?.Include.Select(include => new { include.System, include.Version, include.ValueSet,
+                        codes = include.Concept.Select(concept => concept.Code), filters = include.Filter.Count }),
+                    excludes = row.Compose?.Exclude.Count }),
+            map, triggers = Triggers(fixture).Select(trigger => new
+            {
+                trigger.SourceElementId, trigger.TargetElementId, trigger.SourcePathJson, trigger.System, trigger.Code, trigger.SourceVersion,
+                trigger.IsWildcardVersion, trigger.VersionsJson,
+                evidence = JsonSerializer.Deserialize<int[]>(trigger.EvidenceKeysJson)!.Select(key => DbUnsafeCodeMapEvidence.SelectSingle(fixture.Connection, Key: key))
+                    .Select(row => new { row!.SourceRelativeFilename, row.ConceptMapId, row.ConceptMapUrl, row.GroupIndex, row.SourceIndex, row.TargetIndex }),
+                rules = JsonSerializer.Deserialize<int[]>(trigger.RuleKeysJson)!.Select(key => DbUnsafeCodeRule.SelectSingle(fixture.Connection, Key: key))
+                    .Select(row => new { row!.SourceRelativeFilename, row.EntryIndex }),
+                annotations = JsonSerializer.Deserialize<int[]>(trigger.AnnotationKeysJson)!.Select(key => DbUnsafeCodeElementAnnotation.SelectSingle(fixture.Connection, Key: key))
+                    .Select(row => new { row!.SourceRelativeFilename, row.GroupIndex, row.SourceIndex, row.TargetIndex }),
+            }),
+        }));
+    }
+
+    [Theory]
     [InlineData(2, 0)]
     [InlineData(0, 2)]
     [InlineData(2, 1)]

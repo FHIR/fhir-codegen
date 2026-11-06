@@ -8,6 +8,8 @@ extern alias r4b;
 
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
@@ -37,6 +39,16 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal const string FilterSystem = "http://hl7.org/fhir/filter-operator";
     internal const string FilterValueSet = "http://hl7.org/fhir/ValueSet/filter-operator";
     internal const string FilterElement = "ValueSet.compose.include.filter.op";
+    internal const string ImportedNativeElement = "ValueSet.jurisdiction";
+    internal const string ImportedSourceSystem = "urn:example:source";
+    internal const string ImportedSystemVersion = "system-version-7";
+
+    internal enum ImportedNativeScenario
+    {
+        IdentityChanging,
+        IdentityPreserving,
+        SourceNonmember,
+    }
 
     private readonly bool _persistDatabase;
 
@@ -295,6 +307,13 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal static UnsafeCodeTestFixture CreateRepresentationInputs()
     {
         UnsafeCodeTestFixture fixture = new();
+        fixture.InsertRepresentationGraph(includeOtherCarriers: true);
+        return fixture;
+    }
+
+    private void InsertRepresentationGraph(bool includeOtherCarriers)
+    {
+        UnsafeCodeTestFixture fixture = this;
         foreach (DbFhirPackage package in fixture.Packages)
         {
             foreach (string primitive in new[] { "code", "string", "uri" })
@@ -310,25 +329,320 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             DbStructureDefinition concept = fixture.AddStructure(package, "CodeableConcept");
             fixture.AddElement(concept, "CodeableConcept");
             fixture.AddTypedElement(concept, "CodeableConcept.coding", "Coding");
-            DbStructureDefinition quantity = fixture.AddStructure(package, "Quantity");
-            fixture.AddElement(quantity, "Quantity");
-            fixture.AddTypedElement(quantity, "Quantity.system", "uri");
-            fixture.AddTypedElement(quantity, "Quantity.code", "code");
+            if (includeOtherCarriers)
+            {
+                DbStructureDefinition quantity = fixture.AddStructure(package, "Quantity");
+                fixture.AddElement(quantity, "Quantity");
+                fixture.AddTypedElement(quantity, "Quantity.system", "uri");
+                fixture.AddTypedElement(quantity, "Quantity.code", "code");
+            }
             DbStructureDefinition extension = fixture.AddStructure(package, "Extension");
             fixture.AddElement(extension, "Extension");
             DbElement value = fixture.AddElement(extension, "Extension.value[x]");
-            foreach (string type in new[] { "code", "string", "uri", "Coding", "CodeableConcept", "Quantity" })
+            foreach (string type in includeOtherCarriers
+                ? new[] { "code", "string", "uri", "Coding", "CodeableConcept", "Quantity" }
+                : new[] { "code", "string", "uri", "Coding", "CodeableConcept" })
             {
                 fixture.AddType(value, type, fixture.Structure(package, type));
             }
 
             fixture.AddElement(fixture.Structure(package), "ValueSet");
-            DbStructureDefinition basic = fixture.AddStructure(package, "Basic", FhirArtifactClassEnum.Resource);
-            fixture.AddElement(basic, "Basic");
-            fixture.AddTypedElement(basic, "Basic.code", "CodeableConcept");
+            if (includeOtherCarriers)
+            {
+                DbStructureDefinition basic = fixture.AddStructure(package, "Basic", FhirArtifactClassEnum.Resource);
+                fixture.AddElement(basic, "Basic");
+                fixture.AddTypedElement(basic, "Basic.code", "CodeableConcept");
+            }
+        }
+    }
+
+    internal static UnsafeCodeTestFixture CreateImportedNativeCodingInputs(
+        int targetIndex, ImportedNativeScenario scenario, bool enableRule)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(targetIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(targetIndex, 1);
+        UnsafeCodeTestFixture fixture = new(initializeIndices: true, persistDatabase: true);
+        fixture.InsertRepresentationGraph(includeOtherCarriers: false);
+        Directory.Delete(Path.Combine(fixture.SourceRoot, "input"), recursive: true);
+        foreach (DbFhirPackage package in fixture.Packages)
+        {
+            foreach (string primitive in new[] { "code", "string", "uri" })
+            {
+                fixture.AddElement(fixture.Structure(package, primitive), primitive);
+            }
+
+            bool source = package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R5;
+            string system = source || scenario == ImportedNativeScenario.IdentityPreserving ? ImportedSourceSystem : "urn:example:target";
+            string code = source || scenario == ImportedNativeScenario.IdentityPreserving ? "unsafe" : "changed";
+            DbValueSet inner = fixture.AddImportedValueSet(package, "inner", new()
+            {
+                Include = [new() { System = system, Version = ImportedSystemVersion,
+                    Concept = [new() { Code = source && scenario == ImportedNativeScenario.SourceNonmember ? "sibling-only" : code }] }],
+            });
+            Hl7.Fhir.Model.ValueSet.ComposeComponent compose = new() { Include = [new() { ValueSet = [inner.VersionedUrl] }] };
+            if (source && scenario == ImportedNativeScenario.SourceNonmember)
+            {
+                compose.Include.Add(new() { System = ImportedSourceSystem, Version = ImportedSystemVersion, Concept = [new() { Code = "unsafe" }] });
+            }
+
+            DbValueSet outer = fixture.AddImportedValueSet(package, "outer", compose);
+            DbElement jurisdiction = fixture.AddTypedElement(fixture.Structure(package), ImportedNativeElement, "CodeableConcept");
+            jurisdiction.BindingValueSet = outer.VersionedUrl;
+            jurisdiction.BindingValueSetKey = outer.Key;
+            jurisdiction.MinCardinality = 0;
+            jurisdiction.MaxCardinality = -1;
+            jurisdiction.MaxCardinalityString = "*";
+            DbElement coding = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: package.Key, Id: "CodeableConcept.coding")!;
+            coding.MinCardinality = 0;
+            coding.MaxCardinality = -1;
+            coding.MaxCardinalityString = "*";
+            DbElement.Update(fixture.Connection, [jurisdiction, coding]);
+        }
+
+        foreach ((int source, int target) in new[] { (2, 1), (1, 0), (2, 0) })
+        {
+            string direction = (source == 1 ? "4B" : "5") + "to" +
+                (target == 1 ? "4B" : "4");
+            foreach ((string category, string suffix, string[] types) in new[]
+                {
+                    ("resources", "resource-types", new[] { "ValueSet" }),
+                    ("types", "data-types", new[] { "Coding", "CodeableConcept", "Extension" }),
+                })
+            {
+                fixture.WriteInputMap(new()
+                {
+                    Id = "imported-native-" + category + "-" + direction,
+                    Url = "http://example.org/ConceptMap/imported-native-" + category + "-" + direction,
+                    Status = PublicationStatus.Active,
+                    Group = [new()
+                    {
+                        Source = "http://hl7.org/fhir/" + fixture.Packages[source].FhirVersionShort + "/" + suffix,
+                        Target = "http://hl7.org/fhir/" + fixture.Packages[target].FhirVersionShort + "/" + suffix,
+                        Element = [.. types.Select(type => new ConceptMap.SourceElementComponent
+                        {
+                            Code = type,
+                            Target = [new() { Code = type, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                        })],
+                    }],
+                }, category, "ConceptMap-" + category + "-" + direction + ".json");
+            }
+
+            ConceptMap map = new()
+            {
+                Id = "imported-native-elements-" + direction,
+                Url = "http://example.org/ConceptMap/imported-native-elements-" + direction,
+                Status = PublicationStatus.Active,
+                Group = [new()
+                {
+                    Source = "http://hl7.org/fhir/" + fixture.Packages[source].FhirVersionShort + "/element-names",
+                    Target = "http://hl7.org/fhir/" + fixture.Packages[target].FhirVersionShort + "/element-names",
+                    Element = [.. DbElement.SelectList(fixture.Connection, FhirPackageKey: fixture.Packages[source].Key)
+                        .Select(element => new ConceptMap.SourceElementComponent
+                        {
+                            Code = element.Id,
+                            Target = [new() { Code = element.Id, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                        })],
+                }],
+            };
+            fixture.WriteInputMap(map, "elements", "ConceptMap-elements-" + direction + ".json");
+        }
+
+        fixture.WriteInputMap(new()
+        {
+            Id = "imported-native-primitives",
+            Url = "http://example.org/ConceptMap/imported-native-primitives",
+            Status = PublicationStatus.Active,
+            Group = [new()
+            {
+                Source = "http://hl7.org/fhir/fhir-types",
+                Target = "http://hl7.org/fhir/fhir-types",
+                Element = [.. new[] { "code", "string", "uri" }.Select(type => new ConceptMap.SourceElementComponent
+                {
+                    Code = type,
+                    Target = [new() { Code = type, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                })],
+            }],
+        }, "types", "ConceptMap-types-fallback.json");
+        DbValueSet sourceInner = fixture.ImportedValueSet(fixture.Packages[2], "inner");
+        DbValueSet targetInner = fixture.ImportedValueSet(fixture.Packages[targetIndex], "inner");
+        string targetSystem = scenario == ImportedNativeScenario.IdentityPreserving ? ImportedSourceSystem : "urn:example:target";
+        string targetCode = scenario == ImportedNativeScenario.IdentityPreserving ? "unsafe" : "changed";
+        string destination = targetIndex == 0 ? "R4" : "R4B";
+        fixture.WriteInputMap(new()
+        {
+            Id = "imported-native-R5-" + destination,
+            Url = "http://example.org/ConceptMap/imported-native-R5-" + destination,
+            Status = PublicationStatus.Active,
+            SourceScope = new Hl7.Fhir.Model.Canonical(sourceInner.VersionedUrl),
+            TargetScope = new Hl7.Fhir.Model.Canonical(targetInner.VersionedUrl),
+            Group = [new()
+            {
+                Source = ImportedSourceSystem + "|" + ImportedSystemVersion,
+                Target = targetSystem + "|" + ImportedSystemVersion,
+                Element = [new() { Code = "unsafe", Target = [new() { Code = targetCode, Relationship = ConceptMap.ConceptMapRelationship.RelatedTo }] }],
+            }],
+        }, "codes", "ConceptMap-R5-imported-native-" + destination + ".json");
+        if (enableRule)
+        {
+            fixture.WriteConfiguration("""[{"system":"urn:example:source","code":"unsafe"}]""");
         }
 
         return fixture;
+    }
+
+    private void WriteInputMap(ConceptMap map, string category, string filename)
+    {
+        string directory = Path.Combine(SourceRoot, "input", category);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, filename), map.ToJson());
+    }
+
+    internal DbValueSet ImportedValueSet(DbFhirPackage package, string scope) =>
+        DbValueSet.SelectSingle(Connection, FhirPackageKey: package.Key, Id: "imported-native-" + scope)!;
+
+    private DbValueSet AddImportedValueSet(DbFhirPackage package, string scope, Hl7.Fhir.Model.ValueSet.ComposeComponent compose)
+    {
+        string release = package.DefinitionFhirSequence.ToRLiteral().ToLowerInvariant();
+        TestValueSet row = new(package)
+        {
+            Id = "imported-native-" + scope,
+            Name = "ImportedNative" + scope,
+            UnversionedUrl = "http://example.org/ValueSet/" + release + "-" + scope,
+            Version = scope + "-vs-" + release + "-3",
+            Compose = compose,
+            CanExpand = false,
+        };
+        row.VersionedUrl = row.UnversionedUrl + "|" + row.Version;
+        row.Key = DbValueSet.Insert(Connection, row);
+        return row;
+    }
+
+    internal static bool EvaluateImportedNativeCondition(string expression, int targetIndex, string system, string code, string? uri = null)
+    {
+        string json = "{\"resourceType\":\"ValueSet\",\"status\":\"active\"" +
+            (uri is null ? "" : ",\"implicitRules\":" + JsonSerializer.Serialize(uri)) +
+            ",\"jurisdiction\":[{\"coding\":[{\"system\":" + JsonSerializer.Serialize(system) +
+            ",\"code\":" + JsonSerializer.Serialize(code) + "}]}]}";
+        ITypedElement instance = TargetInstance(targetIndex, json);
+        FhirPathCompiler compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+        ITypedElement[] results = [.. compiler.Compile(expression)(instance, new EvaluationContext())];
+        if (results.Length != 1 || results[0].Value is not bool result)
+        {
+            throw new InvalidOperationException("The recovered imported-native condition did not return exactly one Boolean.");
+        }
+
+        return result;
+    }
+
+    internal SortedDictionary<string, string[]> ImportedNativeSemanticState()
+    {
+        // Compare every persisted field, replacing only primary/foreign keys with semantic identities.
+        List<string> tables = [];
+        using (SqliteCommand schema = Connection.CreateCommand())
+        {
+            schema.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' " +
+                "AND name NOT IN ('UnsafeCodeInputState', 'UnsafeCodePairState', 'UnsafeCodeRules', 'UnsafeCodeTriggers') ORDER BY name";
+            using SqliteDataReader reader = schema.ExecuteReader();
+            while (reader.Read())
+            {
+                tables.Add(reader.GetString(0));
+            }
+        }
+        Dictionary<string, Dictionary<long, SortedDictionary<string, object?>>> rows = [];
+        Dictionary<string, Dictionary<string, string>> references = [];
+        foreach (string table in tables)
+        {
+            using SqliteCommand command = Connection.CreateCommand();
+            command.CommandText = "SELECT * FROM \"" + table + "\"";
+            using (SqliteDataReader reader = command.ExecuteReader())
+            {
+                rows[table] = [];
+                while (reader.Read())
+                {
+                    SortedDictionary<string, object?> row = new(StringComparer.Ordinal);
+                    for (int column = 0; column < reader.FieldCount; column++)
+                    {
+                        row.Add(reader.GetName(column), reader.IsDBNull(column) ? null : reader.GetValue(column));
+                    }
+
+                    rows[table].Add((long)row["Key"]!, row);
+                }
+            }
+
+            command.CommandText = "PRAGMA foreign_key_list(\"" + table + "\")";
+            using SqliteDataReader foreignKeys = command.ExecuteReader();
+            references[table] = [];
+            while (foreignKeys.Read())
+            {
+                references[table].Add(foreignKeys.GetString(3), foreignKeys.GetString(2));
+            }
+        }
+
+        Dictionary<(string Table, long Key), string> identities = [];
+        SortedDictionary<string, string[]> state = new(StringComparer.Ordinal);
+        foreach (string table in tables)
+        {
+            state.Add(table, [.. rows[table].Keys.Select(key => Normalize(table, key)).Order(StringComparer.Ordinal)]);
+        }
+
+        return state;
+
+        string Normalize(string table, long key)
+        {
+            if (identities.TryGetValue((table, key), out string? cached))
+            {
+                return cached;
+            }
+
+            SortedDictionary<string, object?> normalized = new(StringComparer.Ordinal);
+            foreach ((string column, object? value) in rows[table][key])
+            {
+                if (column == "Key")
+                {
+                    continue;
+                }
+
+                string? reference = references[table].GetValueOrDefault(column);
+                reference ??= column switch
+                {
+                    "ParentElementKey" or "ContentReferenceSourceKey" => "Elements",
+                    "BindingValueSetKey" => "ValueSets",
+                    _ => null,
+                };
+                if (column.StartsWith("ContentKeyR", StringComparison.Ordinal))
+                {
+                    reference = table switch
+                    {
+                        "StructureComparisons" => "Structures",
+                        "ElementComparisons" => "Elements",
+                        "ElementTypeComparisons" => "ElementTypes",
+                        "ValueSetComparisons" => "ValueSets",
+                        "ValueSetConceptComparisons" => "ValueSetConcepts",
+                        _ => throw new InvalidOperationException("Unknown comparison content key: " + table),
+                    };
+                }
+
+                if (value is long foreignKey && reference is not null)
+                {
+                    normalized[column] = Identity(reference, foreignKey);
+                }
+                else if (value is string literal && column.EndsWith("KeysLiteral", StringComparison.Ordinal))
+                {
+                    string memberTable = column.Contains("ChildElement", StringComparison.Ordinal) ? "Elements" : "ElementTypes";
+                    normalized[column] = literal.Split(',').Select(member => Identity(memberTable, long.Parse(member))).ToArray();
+                }
+                else
+                {
+                    normalized[column] = value;
+                }
+            }
+
+            string result = JsonSerializer.Serialize(normalized);
+            identities.Add((table, key), result);
+            return result;
+        }
+
+        string Identity(string table, long key) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Normalize(table, key))));
     }
 
     internal DbElement AddTypedElement(DbStructureDefinition structure, string id, string type)
