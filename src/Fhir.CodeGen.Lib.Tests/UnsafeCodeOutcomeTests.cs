@@ -9,6 +9,7 @@ using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.CompareTool;
 using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.Outcomes;
+using Fhir.CodeGen.Comparison.Terminology;
 using Hl7.Fhir.Model;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -183,6 +184,32 @@ public class UnsafeCodeOutcomeTests
         DbValueSet.Update(fixture.Connection, [inner]);
         DbElement.Update(fixture.Connection, [source]);
         DbUnsafeCodeMapEvidence.Update(fixture.Connection, [map]);
+        Dictionary<int, DbValueSet> valueSets = DbValueSet.SelectList(fixture.Connection)
+            .Where(row => row.FhirPackageKey == pair.SourcePackageKey || row.FhirPackageKey == pair.TargetPackageKey)
+            .ToDictionary(row => row.Key);
+        UnsafeCodeBindingScopeResolver resolver = new(valueSets, key => DbValueSetConcept.SelectList(fixture.Connection, ValueSetKey: key));
+        UnsafeCodeBindingScope? sourceScope = resolver.Resolve(source);
+        UnsafeCodeBindingScope? targetScope = resolver.Resolve(target);
+        UnsafeCodeMapEvidence sharedEvidence = UnsafeCodeEvidenceApplicability.QualifyEvidence(new(
+            pair.SourcePackageKey, pair.TargetPackageKey,
+            new(map.SourceValueSetUrl, map.SourceValueSetVersion), new(map.TargetValueSetUrl, map.TargetValueSetVersion),
+            new(map.SourceSystem, map.SourceSystemVersion), map.SourceCode,
+            new(map.TargetSystem, map.TargetSystemVersion), map.TargetCode, map.Relationship, map.ExplicitNoMap,
+            new(map.SourceRelativeFilename, map.ConceptMapId, map.ConceptMapUrl, map.GroupIndex, map.SourceIndex, map.TargetIndex)), sourceScope);
+        UnsafeCodeEvidenceApplicability.IsPrecise(sharedEvidence, sourceScope, targetScope).ShouldBe(scenario is not
+            ("import-version-mismatch" or "wrong-package" or "key-only-wrong-package" or "sibling-member" or
+             "missing-import" or "missing-compose" or "unknown-direct-version-potential"));
+        UnsafeCodeEvidenceApplicability.IsPotential(sharedEvidence, sourceScope, targetScope).ShouldBe(scenario is not
+            ("import-version-mismatch" or "wrong-package" or "sibling-member"));
+        if (scenario == "missing-system-qualified")
+        {
+            sharedEvidence.SourceSystem.ShouldBe(new(UnsafeCodeTestFixture.FilterSystem, systemVersion));
+        }
+        else if (scenario == "missing-system-ambiguous")
+        {
+            sharedEvidence.SourceSystem.Url.ShouldBeNull();
+        }
+
         if (expected == "ambiguous")
         {
             InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Generate(fixture, pair));

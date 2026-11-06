@@ -9,6 +9,7 @@ using System.Text.Json;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.Models;
+using Fhir.CodeGen.Comparison.Terminology;
 using Hl7.Fhir.Model;
 
 namespace Fhir.CodeGen.Comparison.Outcomes;
@@ -215,9 +216,8 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
         private readonly Dictionary<int, DbElementMapping> _mappings;
         private readonly Dictionary<int, DbElementOutcome> _elementOutcomes;
         private readonly ILookup<int, DbElementOutcomeTarget> _targets;
-        private readonly Dictionary<int, DbValueSet> _valueSets;
-        private readonly ILookup<int, DbValueSetConcept> _concepts;
-        private readonly Dictionary<int, BindingScope?> _bindings = [];
+        private readonly UnsafeCodeBindingScopeResolver _bindingResolver;
+        private readonly Dictionary<int, UnsafeCodeBindingScope?> _bindings = [];
         private readonly Dictionary<int, DbElement[]> _effectiveChildren = [];
         private readonly Dictionary<int, DbElementType[]> _effectiveTypes = [];
         private readonly Dictionary<MappingUse, UnsafeCodeMapEvidence[]> _scopedEvidence = [];
@@ -256,8 +256,9 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             _targets = DbElementOutcomeTarget.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
                 .Where(target => _elementOutcomes.ContainsKey(target.ElementOutcomeKey))
                 .ToLookup(target => _elementOutcomes[target.ElementOutcomeKey].SourceElementKey);
-            _valueSets = DbValueSet.SelectList(db).Where(row => row.FhirPackageKey == pair.SourcePackageKey || row.FhirPackageKey == pair.TargetPackageKey).ToDictionary(row => row.Key);
-            _concepts = DbValueSetConcept.SelectList(db).Where(row => _valueSets.ContainsKey(row.ValueSetKey)).ToLookup(row => row.ValueSetKey);
+            Dictionary<int, DbValueSet> valueSets = DbValueSet.SelectList(db).Where(row => row.FhirPackageKey == pair.SourcePackageKey || row.FhirPackageKey == pair.TargetPackageKey).ToDictionary(row => row.Key);
+            ILookup<int, DbValueSetConcept> concepts = DbValueSetConcept.SelectList(db).Where(row => valueSets.ContainsKey(row.ValueSetKey)).ToLookup(row => row.ValueSetKey);
+            _bindingResolver = new(valueSets, key => concepts[key]);
             DbUnsafeCodeElementAnnotation[] annotationRows = [.. DbUnsafeCodeElementAnnotation.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
                 .Where(row => row.RequiresOmittedMandatoryCode)];
             AnnotationKeys = annotationRows.GroupBy(row => new UnsafeCodeMappingContext(row.SourceFhirPackageKey, row.TargetFhirPackageKey, row.SourceElementId, row.TargetElementId))
@@ -494,12 +495,10 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                 return cached;
             }
 
-            BindingScope? source = Binding(use.Source);
-            BindingScope? target = use.Target is null ? null : Binding(use.Target);
-            UnsafeCodeMapEvidence[] evidence = [.. Evidence.Select(item => QualifyEvidence(item, source)).Where(item =>
-                ScopeMatches(item.SourceValueSet, source) && ScopeMatches(item.TargetValueSet, target) &&
-                (source is null || item.SourceSystem.Url is null || source.Allows(item.SourceSystem, item.SourceCode, item.SourceValueSet)) &&
-                (item.TargetSystem.Url is null || (target is not null && target.Allows(item.TargetSystem, item.TargetCode, item.TargetValueSet))))];
+            UnsafeCodeBindingScope? source = Binding(use.Source);
+            UnsafeCodeBindingScope? target = use.Target is null ? null : Binding(use.Target);
+            UnsafeCodeMapEvidence[] evidence = [.. Evidence.Select(item => UnsafeCodeEvidenceApplicability.QualifyEvidence(item, source))
+                .Where(item => UnsafeCodeEvidenceApplicability.IsPrecise(item, source, target))];
             _scopedEvidence.Add(use, evidence);
             return evidence;
         }
@@ -511,45 +510,13 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                 return cached;
             }
 
-            BindingScope? source = Binding(use.Source);
-            BindingScope? target = use.Target is null ? null : Binding(use.Target);
-            UnsafeCodeMapEvidence[] evidence = [.. Evidence.Select(item => QualifyEvidence(item, source)).Where(item =>
-                MayMatch(item.SourceValueSet, source) && MayMatch(item.TargetValueSet, target) &&
-                (source is null || !source.Complete || item.SourceSystem.Url is null || source.Allows(item.SourceSystem, item.SourceCode, item.SourceValueSet)) &&
-                (target is null || !target.Complete || item.TargetSystem.Url is null || target.Allows(item.TargetSystem, item.TargetCode, item.TargetValueSet)))];
+            UnsafeCodeBindingScope? source = Binding(use.Source);
+            UnsafeCodeBindingScope? target = use.Target is null ? null : Binding(use.Target);
+            UnsafeCodeMapEvidence[] evidence = [.. Evidence.Select(item => UnsafeCodeEvidenceApplicability.QualifyEvidence(item, source))
+                .Where(item => UnsafeCodeEvidenceApplicability.IsPotential(item, source, target))];
             _potentialEvidence.Add(use, evidence);
             return evidence;
         }
-
-        private static UnsafeCodeMapEvidence QualifyEvidence(UnsafeCodeMapEvidence evidence, BindingScope? source)
-        {
-            if (evidence.SourceSystem.Url is null && evidence.SourceCode is string code && source?.Complete == true)
-            {
-                UnsafeCodeCanonical[] identities = source.Identities(code, evidence.SourceValueSet);
-                if (identities.Length == 1)
-                {
-                    return evidence with { SourceSystem = identities[0] };
-                }
-            }
-
-            return evidence;
-        }
-
-        private static bool MayMatch(UnsafeCodeCanonical canonical, BindingScope? binding)
-        {
-            if (canonical.Url is null || binding is null)
-            {
-                return true;
-            }
-
-            UnsafeCodeCanonical[] scopes = [.. binding.Canonicals.Where(scope => scope.Url == canonical.Url)];
-            return scopes.Length > 0 && (canonical.Version is null ||
-                scopes.All(scope => scope.Version is null) || scopes.Any(scope => scope.Version == canonical.Version));
-        }
-
-        private static bool ScopeMatches(UnsafeCodeCanonical canonical, BindingScope? binding) =>
-            canonical.Url is null || (binding is not null && binding.Canonicals.Any(scope =>
-                scope.Url == canonical.Url && (canonical.Version is null || scope.Version == canonical.Version)));
 
         internal UnsafeCodeIdentity? PrimitiveIdentity(
             DbElement element,
@@ -558,10 +525,10 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             IEnumerable<UnsafeCodeIdentity> candidates,
             DbStructureOutcome owner)
         {
-            BindingScope? binding = Binding(element) ?? Binding(bindingElement);
+            UnsafeCodeBindingScope? binding = Binding(element) ?? Binding(bindingElement);
             if (binding is not null && binding.Required)
             {
-                UnsafeCodeCanonical[] identities = binding.Identities(candidate.Code);
+                ImmutableArray<UnsafeCodeCanonical> identities = UnsafeCodeEvidenceApplicability.Identities(binding, candidate.Code);
                 if (binding.Complete && identities.Length > 0 && identities.All(identity => identity.Url != candidate.System))
                 {
                     return null;
@@ -587,124 +554,17 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                 $"Unsafe-code identity is ambiguous for primitive {element.Id} in resource outcome {owner.Key}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}, candidate {candidate.System}|{candidate.Version}#{candidate.Code}. Supply an authoritative unique source binding/system version and regenerate outcomes.");
         }
 
-        private BindingScope? Binding(DbElement element)
+        private UnsafeCodeBindingScope? Binding(DbElement element)
         {
-            if (_bindings.TryGetValue(element.Key, out BindingScope? cached))
+            if (_bindings.TryGetValue(element.Key, out UnsafeCodeBindingScope? cached))
             {
                 return cached;
             }
 
             DbElement? bound = BaseChain(element).FirstOrDefault(basis => basis.BindingValueSetKey is not null || basis.BindingValueSet is not null);
-            if (bound is null)
-            {
-                _bindings.Add(element.Key, null);
-                return null;
-            }
-
-            UnsafeCodeCanonical canonical = UnsafeCodeCanonical.Parse(bound.BindingValueSet);
-            DbValueSet[] valueSets = bound.BindingValueSetKey is int key && _valueSets.TryGetValue(key, out DbValueSet? keyed) &&
-                keyed.FhirPackageKey == bound.FhirPackageKey && (canonical.Url is null || keyed.UnversionedUrl == canonical.Url) &&
-                (canonical.Version is null || keyed.Version == canonical.Version)
-                ? [keyed]
-                : [.. _valueSets.Values.Where(row => row.FhirPackageKey == bound.FhirPackageKey && row.UnversionedUrl == canonical.Url &&
-                    (canonical.Version is null || row.Version == canonical.Version))];
-            BindingScope scope = new() { Required = bound.ValueSetBindingStrength == BindingStrength.Required, Complete = valueSets.Length == 1 };
-            if (canonical.Url is not null)
-            {
-                scope.Canonicals.Add(canonical);
-            }
-
-            foreach (DbValueSet valueSet in valueSets)
-            {
-                AddValueSet(valueSet, []);
-            }
-
+            UnsafeCodeBindingScope? scope = _bindingResolver.Resolve(bound);
             _bindings.Add(element.Key, scope);
             return scope;
-
-            void AddValueSet(DbValueSet valueSet, HashSet<int> active)
-            {
-                if (!active.Add(valueSet.Key))
-                {
-                    scope.Complete = false;
-                    return;
-                }
-
-                scope.Canonicals.Add(new(valueSet.UnversionedUrl, valueSet.Version));
-                int firstMember = scope.Members.Count;
-                if (valueSet.CanExpand)
-                {
-                    foreach (DbValueSetConcept concept in _concepts[valueSet.Key])
-                    {
-                        scope.Members.Add((new(concept.System, string.IsNullOrEmpty(concept.SystemVersion) ? null : concept.SystemVersion), concept.Code));
-                    }
-                }
-                else if (valueSet.Compose is { } compose)
-                {
-                    if (compose.Exclude.Count > 0)
-                    {
-                        scope.Complete = false;
-                    }
-
-                    foreach (ValueSet.ConceptSetComponent include in compose.Include)
-                    {
-                        if (include.System is not null)
-                        {
-                            if (include.Concept.Count == 0)
-                            {
-                                scope.Members.Add((new(include.System, include.Version), null));
-                            }
-                            else
-                            {
-                                foreach (ValueSet.ConceptReferenceComponent concept in include.Concept)
-                                {
-                                    scope.Members.Add((new(include.System, include.Version), concept.Code));
-                                }
-                            }
-                        }
-
-                        foreach (string imported in include.ValueSet)
-                        {
-                            UnsafeCodeCanonical importedCanonical = UnsafeCodeCanonical.Parse(imported);
-                            DbValueSet[] imports = [.. _valueSets.Values.Where(row => row.FhirPackageKey == valueSet.FhirPackageKey &&
-                                row.UnversionedUrl == importedCanonical.Url && (importedCanonical.Version is null || row.Version == importedCanonical.Version))];
-                            if (imports.Length != 1)
-                            {
-                                scope.Complete = false;
-                            }
-
-                            foreach (DbValueSet import in imports)
-                            {
-                                AddValueSet(import, active);
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    scope.Complete = false;
-                }
-
-                scope.ScopedMembers[new(valueSet.UnversionedUrl, valueSet.Version)] = [.. scope.Members.Skip(firstMember)];
-                active.Remove(valueSet.Key);
-            }
         }
-    }
-
-    private sealed class BindingScope
-    {
-        internal bool Required { get; init; }
-        internal bool Complete { get; set; }
-        internal HashSet<UnsafeCodeCanonical> Canonicals { get; } = [];
-        internal List<(UnsafeCodeCanonical Identity, string? Code)> Members { get; } = [];
-        internal Dictionary<UnsafeCodeCanonical, (UnsafeCodeCanonical Identity, string? Code)[]> ScopedMembers { get; } = [];
-        private IEnumerable<(UnsafeCodeCanonical Identity, string? Code)> MembersFor(UnsafeCodeCanonical? scope) =>
-            scope?.Url is null ? Members : ScopedMembers.Where(entry => entry.Key.Url == scope.Url &&
-                (scope.Version is null || entry.Key.Version == scope.Version)).SelectMany(entry => entry.Value);
-        internal UnsafeCodeCanonical[] Identities(string code, UnsafeCodeCanonical? scope = null) =>
-            [.. MembersFor(scope).Where(member => member.Code is null || member.Code == code).Select(member => member.Identity).Distinct()];
-        internal bool Allows(UnsafeCodeCanonical identity, string? code, UnsafeCodeCanonical scope) =>
-            MembersFor(scope).Any(member => member.Identity.Url == identity.Url && (code is null || member.Code is null || member.Code == code) &&
-                (identity.Version is null || member.Identity.Version is null || member.Identity.Version == identity.Version));
     }
 }
