@@ -14,6 +14,7 @@ using Fhir.CodeGen.Common.FhirExtensions;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.Exporter;
 using Fhir.CodeGen.Comparison.Models;
+using Fhir.CodeGen.Comparison.Terminology;
 using Fhir.CodeGen.Lib.Configuration;
 using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Model;
@@ -37,12 +38,21 @@ public sealed class UnsafeCodeProfileCollection
 public class UnsafeCodeProfileTests
 {
     private static readonly FhirPathCompiler Compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+    private const string ImportedNativeExpression = "($this.jurisdiction.coding.where($this.code.where($this = 'unsafe').exists() and " +
+        "$this.system.where($this = 'urn:example:source').exists()).exists() implies implicitRules.where($this = " +
+        "'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())";
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(1)]
-    public void ImportedIdentityChangingNativeMapBaselineObservation(int targetIndex) =>
-        AssertImportedNativeObservation(targetIndex, UnsafeCodeTestFixture.ImportedNativeScenario.IdentityChanging);
+    [InlineData(0, "IdentityChanging")]
+    [InlineData(1, "IdentityChanging")]
+    [InlineData(0, "CodeOnly")]
+    [InlineData(1, "CodeOnly")]
+    [InlineData(0, "SystemOnly")]
+    [InlineData(1, "SystemOnly")]
+    [InlineData(0, "SystemVersionOnly")]
+    [InlineData(1, "SystemVersionOnly")]
+    public void ImportedIdentityChangingNativeMapBlocksConstruction(int targetIndex, string scenario) =>
+        AssertImportedNativeObservation(targetIndex, Enum.Parse<UnsafeCodeTestFixture.ImportedNativeScenario>(scenario));
 
     [Theory]
     [InlineData(0)]
@@ -93,10 +103,10 @@ public class UnsafeCodeProfileTests
         map.SourceSystem.ShouldBe(UnsafeCodeTestFixture.ImportedSourceSystem);
         map.SourceCode.ShouldBe("unsafe");
         map.SourceSystemVersion.ShouldBe(UnsafeCodeTestFixture.ImportedSystemVersion);
-        map.TargetSystem.ShouldBe(scenario == UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving
-            ? UnsafeCodeTestFixture.ImportedSourceSystem : "urn:example:target");
-        map.TargetCode.ShouldBe(scenario == UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving ? "unsafe" : "changed");
-        map.TargetSystemVersion.ShouldBe(UnsafeCodeTestFixture.ImportedSystemVersion);
+        (string targetSystem, string targetVersion, string targetCode) = UnsafeCodeTestFixture.ImportedTargetIdentity(scenario);
+        map.TargetSystem.ShouldBe(targetSystem);
+        map.TargetCode.ShouldBe(targetCode);
+        map.TargetSystemVersion.ShouldBe(targetVersion);
         map.ExplicitNoMap.ShouldBeFalse();
         map.GroupIndex.ShouldBe(0);
         map.SourceIndex.ShouldBe(0);
@@ -214,21 +224,44 @@ public class UnsafeCodeProfileTests
             sourceBinding = probeSourceBinding.BindingValueSet, targetBinding = probeTargetBinding.BindingValueSet,
             native.State, native.SourceType, native.TargetType, path = native.Steps.Cast<MemberStep>().Select(step => step.Name), native.Transformations,
         }));
-        if (scenario != UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving)
+        UnsafeCodeProvenance mapProvenance = MapProvenance(map);
+        if (sourceMember)
+        {
+            CodeTransformation transformation = native.Transformations.ShouldHaveSingleItem();
+            TransformationIdentity(transformation).ShouldBe((map.SourceSystem, map.SourceSystemVersion, map.SourceCode,
+                map.TargetSystem, map.TargetSystemVersion, map.TargetCode));
+            transformation.Provenance.ShouldBe([mapProvenance]);
+        }
+        else
         {
             native.Transformations.ShouldBeEmpty();
         }
-        StructureFhirExporter.BuiltDefinitions built;
-        try
+        AssertTransformations(probeBuilt.Representations.Resolve(probeOutcome.Key, path).ShouldHaveSingleItem().Transformations, native.Transformations);
+        if (scenario != UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving && sourceMember)
         {
-            built = main.BuildDefinitions(pair);
+            UnsafeCodeConstraintPlan plan = UnsafeCodeInputStore.ReadConstraintPlans(main.Connection, pair.SourcePackageKey, pair.TargetPackageKey)
+                .Single(plan => plan.Row.Key == boundTrigger.Key);
+            plan.Provenance.Replace('\\', '/').ShouldBe("input/ig-support/unsafe-code-mappings.json entry 0");
+            InvalidOperationException exception = Should.Throw<InvalidOperationException>(() => main.BuildDefinitions(pair));
+            exception.Message.ShouldBe(IdentityChangingDiagnostic(plan, "R5->" + destination, [mapProvenance]));
+            JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key))
+                .ShouldBe(JsonSerializer.Serialize(triggers));
+            Console.WriteLine("MEASURED_CONSTRAINT_DIFF " + JsonSerializer.Serialize(new
+            {
+                destination, scenario = scenario.ToString(),
+                before = new
+                {
+                    baseline = "e153f6ef797a0194b8a36ca1994818a07e08140e",
+                    observation = "Phase 1 measured combined identity change; not rerun against fixed production",
+                    construction = "succeeded", nativeTransformations = 0, expression = ImportedNativeExpression,
+                    changedTargetWithoutUri = true, configuredSourceWithoutUri = false,
+                },
+                after = new { construction = "rejected", diagnostic = exception.Message, native.Transformations,
+                    activeTriggers = triggers.Length, generatedAffectedProfile = false },
+            }));
+            return;
         }
-        catch (Exception exception)
-        {
-            Console.WriteLine("MEASURED_IMPORTED_NATIVE_CONSTRUCTION " + JsonSerializer.Serialize(new
-                { destination, scenario = scenario.ToString(), result = "exception", diagnostic = exception.ToString() }));
-            throw;
-        }
+        StructureFhirExporter.BuiltDefinitions built = main.BuildDefinitions(pair);
         JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key))
             .ShouldBe(JsonSerializer.Serialize(triggers));
         RepresentationLocation activeNative = built.Representations.Resolve(outcome.Key, path).ShouldHaveSingleItem();
@@ -237,31 +270,299 @@ public class UnsafeCodeProfileTests
         activeNative.TargetType.ShouldBe(native.TargetType);
         activeNative.SourceBinding.ShouldBe(native.SourceBinding);
         activeNative.Steps.ShouldBe(native.Steps);
-        activeNative.Transformations.ShouldBe(native.Transformations);
+        AssertTransformations(activeNative.Transformations, native.Transformations);
         StructureDefinition profile = built.Profiles.Single(candidate => candidate.Definition.Type == "ValueSet").Definition;
         ElementDefinition.ConstraintComponent condition = UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex).ShouldHaveSingleItem();
         RecoveredExpressions(profile, targetIndex).ShouldBe([condition.Expression]);
-        condition.Expression.ShouldBe("($this.jurisdiction.coding.where($this.code.where($this = 'unsafe').exists() and " +
-            "$this.system.where($this = 'urn:example:source').exists()).exists() implies implicitRules.where($this = " +
-            "'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())");
+        condition.Expression.ShouldBe(ImportedNativeExpression);
+        condition.Key.ShouldBe(UnsafeCodeConstraintEmitter.Key(JsonSerializer.Serialize(new
+        {
+            Profile = profile.Url, Direction = "R5->" + destination, Owners = Array.Empty<string>(), SourcePath = path,
+        })));
+        condition.Severity.ShouldBe(ConstraintSeverity.Error);
+        condition.Human.ShouldBe(UnsafeCodeConstraintEmitter.Human);
+        condition.Source.ShouldBe(profile.Url);
         bool changedWithoutUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, "urn:example:target", "changed");
         bool sourceWithoutUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe");
         bool sourceWrongUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe", "http://wrong");
         bool sourceExactUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe", UnsafeCodeConstants.ImplicitRules);
+        bool safeOnly = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "safe");
+        bool absent = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, null, null);
+        bool mixedWithoutUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe", mixed: true);
+        bool mixedExactUri = UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe", UnsafeCodeConstants.ImplicitRules, mixed: true);
         Console.WriteLine("MEASURED_CONSTRAINT_DIFF " + JsonSerializer.Serialize(new
         {
-            baseline = "e153f6ef797a0194b8a36ca1994818a07e08140e", destination, scenario = scenario.ToString(),
+            baseline = "e153f6ef797a0194b8a36ca1994818a07e08140e", destination, scenario = scenario.ToString(), delta = "unchanged control condition",
             construction = "succeeded", profile = profile.Url, condition.Key, condition.Expression,
             condition = "newly emitted unsafe-code condition only; not whole-profile validity",
             runtimeVersion = (string?)null, nativeTransformations = activeNative.Transformations,
             condition.Severity, condition.Human, condition.Source,
-            changedWithoutUri, sourceWithoutUri, sourceWrongUri, sourceExactUri,
+            changedWithoutUri, sourceWithoutUri, sourceWrongUri, sourceExactUri, safeOnly, absent, mixedWithoutUri, mixedExactUri,
         }));
         changedWithoutUri.ShouldBeTrue();
         sourceWithoutUri.ShouldBeFalse();
         sourceWrongUri.ShouldBeFalse();
         sourceExactUri.ShouldBeTrue();
+        safeOnly.ShouldBeTrue();
+        absent.ShouldBeTrue();
+        mixedWithoutUri.ShouldBeFalse();
+        mixedExactUri.ShouldBeTrue();
         profile.ImplicitRules.ShouldBeNull();
+    }
+
+    private static UnsafeCodeProvenance MapProvenance(DbUnsafeCodeMapEvidence map) =>
+        new(map.SourceRelativeFilename, map.ConceptMapId, map.ConceptMapUrl, map.GroupIndex, map.SourceIndex, map.TargetIndex);
+
+    private static (string?, string?, string?, string?, string?, string?) TransformationIdentity(CodeTransformation transformation) =>
+        (transformation.SourceSystem, transformation.SourceVersion, transformation.SourceCode,
+            transformation.TargetSystem, transformation.TargetVersion, transformation.TargetCode);
+
+    private static void AssertTransformations(ImmutableArray<CodeTransformation> actual, ImmutableArray<CodeTransformation> expected)
+    {
+        actual.Select(TransformationIdentity).ShouldBe(expected.Select(TransformationIdentity));
+        for (int i = 0; i < actual.Length; i++)
+        {
+            actual[i].Provenance.ShouldBe(expected[i].Provenance);
+        }
+    }
+
+    private static string IdentityChangingDiagnostic(UnsafeCodeConstraintPlan plan, string direction, ImmutableArray<UnsafeCodeProvenance> maps) =>
+        $"Unsafe-code projection failed in profile {plan.ProfileCanonical}, direction {direction}, source path {JsonSerializer.Serialize(plan.SourcePath)}, " +
+        $"qualified code {plan.Row.System}|{plan.Row.SourceVersion ?? "*"}#{plan.Row.Code}, provenance {plan.Provenance}: identity-changing native code mapping. " +
+        $"Responsible map provenance {JsonSerializer.Serialize(maps)}. " +
+        "Regenerate load, compare, outcomes, and export after resolving the source-value representation.";
+
+    [Theory]
+    [InlineData(0, "TargetNonmember")]
+    [InlineData(1, "TargetNonmember")]
+    [InlineData(0, "SourceValueSetVersionMismatch")]
+    [InlineData(1, "SourceValueSetVersionMismatch")]
+    [InlineData(0, "TargetValueSetVersionMismatch")]
+    [InlineData(1, "TargetValueSetVersionMismatch")]
+    [InlineData(0, "SourceSystemVersionMismatch")]
+    [InlineData(1, "SourceSystemVersionMismatch")]
+    [InlineData(0, "TargetSystemVersionMismatch")]
+    [InlineData(1, "TargetSystemVersionMismatch")]
+    public void ImportedTargetScopeAndVersionMustMatchActualNativeContext(int targetIndex, string scenarioName)
+    {
+        UnsafeCodeTestFixture.ImportedNativeScenario scenario = Enum.Parse<UnsafeCodeTestFixture.ImportedNativeScenario>(scenarioName);
+        using UnsafeCodeTestFixture main = UnsafeCodeTestFixture.CreateImportedNativeCodingInputs(targetIndex, scenario, enableRule: true);
+        FhirPackageComparisonPair pair = main.LoadCompareAndGenerate(targetIndex);
+        using UnsafeCodeTestFixture probe = UnsafeCodeTestFixture.CreateImportedNativeCodingInputs(targetIndex, scenario, enableRule: false);
+        FhirPackageComparisonPair probePair = probe.LoadCompareAndGenerate(targetIndex);
+        AssertStagedCorrespondence(main, probe);
+        DbUnsafeCodeMapEvidence map = DbUnsafeCodeMapEvidence.SelectList(main.Connection).ShouldHaveSingleItem();
+        DbValueSet sourceInner = main.ImportedValueSet(pair.SourcePackage, "inner");
+        DbValueSet targetInner = main.ImportedValueSet(pair.TargetPackage, "inner");
+        bool sourceVersionMatches = map.SourceValueSetVersion == sourceInner.Version;
+        bool targetVersionMatches = map.TargetValueSetVersion == targetInner.Version;
+        bool sourceMember = sourceInner.Compose!.Include.Any(include => include.System == map.SourceSystem &&
+            include.Version == map.SourceSystemVersion && include.Concept.Any(concept => concept.Code == map.SourceCode));
+        bool targetMember = targetInner.Compose!.Include.Any(include => include.System == map.TargetSystem &&
+            include.Version == map.TargetSystemVersion && include.Concept.Any(concept => concept.Code == map.TargetCode));
+        sourceVersionMatches.ShouldBe(scenario != UnsafeCodeTestFixture.ImportedNativeScenario.SourceValueSetVersionMismatch);
+        targetVersionMatches.ShouldBe(scenario != UnsafeCodeTestFixture.ImportedNativeScenario.TargetValueSetVersionMismatch);
+        sourceMember.ShouldBe(scenario != UnsafeCodeTestFixture.ImportedNativeScenario.SourceSystemVersionMismatch);
+        targetMember.ShouldBe(scenario != UnsafeCodeTestFixture.ImportedNativeScenario.TargetNonmember &&
+            scenario != UnsafeCodeTestFixture.ImportedNativeScenario.TargetSystemVersionMismatch);
+        if (scenario == UnsafeCodeTestFixture.ImportedNativeScenario.TargetNonmember)
+        {
+            main.ImportedValueSet(pair.TargetPackage, "outer").Compose!.Include.ShouldContain(include =>
+                include.System == map.TargetSystem && include.Concept.Any(concept => concept.Code == map.TargetCode));
+        }
+
+        DbStructureOutcome outcome = ImportedOutcome(main, pair);
+        DbUnsafeCodeTrigger[] triggers = [.. DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)];
+        triggers.ShouldNotBeEmpty();
+        triggers.ShouldAllBe(trigger => trigger.EvidenceKeysJson == "[]" && trigger.AnnotationKeysJson == "[]" && trigger.RuleKeysJson != "[]");
+        StructureFhirExporter.BuiltDefinitions probeBuilt = probe.BuildDefinitions(probePair);
+        RepresentationLocation probeNative = probeBuilt.Representations.Resolve(ImportedOutcome(probe, probePair).Key, ImportedCodingPath())
+            .ShouldHaveSingleItem();
+        probeNative.State.ShouldBe(RepresentationState.Observable);
+        probeNative.Transformations.ShouldBeEmpty();
+        probeNative.SourceBinding.ShouldBe(new UnsafeCodeCanonical(main.ImportedValueSet(pair.SourcePackage, "outer").UnversionedUrl,
+            main.ImportedValueSet(pair.SourcePackage, "outer").Version));
+        probeBuilt.Representations.Resolve(ImportedOutcome(probe, probePair).Key, ImportedCodingPath()).ShouldHaveSingleItem()
+            .Transformations.ShouldBeEmpty();
+        StructureFhirExporter.BuiltDefinitions built = main.BuildDefinitions(pair);
+        built.Representations.Resolve(outcome.Key, ImportedCodingPath()).ShouldHaveSingleItem().Transformations.ShouldBeEmpty();
+        JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)).ShouldBe(JsonSerializer.Serialize(triggers));
+        StructureDefinition profile = built.Profiles.Single(profile => profile.Definition.Type == "ValueSet").Definition;
+        ElementDefinition.ConstraintComponent condition = UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex).ShouldHaveSingleItem();
+        condition.Expression.ShouldBe(ImportedNativeExpression);
+        condition.Severity.ShouldBe(ConstraintSeverity.Error);
+        condition.Human.ShouldBe(UnsafeCodeConstraintEmitter.Human);
+        condition.Source.ShouldBe(profile.Url);
+        UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe").ShouldBeFalse();
+        UnsafeCodeTestFixture.EvaluateImportedNativeCondition(condition.Expression, targetIndex, UnsafeCodeTestFixture.ImportedSourceSystem, "unsafe",
+            UnsafeCodeConstants.ImplicitRules).ShouldBeTrue();
+        profile.ImplicitRules.ShouldBeNull();
+        Console.WriteLine("MEASURED_IMPORTED_NATIVE_ISOLATION " + JsonSerializer.Serialize(new
+        {
+            destination = targetIndex == 0 ? "R4" : "R4B", scenarioName, sourceVersionMatches, targetVersionMatches,
+            sourceMember, targetMember, activeTriggers = triggers.Length, transformations = 0, construction = "succeeded",
+            condition.Key, condition.Expression, missingUri = false, exactUri = true,
+        }));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void ImportedTransformationsRemainNativeAndUseLocalBindingContexts(int targetIndex)
+    {
+        using UnsafeCodeTestFixture main = UnsafeCodeTestFixture.CreateImportedNativeCodingInputs(targetIndex,
+            UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving, enableRule: true, includeLocalContexts: true);
+        FhirPackageComparisonPair pair = main.LoadCompareAndGenerate(targetIndex);
+        using UnsafeCodeTestFixture probe = UnsafeCodeTestFixture.CreateImportedNativeCodingInputs(targetIndex,
+            UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving, enableRule: false, includeLocalContexts: true);
+        FhirPackageComparisonPair probePair = probe.LoadCompareAndGenerate(targetIndex);
+        AssertStagedCorrespondence(main, probe);
+        DbUnsafeCodeMapEvidence map = DbUnsafeCodeMapEvidence.SelectList(main.Connection).ShouldHaveSingleItem();
+        DbStructureOutcome outcome = ImportedOutcome(main, pair);
+        DbUnsafeCodeTrigger[] triggers = [.. DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)];
+        triggers.ShouldNotBeEmpty();
+        triggers.ShouldContain(trigger => trigger.SourcePathJson.Contains("ValueSet.extensionOnly", StringComparison.Ordinal));
+        StructureFhirExporter.BuiltDefinitions probeBuilt = probe.BuildDefinitions(probePair);
+        StructureFhirExporter.BuiltDefinitions built = main.BuildDefinitions(pair);
+        foreach (string use in new[] { "jurisdiction", "sourceUnrelated", "targetUnrelated", "extensionOnly" })
+        {
+            ImmutableArray<UnsafeCodePathStep> path = ImportedCodingPath("ValueSet." + use);
+            RepresentationLocation location = built.Representations.Resolve(outcome.Key, path).ShouldHaveSingleItem();
+            RepresentationLocation probeLocation = probeBuilt.Representations.Resolve(ImportedOutcome(probe, probePair).Key, path).ShouldHaveSingleItem();
+            location.State.ShouldBe(RepresentationState.Observable);
+            location.SourceType.ShouldBe("Coding");
+            location.TargetType.ShouldBe("Coding");
+            location.Steps.ShouldBe(probeLocation.Steps);
+            location.SourceBinding.ShouldBe(probeLocation.SourceBinding);
+            AssertTransformations(location.Transformations, probeLocation.Transformations);
+            AssertTransformations(built.Representations.Resolve(outcome.Key, path).ShouldHaveSingleItem().Transformations, location.Transformations);
+            if (use == "jurisdiction")
+            {
+                location.Steps.OfType<ExtensionStep>().ShouldBeEmpty();
+                location.Transformations.ShouldHaveSingleItem().Provenance.ShouldBe([MapProvenance(map)]);
+            }
+            else
+            {
+                location.Transformations.ShouldBeEmpty();
+                if (use == "extensionOnly")
+                {
+                    location.Steps.OfType<ExtensionStep>().ShouldNotBeEmpty();
+                }
+                else
+                {
+                    location.Steps.OfType<ExtensionStep>().ShouldBeEmpty();
+                    DbElement sourceSite = DbElement.SelectSingle(main.Connection, FhirPackageKey: pair.SourcePackageKey, Id: "ValueSet." + use)!;
+                    DbElement targetSite = DbElement.SelectSingle(main.Connection, FhirPackageKey: pair.TargetPackageKey, Id: "ValueSet." + use)!;
+                    sourceSite.BindingValueSet.ShouldBe(main.ImportedValueSet(pair.SourcePackage, use == "sourceUnrelated" ? "unrelated" : "outer").VersionedUrl);
+                    targetSite.BindingValueSet.ShouldBe(main.ImportedValueSet(pair.TargetPackage, use == "targetUnrelated" ? "unrelated" : "outer").VersionedUrl);
+                }
+            }
+        }
+        JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)).ShouldBe(JsonSerializer.Serialize(triggers));
+        built.Profiles.ShouldAllBe(profile => profile.Definition.ImplicitRules == null);
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    public void EquivalentTransformationsUnionDeterministicMapProvenance(int targetIndex, bool identityChanging)
+    {
+        UnsafeCodeTestFixture.ImportedNativeScenario scenario = identityChanging
+            ? UnsafeCodeTestFixture.ImportedNativeScenario.IdentityChanging : UnsafeCodeTestFixture.ImportedNativeScenario.IdentityPreserving;
+        using UnsafeCodeTestFixture main = UnsafeCodeTestFixture.CreateImportedNativeCodingInputs(targetIndex, scenario, enableRule: true);
+        main.WriteEquivalentImportedMaps(targetIndex);
+        FhirPackageComparisonPair pair = main.LoadCompareAndGenerate(targetIndex);
+        using UnsafeCodeTestFixture probe = UnsafeCodeTestFixture.CreateImportedNativeCodingInputs(targetIndex, scenario, enableRule: false);
+        probe.WriteEquivalentImportedMaps(targetIndex);
+        FhirPackageComparisonPair probePair = probe.LoadCompareAndGenerate(targetIndex);
+        AssertStagedCorrespondence(main, probe);
+        DbUnsafeCodeMapEvidence[] rows = [.. DbUnsafeCodeMapEvidence.SelectList(main.Connection)];
+        rows.Length.ShouldBe(21);
+        rows.ShouldContain(row => row.ConceptMapId == null);
+        UnsafeCodeMapEvidence[] evidence = [.. rows.Select(row => new UnsafeCodeMapEvidence(
+            row.SourceFhirPackageKey, row.TargetFhirPackageKey,
+            new(row.SourceValueSetUrl, row.SourceValueSetVersion), new(row.TargetValueSetUrl, row.TargetValueSetVersion),
+            new(row.SourceSystem, row.SourceSystemVersion), row.SourceCode,
+            new(row.TargetSystem, row.TargetSystemVersion), row.TargetCode, row.Relationship, row.ExplicitNoMap, MapProvenance(row)))];
+        DbElement sourceBinding = DbElement.SelectSingle(main.Connection, FhirPackageKey: pair.SourcePackageKey, Id: UnsafeCodeTestFixture.ImportedNativeElement)!;
+        DbElement targetBinding = DbElement.SelectSingle(main.Connection, FhirPackageKey: pair.TargetPackageKey, Id: UnsafeCodeTestFixture.ImportedNativeElement)!;
+        UnsafeCodeBindingScopeResolver resolver = new(DbValueSet.SelectDict(main.Connection), key => DbValueSetConcept.SelectList(main.Connection, ValueSetKey: key));
+        UnsafeCodeBindingScope sourceScope = resolver.Resolve(sourceBinding)!;
+        UnsafeCodeBindingScope targetScope = resolver.Resolve(targetBinding)!;
+        resolver.Resolve(sourceBinding).ShouldBeSameAs(sourceScope);
+        resolver.Resolve(targetBinding).ShouldBeSameAs(targetScope);
+        UnsafeCodeProjectionMatch[] matches = [.. evidence.Select(row => UnsafeCodeEvidenceApplicability.MatchProjection(
+            row, UnsafeCodeCanonical.Parse(sourceBinding.BindingValueSet), UnsafeCodeCanonical.Parse(targetBinding.BindingValueSet), sourceScope, targetScope))];
+        matches.ShouldAllBe(match => match.IsMatch && match.SourceOrigin == UnsafeCodeEndpointMatchOrigin.ImportedScope &&
+            match.TargetOrigin == UnsafeCodeEndpointMatchOrigin.ImportedScope);
+        StructureFhirExporter.BuiltDefinitions probeBuilt = probe.BuildDefinitions(probePair);
+        RepresentationLocation native = probeBuilt.Representations.Resolve(ImportedOutcome(probe, probePair).Key, ImportedCodingPath()).ShouldHaveSingleItem();
+        native.Transformations.Length.ShouldBe(4);
+        native.Transformations.Select(transformation => (transformation.SourceVersion, transformation.SourceCode, transformation.TargetVersion))
+            .ShouldBe(new (string?, string?, string?)[] { (null, "safe", null), (null, "unsafe", null),
+                (UnsafeCodeTestFixture.ImportedSystemVersion, "safe", UnsafeCodeTestFixture.ImportedSystemVersion),
+                (UnsafeCodeTestFixture.ImportedSystemVersion, "unsafe", UnsafeCodeTestFixture.ImportedSystemVersion) });
+        foreach (CodeTransformation transformation in native.Transformations)
+        {
+            UnsafeCodeProvenance[] expected = [.. rows.Where(row =>
+                (row.SourceSystem, row.SourceSystemVersion, row.SourceCode, row.TargetSystem, row.TargetSystemVersion, row.TargetCode) == TransformationIdentity(transformation))
+                .Select(MapProvenance).Distinct()
+                .OrderBy(provenance => provenance.SourceRelativeFilename, StringComparer.Ordinal)
+                .ThenBy(provenance => provenance.ConceptMapId, StringComparer.Ordinal)
+                .ThenBy(provenance => provenance.ConceptMapUrl, StringComparer.Ordinal)
+                .ThenBy(provenance => provenance.GroupIndex).ThenBy(provenance => provenance.SourceIndex).ThenBy(provenance => provenance.TargetIndex)];
+            transformation.Provenance.ShouldBe(expected);
+            transformation.Provenance.Length.ShouldBe(transformation.SourceVersion is null ? 2 : transformation.SourceCode == "unsafe" ? 9 : 8);
+        }
+        // Repeat and reverse the genuinely loaded evidence, not newly manufactured map facts.
+        AssertTransformations(CodeTransformation.FromEvidence(matches.Select(match => match.Evidence).Reverse()), native.Transformations);
+        AssertTransformations(CodeTransformation.FromEvidence(matches.Select(match => match.Evidence).Concat(matches.Select(match => match.Evidence)).Reverse()),
+            native.Transformations);
+        AssertTransformations(probeBuilt.Representations.Resolve(ImportedOutcome(probe, probePair).Key, ImportedCodingPath()).ShouldHaveSingleItem().Transformations,
+            native.Transformations);
+        DbStructureOutcome outcome = ImportedOutcome(main, pair);
+        string triggersBefore = JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key));
+        DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key).ShouldNotBeEmpty();
+        if (identityChanging)
+        {
+            UnsafeCodeConstraintPlan plan = UnsafeCodeInputStore.ReadConstraintPlans(main.Connection, pair.SourcePackageKey, pair.TargetPackageKey)
+                .Single(plan => plan.Row.SourceElementId == UnsafeCodeTestFixture.ImportedNativeElement);
+            CodeTransformation offending = native.Transformations.First(transformation => transformation.SourceCode == "unsafe");
+            InvalidOperationException exception = Should.Throw<InvalidOperationException>(() => main.BuildDefinitions(pair));
+            exception.Message.ShouldBe(IdentityChangingDiagnostic(plan, targetIndex == 0 ? "R5->R4" : "R5->R4B", offending.Provenance));
+            Console.WriteLine("MEASURED_IMPORTED_NATIVE_PROVENANCE " + JsonSerializer.Serialize(new
+                { destination = targetIndex == 0 ? "R4" : "R4B", diagnostic = exception.Message, native.Transformations }));
+        }
+        else
+        {
+            StructureFhirExporter.BuiltDefinitions built = main.BuildDefinitions(pair);
+            AssertTransformations(built.Representations.Resolve(outcome.Key, ImportedCodingPath()).ShouldHaveSingleItem().Transformations, native.Transformations);
+            StructureDefinition profile = built.Profiles.Single(profile => profile.Definition.Type == "ValueSet").Definition;
+            UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex).ShouldHaveSingleItem().Expression.ShouldBe(ImportedNativeExpression);
+            profile.ImplicitRules.ShouldBeNull();
+        }
+        JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)).ShouldBe(triggersBefore);
+    }
+
+    private static DbStructureOutcome ImportedOutcome(UnsafeCodeTestFixture fixture, FhirPackageComparisonPair pair) =>
+        DbStructureOutcome.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            .Single(outcome => outcome.SourceId == "ValueSet");
+
+    private static ImmutableArray<UnsafeCodePathStep> ImportedCodingPath(string use = UnsafeCodeTestFixture.ImportedNativeElement) =>
+        [new("ValueSet", null, false), new(use, null, false), new("CodeableConcept.coding", "CodeableConcept", false)];
+
+    private static void AssertStagedCorrespondence(UnsafeCodeTestFixture main, UnsafeCodeTestFixture probe)
+    {
+        DbUnsafeCodeTrigger.SelectList(probe.Connection).ShouldBeEmpty();
+        SortedDictionary<string, string[]> mainState = main.ImportedNativeSemanticState();
+        SortedDictionary<string, string[]> probeState = probe.ImportedNativeSemanticState();
+        probeState.Keys.ShouldBe(mainState.Keys);
+        foreach ((string table, string[] signatures) in mainState)
+        {
+            probeState[table].ShouldBe(signatures, "independently staged semantic correspondence: " + table);
+        }
     }
 
     [Theory]
@@ -1930,9 +2231,11 @@ public class UnsafeCodeProfileTests
             location.SourceBinding.ShouldBe(new UnsafeCodeCanonical(UnsafeCodeTestFixture.FilterValueSet, "source-" + use));
             if (use == "mapped")
             {
-                location.Transformations.ShouldHaveSingleItem().ShouldBe(new CodeTransformation(
+                CodeTransformation transformation = location.Transformations.ShouldHaveSingleItem();
+                TransformationIdentity(transformation).ShouldBe((
                     UnsafeCodeTestFixture.FilterSystem, "original-version", "unsafe",
                     evidence.TargetSystem, "replacement-version", "changed"));
+                transformation.Provenance.ShouldBe([MapProvenance(evidence)]);
             }
             else
             {

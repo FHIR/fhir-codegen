@@ -174,7 +174,7 @@ internal static class UnsafeCodeConstraintEmitter
                 transformation.SourceVersion != transformation.TargetVersion ||
                 transformation.SourceCode != transformation.TargetCode)
             {
-                throw Diagnostic(profile.Url, direction, plan, "identity-changing native code mapping");
+                throw Diagnostic(profile.Url, direction, plan, "identity-changing native code mapping", transformation.Provenance);
             }
         }
     }
@@ -304,8 +304,9 @@ internal static class UnsafeCodeConstraintEmitter
     }
 
     private static InvalidOperationException Diagnostic(string canonical, string direction,
-        UnsafeCodeConstraintPlan plan, string reason) => new(
+        UnsafeCodeConstraintPlan plan, string reason, ImmutableArray<UnsafeCodeProvenance> responsibleMaps = default) => new(
         $"Unsafe-code projection failed in profile {canonical}, direction {direction}, source path {JsonSerializer.Serialize(plan.SourcePath)}, " +
         $"qualified code {plan.Row.System}|{plan.Row.SourceVersion ?? "*"}#{plan.Row.Code}, provenance {plan.Provenance}: {reason}. " +
+        (responsibleMaps.IsDefault ? "" : $"Responsible map provenance {JsonSerializer.Serialize(responsibleMaps)}. ") +
         "Regenerate load, compare, outcomes, and export after resolving the source-value representation.");
 }

@@ -7,6 +7,7 @@ using System.Collections.Immutable;
 using System.Data;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Comparison.Models;
+using Fhir.CodeGen.Comparison.Terminology;
 using Hl7.Fhir.Model;
 using Microsoft.Data.Sqlite;
 
@@ -48,7 +49,31 @@ internal sealed record CodeCarrierLocation(
 
 internal sealed record CodeTransformation(
     string? SourceSystem, string? SourceVersion, string? SourceCode,
-    string? TargetSystem, string? TargetVersion, string? TargetCode);
+    string? TargetSystem, string? TargetVersion, string? TargetCode)
+{
+    internal ImmutableArray<UnsafeCodeProvenance> Provenance { get; init; } = [];
+
+    internal static ImmutableArray<CodeTransformation> FromEvidence(IEnumerable<UnsafeCodeMapEvidence> evidence) =>
+        [.. evidence.GroupBy(row => (SourceSystem: row.SourceSystem.Url, SourceVersion: row.SourceSystem.Version, row.SourceCode,
+                TargetSystem: row.TargetSystem.Url, TargetVersion: row.TargetSystem.Version, row.TargetCode))
+            .OrderBy(group => group.Key.SourceSystem, StringComparer.Ordinal)
+            .ThenBy(group => group.Key.SourceVersion, StringComparer.Ordinal)
+            .ThenBy(group => group.Key.SourceCode, StringComparer.Ordinal)
+            .ThenBy(group => group.Key.TargetSystem, StringComparer.Ordinal)
+            .ThenBy(group => group.Key.TargetVersion, StringComparer.Ordinal)
+            .ThenBy(group => group.Key.TargetCode, StringComparer.Ordinal)
+            .Select(group => new CodeTransformation(group.Key.SourceSystem, group.Key.SourceVersion, group.Key.SourceCode,
+                group.Key.TargetSystem, group.Key.TargetVersion, group.Key.TargetCode)
+            {
+                Provenance = [.. group.Select(row => row.Provenance).Distinct()
+                    .OrderBy(provenance => provenance.SourceRelativeFilename, StringComparer.Ordinal)
+                    .ThenBy(provenance => provenance.ConceptMapId, StringComparer.Ordinal)
+                    .ThenBy(provenance => provenance.ConceptMapUrl, StringComparer.Ordinal)
+                    .ThenBy(provenance => provenance.GroupIndex)
+                    .ThenBy(provenance => provenance.SourceIndex)
+                    .ThenBy(provenance => provenance.TargetIndex)],
+            })];
+}
 
 internal sealed record RepresentationLocation(
     ImmutableArray<RepresentationStep> Steps,
@@ -127,7 +152,8 @@ internal sealed class ProfileRepresentationIndex
     private readonly ILookup<int, DbElementComparison> _comparisons;
     private readonly ILookup<int?, DbElementComparison> _comparisonsByTarget;
     private readonly ILookup<int, DbElementTypeComparison> _typeComparisons;
-    private readonly List<DbUnsafeCodeMapEvidence> _evidence;
+    private readonly UnsafeCodeBindingScopeResolver _bindingResolver;
+    private readonly ImmutableArray<UnsafeCodeMapEvidence> _evidence;
     private readonly Dictionary<int, (DbStructureOutcome Outcome, DbElement Target)> _profiles = [];
     private readonly Dictionary<(int Outcome, int Source), List<DbElement>> _native = [];
     private readonly Dictionary<(int Outcome, int Source), List<ProfileExtensionAttachment>> _attachments = [];
@@ -159,6 +185,16 @@ internal sealed class ProfileRepresentationIndex
         {
             _valueSets[valueSet.Key] = valueSet;
         }
+        _bindingResolver = new(_valueSets, key =>
+        {
+            if (!_concepts.TryGetValue(key, out List<DbValueSetConcept>? concepts))
+            {
+                concepts = DbValueSetConcept.SelectList(_db, ValueSetKey: key);
+                _concepts.Add(key, concepts);
+            }
+
+            return concepts;
+        });
         _comparisons = DbElementComparison.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
             .ToLookup(comparison => comparison.SourceElementKey);
         _comparisonsByTarget = _comparisons.SelectMany(group => group).ToLookup(comparison => comparison.TargetElementKey);
@@ -166,7 +202,13 @@ internal sealed class ProfileRepresentationIndex
             .ToLookup(comparison => comparison.SourceElementKey);
         try
         {
-            _evidence = DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+            _evidence = [.. DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+                .Select(row => new UnsafeCodeMapEvidence(
+                    row.SourceFhirPackageKey, row.TargetFhirPackageKey,
+                    new(row.SourceValueSetUrl, row.SourceValueSetVersion), new(row.TargetValueSetUrl, row.TargetValueSetVersion),
+                    new(row.SourceSystem, row.SourceSystemVersion), row.SourceCode,
+                    new(row.TargetSystem, row.TargetSystemVersion), row.TargetCode, row.Relationship, row.ExplicitNoMap,
+                    new(row.SourceRelativeFilename, row.ConceptMapId, row.ConceptMapUrl, row.GroupIndex, row.SourceIndex, row.TargetIndex)))];
         }
         catch (SqliteException error) when (error.SqliteErrorCode == 1 && error.Message.Contains("no such table: UnsafeCodeMapEvidence", StringComparison.Ordinal))
         {
@@ -372,12 +414,13 @@ internal sealed class ProfileRepresentationIndex
             }
             else
             {
-                ImmutableArray<CodeTransformation> transformations = [.. _evidence.Where(evidence =>
-                        !evidence.ExplicitNoMap && evidence.SourceCode is not null && evidence.TargetCode is not null &&
-                        ScopeMatches(projection.SourceBindingElement, evidence.SourceValueSetUrl, evidence.SourceValueSetVersion) &&
-                        ScopeMatches(projection.TargetBindingElement, evidence.TargetValueSetUrl, evidence.TargetValueSetVersion))
-                    .Select(evidence => new CodeTransformation(evidence.SourceSystem, evidence.SourceSystemVersion, evidence.SourceCode,
-                        evidence.TargetSystem, evidence.TargetSystemVersion, evidence.TargetCode)).Distinct()];
+                UnsafeCodeCanonical sourceDirect = projection.SourceBindingElement is null ? new(null, null) : Binding(projection.SourceBindingElement);
+                UnsafeCodeCanonical targetDirect = projection.TargetBindingElement is null ? new(null, null) : Binding(projection.TargetBindingElement);
+                UnsafeCodeBindingScope? sourceScope = _bindingResolver.Resolve(projection.SourceBindingElement);
+                UnsafeCodeBindingScope? targetScope = _bindingResolver.Resolve(projection.TargetBindingElement);
+                ImmutableArray<CodeTransformation> transformations = CodeTransformation.FromEvidence(_evidence
+                    .Select(evidence => UnsafeCodeEvidenceApplicability.MatchProjection(evidence, sourceDirect, targetDirect, sourceScope, targetScope))
+                    .Where(match => match.IsMatch).Select(match => match.Evidence));
                 string[] targetTypes = projection.Native is null ? [] : [.. Types(projection.Native)
                     .Select(type => type.TypeName ?? type.Literal).Distinct()];
                 if (targetTypes.Length == 0 && projection.Native is not null)
@@ -855,12 +898,6 @@ internal sealed class ProfileRepresentationIndex
         UnsafeCodeCanonical canonical = UnsafeCodeCanonical.Parse(element.BindingValueSet);
         return canonical.Version is null && element.BindingValueSetKey is int key && _valueSets.TryGetValue(key, out DbValueSet? valueSet)
             ? new(valueSet.UnversionedUrl, valueSet.Version) : canonical;
-    }
-
-    private bool ScopeMatches(DbElement? element, string? url, string? version)
-    {
-        UnsafeCodeCanonical binding = element is null ? new(null, null) : Binding(element);
-        return url is not null && binding.Url == url && (version is null || binding.Version == version);
     }
 
     private bool PreservesQualification(Projection projection, bool includeVersion)

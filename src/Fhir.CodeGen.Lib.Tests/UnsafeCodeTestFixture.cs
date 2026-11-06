@@ -46,8 +46,16 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal enum ImportedNativeScenario
     {
         IdentityChanging,
+        CodeOnly,
+        SystemOnly,
+        SystemVersionOnly,
         IdentityPreserving,
         SourceNonmember,
+        TargetNonmember,
+        SourceValueSetVersionMismatch,
+        TargetValueSetVersionMismatch,
+        SourceSystemVersionMismatch,
+        TargetSystemVersionMismatch,
     }
 
     private readonly bool _persistDatabase;
@@ -357,12 +365,17 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     }
 
     internal static UnsafeCodeTestFixture CreateImportedNativeCodingInputs(
-        int targetIndex, ImportedNativeScenario scenario, bool enableRule)
+        int targetIndex, ImportedNativeScenario scenario, bool enableRule, bool includeLocalContexts = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(targetIndex);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(targetIndex, 1);
         UnsafeCodeTestFixture fixture = new(initializeIndices: true, persistDatabase: true);
         fixture.InsertRepresentationGraph(includeOtherCarriers: false);
+        if (includeLocalContexts)
+        {
+            // Bound extensions query terminology outcomes even when this staged run processes only structures.
+            DbOutcomeClasses.CreateTables(fixture.Connection, forValueSets: true, forStructures: false);
+        }
         Directory.Delete(Path.Combine(fixture.SourceRoot, "input"), recursive: true);
         foreach (DbFhirPackage package in fixture.Packages)
         {
@@ -372,17 +385,22 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             }
 
             bool source = package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R5;
-            string system = source || scenario == ImportedNativeScenario.IdentityPreserving ? ImportedSourceSystem : "urn:example:target";
-            string code = source || scenario == ImportedNativeScenario.IdentityPreserving ? "unsafe" : "changed";
+            (string system, string version, string code) = source
+                ? (ImportedSourceSystem, ImportedSystemVersion, "unsafe") : ImportedTargetIdentity(scenario);
             DbValueSet inner = fixture.AddImportedValueSet(package, "inner", new()
             {
-                Include = [new() { System = system, Version = ImportedSystemVersion,
-                    Concept = [new() { Code = source && scenario == ImportedNativeScenario.SourceNonmember ? "sibling-only" : code }] }],
+                Include = [new() { System = system, Version = version,
+                    Concept = [new() { Code = source && scenario == ImportedNativeScenario.SourceNonmember ||
+                        !source && scenario == ImportedNativeScenario.TargetNonmember ? "sibling-only" : code }] }],
             });
             Hl7.Fhir.Model.ValueSet.ComposeComponent compose = new() { Include = [new() { ValueSet = [inner.VersionedUrl] }] };
             if (source && scenario == ImportedNativeScenario.SourceNonmember)
             {
                 compose.Include.Add(new() { System = ImportedSourceSystem, Version = ImportedSystemVersion, Concept = [new() { Code = "unsafe" }] });
+            }
+            if (!source && scenario == ImportedNativeScenario.TargetNonmember)
+            {
+                compose.Include.Add(new() { System = system, Version = version, Concept = [new() { Code = code }] });
             }
 
             DbValueSet outer = fixture.AddImportedValueSet(package, "outer", compose);
@@ -397,6 +415,22 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             coding.MaxCardinality = -1;
             coding.MaxCardinalityString = "*";
             DbElement.Update(fixture.Connection, [jurisdiction, coding]);
+            if (includeLocalContexts)
+            {
+                DbValueSet unrelated = fixture.AddImportedValueSet(package, "unrelated", new()
+                {
+                    Include = [new() { System = "urn:example:unrelated", Concept = [new() { Code = "safe" }] }],
+                });
+                foreach (string use in source ? new[] { "sourceUnrelated", "targetUnrelated", "extensionOnly" }
+                    : new[] { "sourceUnrelated", "targetUnrelated" })
+                {
+                    DbElement site = fixture.AddTypedElement(fixture.Structure(package), "ValueSet." + use, "CodeableConcept");
+                    DbValueSet binding = source && use == "sourceUnrelated" || !source && use == "targetUnrelated" ? unrelated : outer;
+                    site.BindingValueSet = binding.VersionedUrl;
+                    site.BindingValueSetKey = binding.Key;
+                    DbElement.Update(fixture.Connection, [site]);
+                }
+            }
         }
 
         foreach ((int source, int target) in new[] { (2, 1), (1, 0), (2, 0) })
@@ -440,7 +474,9 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                         .Select(element => new ConceptMap.SourceElementComponent
                         {
                             Code = element.Id,
-                            Target = [new() { Code = element.Id, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                            NoMap = element.Id == "ValueSet.extensionOnly" ? true : null,
+                            Target = element.Id == "ValueSet.extensionOnly" ? []
+                                : [new() { Code = element.Id, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
                         })],
                 }],
             };
@@ -465,20 +501,21 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         }, "types", "ConceptMap-types-fallback.json");
         DbValueSet sourceInner = fixture.ImportedValueSet(fixture.Packages[2], "inner");
         DbValueSet targetInner = fixture.ImportedValueSet(fixture.Packages[targetIndex], "inner");
-        string targetSystem = scenario == ImportedNativeScenario.IdentityPreserving ? ImportedSourceSystem : "urn:example:target";
-        string targetCode = scenario == ImportedNativeScenario.IdentityPreserving ? "unsafe" : "changed";
+        (string targetSystem, string targetVersion, string targetCode) = ImportedTargetIdentity(scenario);
         string destination = targetIndex == 0 ? "R4" : "R4B";
         fixture.WriteInputMap(new()
         {
             Id = "imported-native-R5-" + destination,
             Url = "http://example.org/ConceptMap/imported-native-R5-" + destination,
             Status = PublicationStatus.Active,
-            SourceScope = new Hl7.Fhir.Model.Canonical(sourceInner.VersionedUrl),
-            TargetScope = new Hl7.Fhir.Model.Canonical(targetInner.VersionedUrl),
+            SourceScope = new Hl7.Fhir.Model.Canonical(scenario == ImportedNativeScenario.SourceValueSetVersionMismatch
+                ? sourceInner.UnversionedUrl + "|wrong-vs-version" : sourceInner.VersionedUrl),
+            TargetScope = new Hl7.Fhir.Model.Canonical(scenario == ImportedNativeScenario.TargetValueSetVersionMismatch
+                ? targetInner.UnversionedUrl + "|wrong-vs-version" : targetInner.VersionedUrl),
             Group = [new()
             {
-                Source = ImportedSourceSystem + "|" + ImportedSystemVersion,
-                Target = targetSystem + "|" + ImportedSystemVersion,
+                Source = ImportedSourceSystem + "|" + (scenario == ImportedNativeScenario.SourceSystemVersionMismatch ? "conflicting-system-version" : ImportedSystemVersion),
+                Target = targetSystem + "|" + (scenario == ImportedNativeScenario.TargetSystemVersionMismatch ? "conflicting-system-version" : targetVersion),
                 Element = [new() { Code = "unsafe", Target = [new() { Code = targetCode, Relationship = ConceptMap.ConceptMapRelationship.RelatedTo }] }],
             }],
         }, "codes", "ConceptMap-R5-imported-native-" + destination + ".json");
@@ -490,7 +527,54 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         return fixture;
     }
 
-    private void WriteInputMap(ConceptMap map, string category, string filename)
+    internal static (string System, string Version, string Code) ImportedTargetIdentity(ImportedNativeScenario scenario) => scenario switch
+    {
+        ImportedNativeScenario.IdentityPreserving => (ImportedSourceSystem, ImportedSystemVersion, "unsafe"),
+        ImportedNativeScenario.CodeOnly => (ImportedSourceSystem, ImportedSystemVersion, "changed"),
+        ImportedNativeScenario.SystemOnly => ("urn:example:target", ImportedSystemVersion, "unsafe"),
+        ImportedNativeScenario.SystemVersionOnly => (ImportedSourceSystem, "system-version-8", "unsafe"),
+        _ => ("urn:example:target", ImportedSystemVersion, "changed"),
+    };
+
+    internal void WriteEquivalentImportedMaps(int targetIndex)
+    {
+        string destination = targetIndex == 0 ? "R4" : "R4B";
+        ConceptMap original = ReadMap("codes", "ConceptMap-R5-imported-native-" + destination + ".json");
+        foreach (DbFhirPackage package in new[] { Packages[2], Packages[targetIndex] })
+        {
+            DbValueSet inner = ImportedValueSet(package, "inner");
+            inner.Compose!.Include[0].Concept.Add(new() { Code = "safe" });
+            DbValueSet.Update(Connection, [inner]);
+        }
+        foreach (string name in new[] { "A", "z" })
+        {
+            ConceptMap map = (ConceptMap)original.DeepCopy();
+            map.Id = name == "A" ? null : "equivalent-imported-" + destination;
+            map.Url = "http://example.org/ConceptMap/equivalent-imported-" + name + "-" + destination;
+            map.Group = [];
+            for (int group = 0; group < 3; group++)
+            {
+                map.Group.Add(new()
+                {
+                    Source = group == 2 ? ImportedSourceSystem : original.Group[0].Source,
+                    Target = group == 2 ? original.Group[0].Target.Split('|')[0] : original.Group[0].Target,
+                    Element = [.. new[] { "unsafe", "safe" }.Select(code => new ConceptMap.SourceElementComponent
+                    {
+                        Code = code,
+                        Target = [.. Enumerable.Range(0, group == 2 ? 1 : 2).Select(index => new ConceptMap.TargetElementComponent
+                        {
+                            Code = code == "unsafe" ? original.Group[0].Element[0].Target[0].Code : code,
+                            Relationship = index == 0 ? ConceptMap.ConceptMapRelationship.RelatedTo : ConceptMap.ConceptMapRelationship.Equivalent,
+                        })],
+                    })],
+                });
+            }
+
+            WriteInputMap(map, "codes", "ConceptMap-R5-" + name + "-equivalent-imported-" + destination + ".json");
+        }
+    }
+
+    internal void WriteInputMap(ConceptMap map, string category, string filename)
     {
         string directory = Path.Combine(SourceRoot, "input", category);
         Directory.CreateDirectory(directory);
@@ -517,12 +601,14 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         return row;
     }
 
-    internal static bool EvaluateImportedNativeCondition(string expression, int targetIndex, string system, string code, string? uri = null)
+    internal static bool EvaluateImportedNativeCondition(string expression, int targetIndex, string? system, string? code, string? uri = null,
+        bool mixed = false)
     {
         string json = "{\"resourceType\":\"ValueSet\",\"status\":\"active\"" +
             (uri is null ? "" : ",\"implicitRules\":" + JsonSerializer.Serialize(uri)) +
-            ",\"jurisdiction\":[{\"coding\":[{\"system\":" + JsonSerializer.Serialize(system) +
-            ",\"code\":" + JsonSerializer.Serialize(code) + "}]}]}";
+            (code is null ? "" : ",\"jurisdiction\":[{\"coding\":[" +
+                (mixed ? "{\"system\":\"urn:example:source\",\"code\":\"safe\"}," : "") +
+                "{\"system\":" + JsonSerializer.Serialize(system) + ",\"code\":" + JsonSerializer.Serialize(code) + "}]}]") + "}";
         ITypedElement instance = TargetInstance(targetIndex, json);
         FhirPathCompiler compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
         ITypedElement[] results = [.. compiler.Compile(expression)(instance, new EvaluationContext())];
