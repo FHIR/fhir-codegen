@@ -37,6 +37,128 @@ public sealed class UnsafeCodeProfileCollection
 [Collection(UnsafeCodeProfileCollection.Name)]
 public class UnsafeCodeProfileTests
 {
+    [Theory]
+    [InlineData(0, "boolean")]
+    [InlineData(1, "boolean")]
+    [InlineData(0, "code")]
+    [InlineData(1, "code")]
+    public void MixedChoiceBaselineObservation(int targetIndex, string alternative)
+    {
+        using UnsafeCodeTestFixture main = UnsafeCodeTestFixture.CreateMixedChoiceInputs(
+            targetIndex, alternative, "qualified", enableRules: true);
+        FhirPackageComparisonPair pair = main.LoadCompareAndGenerate(targetIndex);
+        UnsafeCodeOutcomeTests.AssertMixedChoiceSetup(main, pair, alternative, "qualified");
+        UnsafeCodeInputStore.RequireExportReady(main.Connection, [pair]);
+        main.ConnectionReopens.ShouldBe(3);
+        main.WriteMixedChoiceStageObservation(pair, alternative, "qualified");
+        DbStructureOutcome outcome = DbStructureOutcome.SelectList(main.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            .Single(row => row.SourceId == "Parameters");
+        DbUnsafeCodeTrigger[] triggers = [.. DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)];
+        triggers.ShouldNotBeEmpty();
+        DbUnsafeCodeTrigger trigger = triggers.Single(row => row.System == UnsafeCodeTestFixture.MixedCodingSystem);
+        trigger.SourceElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
+        trigger.TargetElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
+        trigger.Code.ShouldBe("unsafe");
+        trigger.IsWildcardVersion.ShouldBeTrue();
+        trigger.SourceVersion.ShouldBeNull();
+        trigger.EvidenceKeysJson.ShouldBe("[]");
+        trigger.AnnotationKeysJson.ShouldBe("[]");
+        int ruleKey = JsonSerializer.Deserialize<int[]>(trigger.RuleKeysJson)!.ShouldHaveSingleItem();
+        DbUnsafeCodeRule rule = DbUnsafeCodeRule.SelectSingle(main.Connection, Key: ruleKey)!;
+        rule.System.ShouldBe(UnsafeCodeTestFixture.MixedCodingSystem);
+        rule.NoMapOnly.ShouldBeFalse();
+        rule.EntryIndex.ShouldBe(0);
+        rule.SourceRelativeFilename.Replace('\\', '/').ShouldBe("input/ig-support/unsafe-code-mappings.json");
+        UnsafeCodeConstraintPlan plan = UnsafeCodeInputStore.ReadConstraintPlans(main.Connection, pair.SourcePackageKey, pair.TargetPackageKey)
+            .Single(candidate => candidate.Row.Key == trigger.Key);
+        plan.Provenance.Replace('\\', '/').ShouldBe("input/ig-support/unsafe-code-mappings.json entry 0");
+        ImmutableArray<UnsafeCodePathStep> path = plan.SourcePath;
+        path.Select(step => step.ElementId).ShouldBe(["Parameters", "Parameters.parameter", UnsafeCodeTestFixture.MixedChoiceElement]);
+        path.ShouldAllBe(step => step.TypeName == null && !step.IsContentReference);
+        string persistedTriggers = JsonSerializer.Serialize(triggers);
+        string persistedStamp = JsonSerializer.Serialize(main.PairState(pair));
+        SortedDictionary<string, string[]> mainState = main.MixedChoiceRepresentationState();
+        StructureFhirExporter.BuiltDefinitions? built = null;
+        Exception? failure = Record.Exception(() => built = main.BuildDefinitions(pair));
+        UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_CONSTRUCTION", new
+        {
+            target = pair.TargetFhirSequence.ToRLiteral(), alternative,
+            result = failure is null ? "constructed" : "rejected", diagnostic = failure?.Message, path, plan.Provenance,
+        });
+        if (failure is not null)
+        {
+            failure.ShouldBeOfType<InvalidOperationException>();
+            failure.Message.ShouldContain("Regenerate load, compare, outcomes, and export after resolving the source-value representation.");
+            failure.Message.ShouldContain(UnsafeCodeTestFixture.MixedChoiceElement);
+        }
+        JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)).ShouldBe(persistedTriggers);
+        JsonSerializer.Serialize(main.PairState(pair)).ShouldBe(persistedStamp);
+
+        using UnsafeCodeTestFixture twin = UnsafeCodeTestFixture.CreateMixedChoiceInputs(
+            targetIndex, alternative, "qualified", enableRules: false);
+        FhirPackageComparisonPair twinPair = twin.LoadCompareAndGenerate(targetIndex);
+        UnsafeCodeInputStore.RequireExportReady(twin.Connection, [twinPair]);
+        DbUnsafeCodeTrigger.SelectList(twin.Connection).ShouldBeEmpty();
+        SortedDictionary<string, string[]> twinState = twin.MixedChoiceRepresentationState();
+        twinState.Keys.ShouldBe(mainState.Keys);
+        foreach ((string table, string[] rows) in mainState)
+        {
+            twinState[table].ShouldBe(rows, "all-column semantic correspondence: " + table);
+        }
+        StructureFhirExporter.BuiltDefinitions twinBuilt = twin.BuildDefinitions(twinPair);
+        StructureDefinition inactiveProfile = twinBuilt.Profiles.Single(profile => profile.Definition.Type == "Parameters").Definition;
+        UnsafeCodeTestFixture.SerializedConstraints(inactiveProfile, targetIndex).ShouldBeEmpty();
+        inactiveProfile.ImplicitRules.ShouldBeNull();
+        DbStructureOutcome twinOutcome = DbStructureOutcome.SelectList(twin.Connection,
+            SourceFhirPackageKey: twinPair.SourcePackageKey, TargetFhirPackageKey: twinPair.TargetPackageKey)
+            .Single(row => row.SourceId == "Parameters");
+        ImmutableArray<RepresentationLocation> locations = twinBuilt.Representations.Resolve(twinOutcome.Key, path);
+        locations.Select(location => location.SourceType).Order(StringComparer.Ordinal)
+            .ShouldBe(new[] { "Coding", alternative }.Order(StringComparer.Ordinal));
+        locations.ShouldAllBe(location => location.SourceType == location.TargetType);
+        RepresentationLocation coding = locations.Single(location => location.SourceType == "Coding");
+        coding.State.ShouldBe(RepresentationState.Observable);
+        coding.Carrier!.Kind.ShouldBe(CodeCarrierKind.Coding);
+        coding.Transformations.ShouldBeEmpty();
+        UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_PROJECTION", new
+        {
+            target = pair.TargetFhirSequence.ToRLiteral(), alternative, path,
+            tables = twinState.Select(entry => new { table = entry.Key, rows = entry.Value.Length }),
+            locations = locations.Select(location => new
+            {
+                state = location.State.ToString(), location.SourceType, location.TargetType, location.SourceElementId,
+                location.SourceBinding, carrier = location.Carrier?.Kind.ToString(),
+                steps = location.Steps.Select(step => step.ToString()), location.Transformations,
+            }),
+            inactiveProfile = new { inactiveProfile.Url, inactiveProfile.Type, inactiveProfile.ImplicitRules,
+                differential = inactiveProfile.Differential.Element.Select(element => new
+                    { element.ElementId, element.Path, types = element.Type.Select(type => type.Code) }) },
+        });
+        foreach (string parameter in alternative == "boolean"
+            ? new[] { """{"name":"control","valueBoolean":true}""", """{"name":"control","valueBoolean":false}""",
+                """{"name":"control","valueCoding":{"system":"urn:example:codes","code":"unsafe"}}""" }
+            : new[] { """{"name":"control","valueCode":"unsafe"}""",
+                """{"name":"control","valueCoding":{"system":"urn:example:codes","code":"unsafe"}}""" })
+        {
+            ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex,
+                """{"resourceType":"Parameters","parameter":[""" + parameter + "]}");
+            instance.Children("parameter").ShouldHaveSingleItem().Children("value").ShouldHaveSingleItem();
+            if (built is not null)
+            {
+                StructureDefinition profile = built.Profiles.Single(candidate => candidate.Definition.Type == "Parameters").Definition;
+                foreach (ElementDefinition.ConstraintComponent constraint in UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex))
+                {
+                    ITypedElement[] results = [.. Compiler.Compile(constraint.Expression)(instance, new EvaluationContext())];
+                    results.ShouldHaveSingleItem().Value.ShouldBeOfType<bool>();
+                    UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_RECOVERED", new
+                        { targetIndex, alternative, parameter, constraint.Key, constraint.Expression, result = results[0].Value });
+                }
+            }
+        }
+        JsonSerializer.Serialize(DbUnsafeCodeTrigger.SelectList(main.Connection, StructureOutcomeKey: outcome.Key)).ShouldBe(persistedTriggers);
+    }
+
     private static readonly FhirPathCompiler Compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
     private const string ImportedNativeExpression = "($this.jurisdiction.coding.where($this.code.where($this = 'unsafe').exists() and " +
         "$this.system.where($this = 'urn:example:source').exists()).exists() implies implicitRules.where($this = " +

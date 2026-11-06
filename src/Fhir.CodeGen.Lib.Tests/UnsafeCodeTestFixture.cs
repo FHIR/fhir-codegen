@@ -125,6 +125,356 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal bool Load() => new MappingLoader(Connection, NullLoggerFactory.Instance).TryLoadCrossVersionSourceMaps(SourceRoot, false);
 
+    internal const string MixedChoiceElement = "Parameters.parameter.value[x]";
+    internal const string MixedCodingSystem = "urn:example:codes";
+    internal const string MixedPrimitiveSystem = "urn:example:primitive";
+    internal const string MixedPrimitiveVersion = "primitive-v1";
+
+    internal static UnsafeCodeTestFixture CreateMixedChoiceInputs(
+        int targetIndex, string primitiveAlternative, string primitiveQualification, bool enableRules)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(targetIndex);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(targetIndex, 1);
+        if (primitiveAlternative is not ("boolean" or "code") ||
+            primitiveQualification is not ("qualified" or "missing-binding" or "multi-system" or "unknown-version"))
+        {
+            throw new ArgumentException("Unknown mixed-choice input variant.");
+        }
+
+        UnsafeCodeTestFixture fixture = new(initializeIndices: true, persistDatabase: true);
+        Directory.Delete(Path.Combine(fixture.SourceRoot, "input"), recursive: true);
+        DbStructureDefinition.Delete(fixture.Connection);
+        DbValueSet.Delete(fixture.Connection);
+        DbOutcomeClasses.CreateTables(fixture.Connection, forValueSets: true, forStructures: false);
+        foreach (DbFhirPackage package in fixture.Packages)
+        {
+            foreach (string primitive in new[] { "boolean", "code", "string", "uri" })
+            {
+                DbStructureDefinition structure = fixture.AddStructure(package, primitive, FhirArtifactClassEnum.PrimitiveType);
+                fixture.AddMixedChoiceElement(structure, primitive, [], min: 0);
+            }
+
+            DbStructureDefinition coding = fixture.AddStructure(package, "Coding");
+            fixture.AddMixedChoiceElement(coding, "Coding", []);
+            fixture.AddMixedChoiceElement(coding, "Coding.system", ["uri"]);
+            fixture.AddMixedChoiceElement(coding, "Coding.version", ["string"]);
+            fixture.AddMixedChoiceElement(coding, "Coding.code", ["code"]);
+            DbStructureDefinition extension = fixture.AddStructure(package, "Extension");
+            fixture.AddMixedChoiceElement(extension, "Extension", []);
+            fixture.AddMixedChoiceElement(extension, "Extension.value[x]", ["Coding", "boolean", "code", "string", "uri"]);
+            DbStructureDefinition parameters = fixture.AddStructure(package, "Parameters", FhirArtifactClassEnum.Resource);
+            fixture.AddMixedChoiceElement(parameters, "Parameters", []);
+            fixture.AddMixedChoiceElement(parameters, "Parameters.parameter", [], max: -1);
+            fixture.AddMixedChoiceElement(parameters, "Parameters.parameter.name", ["string"], min: 1);
+
+            DbValueSet? binding = null;
+            bool source = package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R5;
+            if (primitiveAlternative == "code" && !(source && primitiveQualification == "missing-binding"))
+            {
+                TestValueSet row = new(package)
+                {
+                    Id = "mixed-choice-primitive",
+                    Name = "MixedChoicePrimitive",
+                    UnversionedUrl = "http://example.org/ValueSet/mixed-choice-primitive",
+                    Version = "primitive-valueset-v3",
+                    VersionedUrl = "http://example.org/ValueSet/mixed-choice-primitive|primitive-valueset-v3",
+                    CanExpand = false,
+                    Compose = new()
+                    {
+                        Include = [new()
+                        {
+                            System = MixedPrimitiveSystem,
+                            Version = source && primitiveQualification == "unknown-version" ? null : MixedPrimitiveVersion,
+                            Concept = [new() { Code = "safe" }, new() { Code = "unsafe" }],
+                        }],
+                    },
+                };
+                if (source && primitiveQualification == "multi-system")
+                {
+                    row.Compose.Include.Add(new()
+                    {
+                        System = "urn:example:ambiguous",
+                        Version = "other-v1",
+                        Concept = [new() { Code = "safe" }, new() { Code = "unsafe" }],
+                    });
+                }
+
+                row.Key = DbValueSet.Insert(fixture.Connection, row);
+                binding = row;
+            }
+
+            fixture.AddMixedChoiceElement(parameters, MixedChoiceElement, ["Coding", primitiveAlternative], binding: binding);
+            foreach (DbStructureDefinition structure in DbStructureDefinition.SelectList(fixture.Connection, FhirPackageKey: package.Key))
+            {
+                structure.SnapshotCount = DbElement.SelectList(fixture.Connection, StructureKey: structure.Key).Count;
+                DbStructureDefinition.Update(fixture.Connection, [structure]);
+            }
+        }
+
+        foreach ((int source, int target) in new[] { (2, 1), (1, 0), (2, 0) })
+        {
+            string direction = (source == 1 ? "4B" : "5") + "to" + (target == 1 ? "4B" : "4");
+            fixture.WriteMixedChoiceMap("resources", direction,
+                "http://hl7.org/fhir/" + fixture.Packages[source].FhirVersionShort + "/resource-types",
+                "http://hl7.org/fhir/" + fixture.Packages[target].FhirVersionShort + "/resource-types", ["Parameters"]);
+            fixture.WriteMixedChoiceMap("types", direction,
+                "http://hl7.org/fhir/" + fixture.Packages[source].FhirVersionShort + "/data-types",
+                "http://hl7.org/fhir/" + fixture.Packages[target].FhirVersionShort + "/data-types", ["Coding", "Extension"]);
+            fixture.WriteMixedChoiceMap("elements", direction,
+                "http://hl7.org/fhir/" + fixture.Packages[source].FhirVersionShort + "/element-names",
+                "http://hl7.org/fhir/" + fixture.Packages[target].FhirVersionShort + "/element-names",
+                [.. DbElement.SelectList(fixture.Connection, FhirPackageKey: fixture.Packages[source].Key).Select(element => element.Id)]);
+        }
+        fixture.WriteMixedChoiceMap("types", "fallback", "http://hl7.org/fhir/fhir-types", "http://hl7.org/fhir/fhir-types",
+            ["boolean", "code", "string", "uri"]);
+        fixture.WriteConfiguration(enableRules
+            ? primitiveAlternative == "boolean"
+                ? """[{"system":"urn:example:codes","code":"unsafe"}]"""
+                : """[{"system":"urn:example:codes","code":"unsafe"},{"system":"urn:example:primitive","version":"primitive-v1","code":"unsafe"}]"""
+            : "[]");
+        return fixture;
+    }
+
+    private DbElement AddMixedChoiceElement(
+        DbStructureDefinition structure, string id, string[] types, int min = 0, int max = 1, DbValueSet? binding = null)
+    {
+        DbFhirPackage package = Packages.Single(package => package.Key == structure.FhirPackageKey);
+        List<DbElement> siblings = DbElement.SelectList(Connection, StructureKey: structure.Key);
+        int separator = id.LastIndexOf('.');
+        TestElement row = new(package, structure.Key, id)
+        {
+            ParentElementKey = separator < 0 ? null : siblings.Single(parent => parent.Id == id[..separator]).Key,
+            ResourceFieldOrder = siblings.Count,
+            ComponentFieldOrder = siblings.Count,
+            MinCardinality = min,
+            MaxCardinality = max,
+            MaxCardinalityString = max < 0 ? "*" : max.ToString(),
+            FullCollatedTypeLiteral = string.Join(',', types),
+            DistinctTypeLiterals = string.Join(',', types),
+            DistinctTypeCount = types.Length,
+            IsChoiceType = types.Length > 1,
+            IsSimpleType = types.Length == 1,
+            IsInherited = false,
+            BaseElementKey = null,
+            BaseStructureKey = null,
+            BasePath = null,
+            DefinedAsContentReference = false,
+            ContentReferenceSourceKey = null,
+            BindingValueSet = binding?.VersionedUrl,
+            BindingValueSetKey = binding?.Key,
+            ValueSetBindingStrength = binding is null ? null : BindingStrength.Required,
+        };
+        row.Key = DbElement.Insert(Connection, row);
+        if (row.ParentElementKey is int parentKey)
+        {
+            DbElement parent = siblings.Single(parent => parent.Key == parentKey);
+            parent.ChildElementCount++;
+            DbElement.Update(Connection, [parent]);
+        }
+        foreach (string type in types)
+        {
+            AddType(row, type, Structure(package, type));
+        }
+        return row;
+    }
+
+    private void WriteMixedChoiceMap(string category, string suffix, string source, string target, string[] ids)
+    {
+        ConceptMap map = new()
+        {
+            Id = "mixed-choice-" + category + "-" + suffix,
+            Url = "http://example.org/ConceptMap/mixed-choice-" + category + "-" + suffix,
+            Status = PublicationStatus.Active,
+            Group = [new()
+            {
+                Source = source,
+                Target = target,
+                Element = [.. ids.Select(id => new ConceptMap.SourceElementComponent
+                {
+                    Code = id,
+                    Target = [new() { Code = id, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                })],
+            }],
+        };
+        string directory = Path.Combine(SourceRoot, "input", category);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "ConceptMap-" + category + "-" + suffix + ".json"), map.ToJson());
+    }
+
+    internal SortedDictionary<string, string[]> MixedChoiceRepresentationState()
+    {
+        // All persisted columns participate; only safety policy/completion may differ between staged twins.
+        Dictionary<string, Dictionary<long, SortedDictionary<string, object?>>> rows = [];
+        Dictionary<string, Dictionary<string, string>> references = [];
+        List<string> tables = [];
+        using (SqliteCommand schema = Connection.CreateCommand())
+        {
+            schema.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' " +
+                "AND name NOT IN ('UnsafeCodeInputState', 'UnsafeCodePairState', 'UnsafeCodeRules', 'UnsafeCodeTriggers') ORDER BY name";
+            using SqliteDataReader reader = schema.ExecuteReader();
+            while (reader.Read())
+            {
+                tables.Add(reader.GetString(0));
+            }
+        }
+        foreach (string table in tables)
+        {
+            rows[table] = [];
+            references[table] = [];
+            using SqliteCommand command = Connection.CreateCommand();
+            command.CommandText = "SELECT * FROM \"" + table + "\"";
+            using (SqliteDataReader reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    SortedDictionary<string, object?> row = new(StringComparer.Ordinal);
+                    for (int column = 0; column < reader.FieldCount; column++)
+                    {
+                        row.Add(reader.GetName(column), reader.IsDBNull(column) ? null : reader.GetValue(column));
+                    }
+                    rows[table].Add((long)row["Key"]!, row);
+                }
+            }
+            command.CommandText = "PRAGMA foreign_key_list(\"" + table + "\")";
+            using SqliteDataReader foreignKeys = command.ExecuteReader();
+            while (foreignKeys.Read())
+            {
+                references[table].Add(foreignKeys.GetString(3), foreignKeys.GetString(2));
+            }
+        }
+
+        Dictionary<(string Table, long Key), string> identities = [];
+        HashSet<(string Table, long Key)> visiting = [];
+        SortedDictionary<string, string[]> state = new(StringComparer.Ordinal);
+        foreach (string table in tables)
+        {
+            state.Add(table, [.. rows[table].Keys.Select(key => Normalize(table, key)).Order(StringComparer.Ordinal)]);
+        }
+        return state;
+
+        string Normalize(string table, long key)
+        {
+            if (identities.TryGetValue((table, key), out string? cached))
+            {
+                return cached;
+            }
+            if (!visiting.Add((table, key)))
+            {
+                throw new InvalidOperationException("Unexpected cyclic mixed-choice fixture foreign key: " + table);
+            }
+            SortedDictionary<string, object?> normalized = new(StringComparer.Ordinal);
+            foreach ((string column, object? value) in rows[table][key])
+            {
+                if (column == "Key")
+                {
+                    continue;
+                }
+                string? reference = references[table].GetValueOrDefault(column) ?? column switch
+                {
+                    "FhirPackageKey" or "SourceFhirPackageKey" or "TargetFhirPackageKey" => "FhirPackages",
+                    "ConceptMapSourceKey" or "FmlSourceKey" => "MappingSourceFiles",
+                    "StructureKey" or "SourceStructureKey" or "TargetStructureKey" or "BaseStructureKey" or
+                        "TypeStructureKey" or "TypeProfileStructureKey" or "TargetProfileStructureKey" => "Structures",
+                    "ElementKey" or "SourceElementKey" or "TargetElementKey" or "BaseElementKey" or
+                        "ParentElementKey" or "ContentReferenceSourceKey" or "ContextElementKey" or
+                        "CardinalityContextElementKey" => "Elements",
+                    "SourceElementTypeKey" or "TargetElementTypeKey" => "ElementTypes",
+                    "BindingValueSetKey" or "SourceValueSetKey" or "TargetValueSetKey" => "ValueSets",
+                    "SourceValueSetConceptKey" or "TargetValueSetConceptKey" => "ValueSetConcepts",
+                    "StructureMappingKey" => "StructureMappings",
+                    "ElementMappingKey" => "ElementMappings",
+                    "ValueSetMappingKey" => "ValueSetMappings",
+                    "StructureComparisonKey" => "StructureComparisons",
+                    "ElementComparisonKey" => "ElementComparisons",
+                    "ValueSetComparisonKey" or "BoundValueSetComparisonKey" => "ValueSetComparisons",
+                    "StructureOutcomeKey" => "StructureOutcomes",
+                    "ElementOutcomeKey" or "ParentElementOutcomeKey" or "AncestorElementOutcomeKey" or
+                        "ContentReferenceOutcomeKey" or "SourceAncestorContentReferenceOutcomeKey" => "ElementOutcomes",
+                    "ExtensionSubstitutionKey" => "ExtensionSubstitutions",
+                    _ => null,
+                };
+                if (column.StartsWith("ContentKeyR", StringComparison.Ordinal))
+                {
+                    reference = table switch
+                    {
+                        "StructureComparisons" => "Structures",
+                        "ElementComparisons" => "Elements",
+                        "ElementTypeComparisons" => "ElementTypes",
+                        "ValueSetComparisons" => "ValueSets",
+                        "ValueSetConceptComparisons" => "ValueSetConcepts",
+                        _ => throw new InvalidOperationException("Unknown mixed-choice content reference: " + table),
+                    };
+                }
+                if (value is long foreignKey && reference is not null)
+                {
+                    normalized[column] = Identity(reference, foreignKey);
+                }
+                else if (value is string literal && column.EndsWith("KeysLiteral", StringComparison.Ordinal))
+                {
+                    string memberTable = column.Contains("ChildElement", StringComparison.Ordinal) ? "Elements" : "ElementTypes";
+                    normalized[column] = literal.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(member => Identity(memberTable, long.Parse(member))).Order(StringComparer.Ordinal).ToArray();
+                }
+                else if (value is long && column.EndsWith("Key", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Unaccounted mixed-choice foreign key: " + table + "." + column);
+                }
+                else
+                {
+                    normalized[column] = value;
+                }
+            }
+            visiting.Remove((table, key));
+            string result = JsonSerializer.Serialize(normalized);
+            identities.Add((table, key), result);
+            return result;
+        }
+
+        string Identity(string table, long key) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Normalize(table, key))));
+    }
+
+    internal void WriteMixedChoiceStageObservation(FhirPackageComparisonPair pair, string alternative, string qualification)
+    {
+        WriteMixedChoiceObservation("MEASURED_H2_STAGE", new
+        {
+            sourceRoot = SourceRoot, alternative, qualification,
+            packages = Packages.Select(package => new { package.Key, package.PackageId, package.PackageVersion }),
+            input = InputState, state = PairState(pair), reopens = ConnectionReopens,
+            choices = DbElement.SelectList(Connection, Id: MixedChoiceElement).Select(element => new
+            {
+                element.Key, element.FhirPackageKey, element.StructureKey, element.ParentElementKey,
+                element.IsChoiceType, element.IsSimpleType, element.DistinctTypeCount, element.DistinctTypeLiterals,
+                element.FullCollatedTypeLiteral, element.BindingValueSet, element.BindingValueSetKey,
+                types = DbElementType.SelectList(Connection, ElementKey: element.Key),
+            }),
+            bindings = DbValueSet.SelectList(Connection).Select(binding => new
+                { binding.Key, binding.FhirPackageKey, binding.VersionedUrl, binding.Version, binding.CanExpand,
+                    includes = binding.Compose!.Include.Select(include => new { include.System, include.Version,
+                        codes = include.Concept.Select(concept => concept.Code) }) }),
+            maps = DbElementMapping.SelectList(Connection, SourceElementId: MixedChoiceElement).Select(map => new
+                { map.Key, map.SourceFhirPackageKey, map.TargetFhirPackageKey, map.SourceElementId, map.TargetElementId,
+                    map.ConceptMapFilename, map.ExplicitNoMap }),
+            comparisons = DbElementComparison.SelectList(Connection, SourceElementId: MixedChoiceElement).Select(comparison => new
+            {
+                comparison.Key, comparison.SourceFhirPackageKey, comparison.TargetFhirPackageKey,
+                comparison.SourceElementId, comparison.TargetElementId, comparison.ElementMappingKey, comparison.Steps,
+                comparison.ContentKeys, comparison.Relationship,
+                types = DbElementTypeComparison.SelectList(Connection, ElementComparisonKey: comparison.Key)
+                    .Select(type => new { type.SourceTypeLiteral, type.TargetTypeLiteral, type.Relationship,
+                        type.SourceElementTypeKey, type.TargetElementTypeKey }),
+                targets = DbElementOutcomeTarget.SelectList(Connection, ElementComparisonKey: comparison.Key),
+            }),
+            outcomes = DbStructureOutcome.SelectList(Connection).Select(outcome => new
+                { outcome.Key, outcome.SourceId, outcome.TargetId, outcome.GenUrl }),
+            rules = DbUnsafeCodeRule.SelectList(Connection), triggers = DbUnsafeCodeTrigger.SelectList(Connection),
+        });
+    }
+
+    internal static void WriteMixedChoiceObservation(string label, object observation)
+    {
+        Console.WriteLine(label + " " + JsonSerializer.Serialize(observation));
+    }
+
     internal static UnsafeCodeTestFixture CreateProfileInputs(bool initializeIndices = true, bool persistDatabase = false)
     {
         UnsafeCodeTestFixture fixture = new(initializeIndices, persistDatabase);

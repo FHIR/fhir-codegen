@@ -1017,3 +1017,149 @@ Pieces of the export pipeline this spec claims to cover:
 ---
 *Legacy exporter references verified at `e36315a1c9d16450ba81457e4f888eff78d4ae42`; safety construction/preflight contracts and measured artifact deltas rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*
 *Shared imported applicability, responsible-map diagnostics and the measured R4/R4B matrix checked against `f7c00a6b4c96c092e0912e29610dddca16e46d4f` and its committed assertions on `2026-11-06`.*
+
+## Measured H2 Mixed-Choice Baseline (Evidence Only)
+
+Measured on `2026-11-06`, before any H2 production correction, against
+isolated `git archive` inputs:
+
+| Production source SHA | Disposable verification root | Profile / outcome class results |
+|-|-|-|
+| `e153f6ef797a0194b8a36ca1994818a07e08140e` | `C:\Users\ginoc\AppData\Local\Temp\fhir-h2-original-btqemnmo` | 118 / 84 passed, zero failed or skipped |
+| `e4bda82dd8c61f4f409cb7dc65c5e26657a572c2` | `C:\Users\ginoc\AppData\Local\Temp\fhir-h2-current-vewbenx6` | 146 / 105 passed, zero failed or skipped on final runs |
+
+Each archive's own `AGENTS.md` was read before executing, from that root:
+
+```powershell
+dotnet test src\Fhir.CodeGen.Lib.Tests\Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName~UnsafeCodeProfileTests"
+dotnet test src\Fhir.CodeGen.Lib.Tests\Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName~UnsafeCodeOutcomeTests"
+```
+
+`VSTestVerbosity=detailed` was explicitly set for console evidence; no
+report redirection or generated profile files were used. SDK `10.0.403`,
+runtime `10.0.14`; compilation reported the documented CS3021 warning.
+The first current-archive profile run had 145 passed / 1 failed: existing
+`ImportedTargetScopeAndVersionMustMatchActualNativeContext` (R4B,
+`TargetSystemVersionMismatch`) completed its condition assertions but
+fixture disposal encountered a locked `snapshot.sqlite`. Its scoped
+method recheck passed all 10 cases, then one class rerun passed all 146.
+No H1 fixture/test was changed. Final main-checkout classes passed
+146 / 105. These are focused checks, not Release/full-suite verification.
+
+Only additive H2 hunks in the three unsafe-code test files were applied;
+the original needed two additional framework imports, not H1 helpers.
+SHA256 identities of the UTF-8/LF unified test-only diffs (three context
+lines, fixture/profile/outcome path order) are:
+
+- Original: `239d2a53aabc75cbf7395813ca55afd5f8ec0115b11e49d42d3b5baaea7ed022`.
+- Current/main: `11cf0a03bc09a03c6fb2b470c118b8109c9484b1007ab080efdf7160a4fce145`.
+
+All 583 original / 586 current tracked archive entries were byte-checked
+against fresh exact-SHA archive streams: only those three test files
+differed. All 402 / 404 non-test production blobs under `src` matched
+their canonical Git objects. The specific production object identities
+below were also checked before execution:
+
+| `src/Fhir.CodeGen.Comparison/` path | Original blob | Current blob |
+|-|-|-|
+| `Outcomes/UnsafeCodeOutcomeGenerator.cs` | `3e45c6e86799bcf75598c0d8dc9ec503d5a4f0bc` | `e5f5eeb39a647d84d6ed2cefd90e87fcba05bda0` |
+| `Exporter/ProfileRepresentationIndex.cs` | `39df61c0b614236f832f94fefc67f38de16d1db7` | `34bed0ee99649838b541f216f316f8c76f7bd020` |
+| `Exporter/UnsafeCodeConstraintEmitter.cs` | `3a8afee4138fe43c0e744d8d46447cd6ea5ee9a5` | `9b1c6e3dde4ab20daa3c63beddf08d1327f3b4b5` |
+
+### Persisted activation and projection
+
+`CreateMixedChoiceInputs` constructs a fresh initialized, persisted graph
+for R5 (`5.0.0`), R4B (`4.3.0`) and R4 (`4.0.1`). The choice
+`Parameters.parameter.value[x]` has exactly `Coding,boolean` or
+`Coding,code`: two reconciled type rows/declarations on all three
+releases, `IsChoiceType=true`, `IsSimpleType=false`, and cardinality 0..1.
+`Parameters.parameter` repeats; `.name` is string. Coding has system,
+version and code fields linked to uri/string/code; all four primitives
+(including boolean) have their own unbound structures and roots.
+Extension's choice vocabulary is declared separately. No resource-owner
+outcomes or manually inserted safety triggers participate.
+
+Equivalent resource/type/element maps live at
+`input/{resources,types,elements}/ConceptMap-{category}-{5to4B,4Bto4,5to4}.json`;
+`input/types/ConceptMap-types-fallback.json` covers boolean/code/string/uri.
+Persisted type comparisons retain both identity alternatives and actual
+outcome targets. Adjacent comparisons retain their direct element-map
+keys; R5→R4 uses the ordinary two-step transitive comparison, with no
+direct contributing map key and the actual R4B choice identity retained.
+Load, comparison and outcomes each reopen the database (three boundaries).
+
+On both SHAs and destinations, Coding/boolean has one active ordinary-rule
+trigger for `urn:example:codes#unsafe`, wildcard version, null SourceVersion,
+empty evidence/annotation keys, and entry-0 rule provenance from
+`input/ig-support/unsafe-code-mappings.json`. All outcome completion stamps
+match the completed input/comparison revisions and format 1. Its recovered
+persisted path is:
+
+```json
+[{"ElementId":"Parameters","TypeName":null,"IsContentReference":false},{"ElementId":"Parameters.parameter","TypeName":null,"IsContentReference":false},{"ElementId":"Parameters.parameter.value[x]","TypeName":null,"IsContentReference":false}]
+```
+
+Each independently staged zero-rule twin matched **every column of every
+non-safety table**, substituting semantic FK identities (including embedded
+type/content keys). Only safety rules/triggers/input and pair stamps were
+excluded. An unaccounted populated key or unexpected cycle blocks this
+comparison. The main trigger was never removed. Twins retained 42 elements,
+33 type rows, 42 element mappings, 10 element outcomes/targets and three
+structure outcomes; R4 had 30 element / 33 type comparisons, R4B 20 / 22.
+Only after correspondence passed was the main's recovered path resolved:
+
+| Choice | Source → target type | State | Carrier | Steps |
+|-|-|-|-|-|
+| Coding/boolean | Coding → Coding | Observable | Coding | parameter / value / ofType(Coding) |
+| Coding/boolean | boolean → boolean | Observable | null | parameter / value / ofType(boolean) |
+| Coding/code | Coding → Coding | Observable | Coding | parameter / value / ofType(Coding) |
+| Coding/code | code → code | Observable | Primitive | parameter / value / ofType(code) |
+
+All locations retained empty transformations. Boolean choice bindings were
+absent. Code choice locations retained
+`http://example.org/ValueSet/mixed-choice-primitive|primitive-valueset-v3`.
+Inactive builds succeeded with no unsafe constraint, unset profile
+ImplicitRules and unchanged root-only differential; both alternatives
+remained in target declarations/projections. Matching R4/R4B strict
+deserialization accepted real Parameters entries with name and
+valueBoolean (true/false), valueCoding or valueCode.
+
+### Exact construction and primitive observations
+
+Both original and current production reject Coding/boolean with the
+following exact diagnostic (R4 shown; R4B changes only `R5->R4` to
+`R5->R4B`):
+
+```text
+Unsafe-code projection failed in profile http://hl7.org/fhir/5.0/StructureDefinition/profile-Parameters, direction R5->R4, source path [{"ElementId":"Parameters","TypeName":null,"IsContentReference":false},{"ElementId":"Parameters.parameter","TypeName":null,"IsContentReference":false},{"ElementId":"Parameters.parameter.value[x]","TypeName":null,"IsContentReference":false}], qualified code urn:example:codes|*#unsafe, provenance input\ig-support\unsafe-code-mappings.json entry 0: unsupported code carrier. Regenerate load, compare, outcomes, and export after resolving the source-value representation.
+```
+
+For Coding/code the required uniquely resolved same-package binding supplies
+`urn:example:primitive|primitive-v1` and safe/unsafe concepts.
+Its ValueSet version is **not** that system version. Rule entry 1 separately
+configures `urn:example:primitive|primitive-v1#unsafe`. Both SHAs complete
+outcomes with two broad typed triggers: entry 0 wildcard and entry 1 exact
+`["primitive-v1"]`; **both SourceVersion values are null**, and both retain
+the original unselected choice path/context. There is no independently
+qualified primitive path. Code construction rejects with:
+
+```text
+Unsafe-code projection failed in profile http://hl7.org/fhir/5.0/StructureDefinition/profile-Parameters, direction R5->R4, source path [{"ElementId":"Parameters","TypeName":null,"IsContentReference":false},{"ElementId":"Parameters.parameter","TypeName":null,"IsContentReference":false},{"ElementId":"Parameters.parameter.value[x]","TypeName":null,"IsContentReference":false}], qualified code urn:example:primitive|*#unsafe, provenance input\ig-support\unsafe-code-mappings.json entry 1: ErasedVersion. Regenerate load, compare, outcomes, and export after resolving the source-value representation.
+```
+
+Again R4B changes only the direction literal. This is an observed
+version-erasure boundary, not an unsupported-carrier prediction.
+Separately staged source-only missing-binding, multi-system (adds
+`urn:example:ambiguous|other-v1`) and unknown exact system-version
+(source include version absent) variants **also complete** on both SHAs and
+destinations with those same two typed triggers and all three outcome
+stamps set. No primitive qualification diagnostic occurred; none is
+invented here. This confirms typed precedence bypassing independent
+primitive qualification, rather than claiming partially persisted triggers
+from a failed outcome pass.
+
+Active construction leaves persisted triggers and pair stamps identical.
+No active profile, serialized invariant or recovered Boolean evaluation
+exists for these rejected builds. These baseline facts confirm the two H2
+hypotheses; they do not establish correction, whole-profile conformance,
+Release readiness or permission to publish affected output.

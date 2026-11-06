@@ -20,6 +20,139 @@ namespace Fhir.CodeGen.Lib.Tests;
 public class UnsafeCodeOutcomeTests
 {
     [Theory]
+    [InlineData(0, "qualified")]
+    [InlineData(1, "qualified")]
+    [InlineData(0, "missing-binding")]
+    [InlineData(1, "missing-binding")]
+    [InlineData(0, "multi-system")]
+    [InlineData(1, "multi-system")]
+    [InlineData(0, "unknown-version")]
+    [InlineData(1, "unknown-version")]
+    public void MixedChoicePrimitiveBaselineObservation(int targetIndex, string qualification)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(
+            targetIndex, "code", qualification, enableRules: true);
+        fixture.LoadProfileMaps();
+        FhirPackageComparisonPair pair = new(fixture.Packages[2], fixture.Packages[targetIndex]);
+        fixture.CompareProfilePair(pair);
+        AssertMixedChoiceSetup(fixture, pair, "code", qualification);
+        Exception? failure = Record.Exception(() => fixture.GenerateProfileOutcomes(pair));
+        fixture.WriteMixedChoiceStageObservation(pair, "code", qualification);
+        DbUnsafeCodeTrigger[] triggers = [.. DbUnsafeCodeTrigger.SelectList(fixture.Connection)];
+        DbUnsafeCodePairState state = fixture.PairState(pair);
+        state.ComparisonRevision.ShouldNotBeNull();
+        if (failure is not null)
+        {
+            failure.ShouldBeOfType<InvalidOperationException>();
+            failure.Message.ShouldContain("Unsafe-code identity is ambiguous for primitive " + UnsafeCodeTestFixture.MixedChoiceElement);
+            state.OutcomeInputRevision.ShouldBeNull();
+            state.OutcomeComparisonRevision.ShouldBeNull();
+            state.OutcomeFormatVersion.ShouldBeNull();
+            triggers.ShouldBeEmpty("collection precedes insertion; no partial Coding trigger is persisted");
+        }
+        else
+        {
+            UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+            state.OutcomeInputRevision.ShouldBe(fixture.InputState.CompletedInputRevision);
+            state.OutcomeComparisonRevision.ShouldBe(state.ComparisonRevision);
+            state.OutcomeFormatVersion.ShouldBe(UnsafeCodeConstants.OutcomeFormatVersion);
+            triggers.ShouldContain(trigger => trigger.System == UnsafeCodeTestFixture.MixedCodingSystem &&
+                trigger.Code == "unsafe" && trigger.SourceElementId == UnsafeCodeTestFixture.MixedChoiceElement);
+        }
+        UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_PRIMITIVE", new
+        {
+            target = pair.TargetFhirSequence.ToRLiteral(), qualification,
+            result = failure is null ? "completed" : "incomplete", diagnostic = failure?.Message,
+            triggers, state,
+        });
+    }
+
+    internal static void AssertMixedChoiceSetup(
+        UnsafeCodeTestFixture fixture, FhirPackageComparisonPair pair, string alternative, string qualification)
+    {
+        foreach (DbFhirPackage package in fixture.Packages)
+        {
+            DbElement choice = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: package.Key,
+                Id: UnsafeCodeTestFixture.MixedChoiceElement)!;
+            choice.IsChoiceType.ShouldBeTrue();
+            choice.IsSimpleType.ShouldBeFalse();
+            choice.DistinctTypeCount.ShouldBe(2);
+            choice.DistinctTypes.ShouldBe(["Coding", alternative]);
+            choice.FullCollatedTypeLiteral.ShouldBe("Coding," + alternative);
+            choice.ParentElementKey.ShouldBe(DbElement.SelectSingle(fixture.Connection, FhirPackageKey: package.Key,
+                Id: "Parameters.parameter")!.Key);
+            DbElementType[] types = [.. DbElementType.SelectList(fixture.Connection, ElementKey: choice.Key)];
+            types.Select(type => type.TypeName).Order(StringComparer.Ordinal).ShouldBe(new[] { "Coding", alternative }.Order(StringComparer.Ordinal));
+            foreach (DbElementType type in types)
+            {
+                type.FhirPackageKey.ShouldBe(package.Key);
+                type.StructureKey.ShouldBe(choice.StructureKey);
+                DbStructureDefinition structure = DbStructureDefinition.SelectSingle(fixture.Connection, Key: type.TypeStructureKey)!;
+                structure.FhirPackageKey.ShouldBe(package.Key);
+                structure.Id.ShouldBe(type.TypeName);
+                DbElement root = DbElement.SelectList(fixture.Connection, StructureKey: structure.Key)
+                    .Single(element => element.ParentElementKey is null);
+                root.Id.ShouldBe(type.TypeName);
+                root.BindingValueSet.ShouldBeNull();
+                root.BindingValueSetKey.ShouldBeNull();
+            }
+            foreach (string primitive in new[] { "boolean", "code", "string", "uri" })
+            {
+                DbStructureDefinition structure = fixture.Structure(package, primitive);
+                structure.ArtifactClass.ShouldBe(FhirArtifactClassEnum.PrimitiveType);
+                DbElement.SelectList(fixture.Connection, StructureKey: structure.Key).ShouldHaveSingleItem().Id.ShouldBe(primitive);
+            }
+            if (alternative == "boolean" || package.Key == pair.SourcePackageKey && qualification == "missing-binding")
+            {
+                choice.BindingValueSet.ShouldBeNull();
+                choice.BindingValueSetKey.ShouldBeNull();
+                choice.ValueSetBindingStrength.ShouldBeNull();
+            }
+            else
+            {
+                choice.ValueSetBindingStrength.ShouldBe(BindingStrength.Required);
+                DbValueSet binding = DbValueSet.SelectSingle(fixture.Connection, Key: choice.BindingValueSetKey)!;
+                binding.FhirPackageKey.ShouldBe(package.Key);
+                binding.VersionedUrl.ShouldBe(choice.BindingValueSet);
+                binding.Version.ShouldNotBe(UnsafeCodeTestFixture.MixedPrimitiveVersion);
+                DbValueSet.SelectList(fixture.Connection, FhirPackageKey: package.Key,
+                    UnversionedUrl: binding.UnversionedUrl, Version: binding.Version).ShouldHaveSingleItem();
+                binding.Compose!.Include[0].System.ShouldBe(UnsafeCodeTestFixture.MixedPrimitiveSystem);
+                binding.Compose.Include[0].Version.ShouldBe(package.Key == pair.SourcePackageKey && qualification == "unknown-version"
+                    ? null : UnsafeCodeTestFixture.MixedPrimitiveVersion);
+                binding.Compose.Include[0].Concept.Select(concept => concept.Code).ShouldBe(["safe", "unsafe"]);
+                binding.Compose.Include.Count.ShouldBe(package.Key == pair.SourcePackageKey && qualification == "multi-system" ? 2 : 1);
+            }
+        }
+        foreach ((int source, int target) in new[] { (2, 1), (1, 0), (2, fixture.Packages.IndexOf(pair.TargetPackage)) }.Distinct())
+        {
+            DbElementMapping map = DbElementMapping.SelectList(fixture.Connection,
+                SourceFhirPackageKey: fixture.Packages[source].Key, TargetFhirPackageKey: fixture.Packages[target].Key,
+                SourceElementId: UnsafeCodeTestFixture.MixedChoiceElement).ShouldHaveSingleItem();
+            map.TargetElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
+            map.ExplicitNoMap.ShouldBeFalse();
+            DbElementComparison comparison = DbElementComparison.SelectList(fixture.Connection,
+                SourceFhirPackageKey: fixture.Packages[source].Key, TargetFhirPackageKey: fixture.Packages[target].Key,
+                SourceElementId: UnsafeCodeTestFixture.MixedChoiceElement).ShouldHaveSingleItem();
+            comparison.TargetElementId.ShouldBe(UnsafeCodeTestFixture.MixedChoiceElement);
+            if (comparison.Steps == 1)
+            {
+                comparison.ElementMappingKey.ShouldBe(map.Key);
+            }
+            else
+            {
+                comparison.Steps.ShouldBe(2);
+                comparison.ElementMappingKey.ShouldBeNull("ordinary R5->R4 transitive comparison has no direct contributing map");
+                comparison.ContentKeyR4B.ShouldBe(DbElement.SelectSingle(fixture.Connection,
+                    FhirPackageKey: fixture.Packages[1].Key, Id: UnsafeCodeTestFixture.MixedChoiceElement)!.Key);
+            }
+            DbElementTypeComparison[] types = [.. DbElementTypeComparison.SelectList(fixture.Connection, ElementComparisonKey: comparison.Key)];
+            types.Select(type => type.SourceTypeLiteral).Order(StringComparer.Ordinal).ShouldBe(new[] { "Coding", alternative }.Order(StringComparer.Ordinal));
+            types.ShouldAllBe(type => type.SourceTypeLiteral == type.TargetTypeLiteral && type.TargetElementTypeKey != null);
+        }
+    }
+
+    [Theory]
     [InlineData("resolved-nested", false, "trigger")]
     [InlineData("import-version-mismatch", false, "empty")]
     [InlineData("wrong-package", false, "empty")]
