@@ -22,6 +22,128 @@ namespace Fhir.CodeGen.Lib.Tests;
 public class UnsafeCodeOutcomeTests
 {
     [Theory]
+    [InlineData(0, true, false, false)]
+    [InlineData(1, true, false, false)]
+    [InlineData(0, false, true, false)]
+    [InlineData(1, false, true, false)]
+    [InlineData(0, true, true, false)]
+    [InlineData(1, true, true, false)]
+    [InlineData(0, true, true, true)]
+    [InlineData(1, true, true, true)]
+    public void StructureOutcomesKeepCodingRootsWithTheirOwningStructures(
+        int targetIndex, bool sourceProfile, bool targetProfile, bool profilesFirst)
+    {
+        int[] profilePackages = [.. (sourceProfile ? new[] { 2 } : []).Concat(targetProfile ? [targetIndex] : [])];
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(
+            targetIndex, "code", "qualified", enableRules: true, profilePackages, profilesFirst);
+        fixture.AddMixedChoiceRootCollisionMaps(targetIndex, sourceProfile, targetProfile);
+        foreach (int index in profilePackages)
+        {
+            DbStructureDefinition basis = fixture.Structure(fixture.Packages[index], "Coding");
+            DbStructureDefinition profile = fixture.Structure(fixture.Packages[index], "SelectedCoding");
+            DbElement basisRoot = DbElement.SelectSingle(fixture.Connection, StructureKey: basis.Key, ResourceFieldOrder: 0)!;
+            DbElement profileRoot = DbElement.SelectSingle(fixture.Connection, StructureKey: profile.Key, ResourceFieldOrder: 0)!;
+            basis.Key.ShouldNotBe(profile.Key);
+            profile.Id.ShouldNotBe(profileRoot.Id);
+            profile.VersionedUrl.ShouldBe(UnsafeCodeTestFixture.MixedCodingProfile);
+            profileRoot.Id.ShouldBe(basisRoot.Id);
+            profileRoot.Path.ShouldBe(basisRoot.Path);
+            profileRoot.BaseStructureKey.ShouldBe(basis.Key);
+            profileRoot.BaseElementKey.ShouldBe(basisRoot.Key);
+            (profile.Key < basis.Key).ShouldBe(profilesFirst);
+            (profileRoot.Key < basisRoot.Key).ShouldBe(profilesFirst);
+        }
+
+        fixture.LoadProfileMaps();
+        fixture.WriteMixedChoiceOwnerObservation("loaded");
+        FhirPackageComparisonPair pair = new(fixture.Packages[2], fixture.Packages[targetIndex]);
+        try
+        {
+            fixture.CompareProfilePair(pair);
+            fixture.GenerateProfileOutcomes(pair);
+        }
+        finally
+        {
+            fixture.WriteMixedChoiceOwnerObservation("comparison-outcome-exit");
+        }
+        fixture.ConnectionReopens.ShouldBe(3);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        fixture.PairState(pair).ComparisonRevision.ShouldNotBeNull();
+        DbStructureOutcome[] outcomes = [.. DbStructureOutcome.SelectList(fixture.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            .Where(outcome => outcome.SourceId is "Coding" or "SelectedCoding" or "UnmappedCoding")];
+        outcomes.ShouldContain(outcome => outcome.SourceId == "Coding" && outcome.TargetId == "Coding");
+        if (sourceProfile)
+        {
+            outcomes.ShouldContain(outcome => outcome.SourceId == "SelectedCoding" && outcome.TargetId == (targetProfile ? "SelectedCoding" : "Coding"));
+            outcomes.ShouldContain(outcome => outcome.SourceId == "UnmappedCoding" && outcome.TargetStructureKey == null);
+        }
+        else
+        {
+            outcomes.ShouldContain(outcome => outcome.SourceId == "Coding" && outcome.TargetId == "SelectedCoding");
+        }
+
+        foreach (DbStructureOutcome outcome in outcomes)
+        {
+            DbStructureDefinition source = fixture.Structure(pair.SourcePackage, outcome.SourceId);
+            outcome.SourceStructureKey.ShouldBe(source.Key);
+            DbElement root = DbElement.SelectSingle(fixture.Connection, StructureKey: source.Key, ResourceFieldOrder: 0)!;
+            DbElementOutcomeTarget[] outcomeTargets = [.. DbElementOutcomeTarget.SelectList(fixture.Connection,
+                StructureOutcomeKey: outcome.Key)];
+            DbElementOutcome element = DbElementOutcome.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey,
+                TargetFhirPackageKey: pair.TargetPackageKey, SourceStructureKey: source.Key, SourceResourceOrder: 0)
+                .Where(element => outcomeTargets.Any(target => target.ElementOutcomeKey == element.Key)).ShouldHaveSingleItem();
+            element.SourceElementKey.ShouldBe(root.Key);
+            DbElement.SelectSingle(fixture.Connection, Key: element.SourceElementKey)!.StructureKey.ShouldBe(source.Key);
+            DbElementOutcomeTarget[] targets = [.. outcomeTargets.Where(target => target.ElementOutcomeKey == element.Key)];
+            targets.ShouldNotBeEmpty();
+            if (outcome.TargetStructureKey is int targetKey)
+            {
+                DbStructureDefinition target = fixture.Structure(pair.TargetPackage, outcome.TargetId!);
+                targetKey.ShouldBe(target.Key);
+                DbElement targetRoot = DbElement.SelectSingle(fixture.Connection, StructureKey: targetKey, ResourceFieldOrder: 0)!;
+                targets.ShouldAllBe(row => row.TargetStructureKey == target.Key && row.TargetElementKey == targetRoot.Key);
+                foreach (DbElementOutcomeTarget targetOutcome in targets)
+                {
+                    targetOutcome.ElementComparisonKey.ShouldNotBeNull();
+                    DbElementComparison comparison = DbElementComparison.SelectSingle(fixture.Connection, Key: targetOutcome.ElementComparisonKey)!;
+                    comparison.SourceStructureKey.ShouldBe(source.Key);
+                    comparison.SourceElementKey.ShouldBe(root.Key);
+                    comparison.TargetStructureKey.ShouldBe(target.Key);
+                    comparison.TargetElementKey.ShouldBe(targetRoot.Key);
+                }
+            }
+            else
+            {
+                targets.ShouldAllBe(row => row.TargetStructureKey == null && row.TargetElementKey == null);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, true)]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    public void StructureOutcomesRejectMultipleRootsForOneOwner(int targetIndex, bool source)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, "code", "qualified", enableRules: true);
+        fixture.LoadProfileMaps();
+        FhirPackageComparisonPair pair = new(fixture.Packages[2], fixture.Packages[targetIndex]);
+        fixture.CompareProfilePair(pair);
+        DbStructureDefinition owner = fixture.Structure(source ? pair.SourcePackage : pair.TargetPackage, "Coding");
+        fixture.AddDuplicateMixedChoiceRoot(owner);
+        ArgumentException failure = Should.Throw<ArgumentException>(() => fixture.GenerateProfileOutcomes(pair));
+        failure.Message.ShouldBe("An item with the same key has already been added. Key: " + owner.Key);
+        DbUnsafeCodePairState state = fixture.PairState(pair);
+        state.ComparisonRevision.ShouldNotBeNull();
+        state.OutcomeInputRevision.ShouldBeNull();
+        state.OutcomeComparisonRevision.ShouldBeNull();
+        state.OutcomeFormatVersion.ShouldBeNull();
+        DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldBeEmpty();
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(1)]
     public void MixedCodingCodeQualifiesPrimitiveIndependently(int targetIndex)
@@ -79,6 +201,66 @@ public class UnsafeCodeOutcomeTests
         using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, "code", qualification, enableRules: true);
         FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
         AssertSelectedMixedPlans(fixture, pair, primitive: false);
+    }
+
+    [Theory]
+    [InlineData(0, "qualified")]
+    [InlineData(1, "qualified")]
+    [InlineData(0, "missing-binding")]
+    [InlineData(1, "missing-binding")]
+    [InlineData(0, "multi-system")]
+    [InlineData(1, "multi-system")]
+    public void PersistedMixedChoiceFixtureReleasesSnapshotOnSuccessAndOutcomeFailure(int targetIndex, string qualification)
+    {
+        UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, "code", qualification, enableRules: true);
+        string sourceRoot = fixture.SourceRoot;
+        try
+        {
+            fixture.LoadProfileMaps();
+            FhirPackageComparisonPair pair = new(fixture.Packages[2], fixture.Packages[targetIndex]);
+            fixture.CompareProfilePair(pair);
+            AssertMixedChoiceSetup(fixture, pair, "code", qualification);
+            fixture.ConnectionReopens.ShouldBe(2);
+            if (qualification == "qualified")
+            {
+                fixture.GenerateProfileOutcomes(pair);
+                IReadOnlyList<UnsafeCodeConstraintPlan> plans = AssertSelectedMixedPlans(fixture, pair, primitive: true);
+                string recovered = JsonSerializer.Serialize(plans);
+                string persisted = fixture.SafetyPersistenceSnapshot();
+                StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+                StructureDefinition profile = built.Profiles.Single(row => row.Definition.Type == "Parameters").Definition;
+                UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex).Length.ShouldBe(2);
+                fixture.ConnectionReopens.ShouldBe(4);
+                fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+                JsonSerializer.Serialize(UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection,
+                    pair.SourcePackageKey, pair.TargetPackageKey)).ShouldBe(recovered);
+            }
+            else
+            {
+                InvalidOperationException failure = Should.Throw<InvalidOperationException>(() => fixture.GenerateProfileOutcomes(pair));
+                DbStructureOutcome outcome = DbStructureOutcome.SelectList(fixture.Connection,
+                    SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+                    .Single(row => row.SourceId == "Parameters");
+                string system = qualification == "missing-binding"
+                    ? UnsafeCodeTestFixture.MixedCodingSystem : UnsafeCodeTestFixture.MixedPrimitiveSystem;
+                failure.Message.ShouldBe($"Unsafe-code identity is ambiguous for primitive {UnsafeCodeTestFixture.MixedChoiceElement} in resource outcome {outcome.Key}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}, candidate {system}|#unsafe. Supply an authoritative unique source binding/system version and regenerate outcomes.");
+                DbUnsafeCodePairState state = fixture.PairState(pair);
+                state.ComparisonRevision.ShouldNotBeNull();
+                state.OutcomeInputRevision.ShouldBeNull();
+                state.OutcomeComparisonRevision.ShouldBeNull();
+                state.OutcomeFormatVersion.ShouldBeNull();
+                DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldBeEmpty();
+                fixture.ConnectionReopens.ShouldBe(2);
+            }
+            UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_LIFETIME_ASSERTIONS_COMPLETED", new
+                { targetIndex, qualification, sourceRoot });
+        }
+        finally
+        {
+            fixture.Dispose();
+        }
+        File.Exists(Path.Combine(sourceRoot, "snapshot.sqlite")).ShouldBeFalse();
+        Directory.Exists(sourceRoot).ShouldBeFalse();
     }
 
     internal static IReadOnlyList<UnsafeCodeConstraintPlan> AssertSelectedMixedPlans(

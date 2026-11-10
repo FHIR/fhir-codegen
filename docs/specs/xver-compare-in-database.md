@@ -93,6 +93,17 @@ Recovery is load maps → compare → outcomes → export. Persisted caches from
 before this feature or the explicit-primary-key insertion correction must
 be regenerated; there is no inferred migration or export-time repair.
 
+## Owning-Root Correspondence
+
+`ElementComparer.DoElementComparisons` applies explicit element mappings
+first. Its fallback resolves one root within each exact package/owning
+structure, then substitutes the target root's path for the source root's
+Id prefix. Structure names need not equal root element IDs: a profile
+named `SelectedCoding` can legitimately have root Id/Path `Coding`.
+Required roots must be unique and well formed, and source IDs must have
+the exact root, member or slice boundary; invalid facts raise a contextual
+error. An ordinary absent target member remains a no-map comparison.
+
 ## Algorithm
 
 1. If `_db` is `null`, call `LoadDatabase(false)` as a non-reloading attempt to attach the existing database (`XVerProcessor.cs:673-676`).

@@ -35,6 +35,16 @@ public void GenerateOutcomes(
 - Structure generation also records cross-version **cardinality-only** extension needs alongside data-type extensions: the `DbElementOutcome.RequiresCardinalityDefinition` / `RequiresCardinalitySlice` flags (`DbOutcomeClasses.cs:438-439`), the parsed `CardinalityExtensionContexts` list (`DbOutcomeClasses.cs:582-600`), `GetCombinedContexts()` which unions extension and cardinality contexts (`DbOutcomeClasses.cs:602-630`), and the per-target `DbElementOutcomeTarget.CardinalityContext*` fields (`DbOutcomeClasses.cs:825-828`).
 - The enum declarations are documentation/vocabulary for now; the row classes do not have an `OutcomeAction` column and generation does not assign the enum constants (`DbOutcomeClasses.cs:7-144,292-832`).
 
+## Owning-Structure Root Identity
+
+`StructureOutcomeGenerator.buildOutcomes` indexes source and target roots
+by `DbElement.StructureKey` and resolves them with the owning
+`DbStructureDefinition.Key`. A base datatype and its profiles may share
+root element Id `Coding`; these remain separate owners and must not
+collide in a package-wide Id dictionary. Multiple roots within the same
+owner remain invalid and fail rather than selecting an arbitrary root.
+Existing missing-root/null behavior is unchanged.
+
 ## Unsafe-Code Safety Outcomes
 
 After final structure/element outcome persistence and content-reference

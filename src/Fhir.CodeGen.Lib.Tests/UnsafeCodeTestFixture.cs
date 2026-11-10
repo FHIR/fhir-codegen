@@ -7,6 +7,7 @@ extern alias r4;
 extern alias r4b;
 
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
@@ -59,6 +60,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     }
 
     private readonly bool _persistDatabase;
+    private string _persistedStage = "creation";
 
     internal SqliteConnection Connection { get; private set; }
     internal int ConnectionReopens { get; private set; }
@@ -131,7 +133,8 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal const string MixedPrimitiveVersion = "primitive-v1";
 
     internal static UnsafeCodeTestFixture CreateMixedChoiceInputs(
-        int targetIndex, string primitiveAlternative, string primitiveQualification, bool enableRules)
+        int targetIndex, string primitiveAlternative, string primitiveQualification, bool enableRules,
+        int[]? codingProfilePackageIndices = null, bool profilesFirst = false)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(targetIndex);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(targetIndex, 1);
@@ -154,11 +157,22 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                 fixture.AddMixedChoiceElement(structure, primitive, [], min: 0);
             }
 
+            bool includeProfile = codingProfilePackageIndices?.Contains(fixture.Packages.IndexOf(package)) == true;
+            DbStructureDefinition? profile = includeProfile && profilesFirst ? fixture.AddMixedChoiceOwnerProfile(package) : null;
             DbStructureDefinition coding = fixture.AddStructure(package, "Coding");
-            fixture.AddMixedChoiceElement(coding, "Coding", []);
+            DbElement codingRoot = fixture.AddMixedChoiceElement(coding, "Coding", []);
             fixture.AddMixedChoiceElement(coding, "Coding.system", ["uri"]);
             fixture.AddMixedChoiceElement(coding, "Coding.version", ["string"]);
             fixture.AddMixedChoiceElement(coding, "Coding.code", ["code"]);
+            if (includeProfile)
+            {
+                profile ??= fixture.AddMixedChoiceOwnerProfile(package);
+                DbElement profileRoot = DbElement.SelectSingle(fixture.Connection, StructureKey: profile.Key, ResourceFieldOrder: 0)!;
+                profileRoot.BaseStructureKey = coding.Key;
+                profileRoot.BaseElementKey = codingRoot.Key;
+                profileRoot.BasePath = "Coding";
+                DbElement.Update(fixture.Connection, [profileRoot]);
+            }
             DbStructureDefinition extension = fixture.AddStructure(package, "Extension");
             fixture.AddMixedChoiceElement(extension, "Extension", []);
             fixture.AddMixedChoiceElement(extension, "Extension.value[x]", ["Coding", "boolean", "code", "string", "uri"]);
@@ -235,6 +249,125 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                 : """[{"system":"urn:example:codes","code":"unsafe"},{"system":"urn:example:primitive","version":"primitive-v1","code":"unsafe"}]"""
             : "[]");
         return fixture;
+    }
+
+    private DbStructureDefinition AddMixedChoiceOwnerProfile(DbFhirPackage package, string id = "SelectedCoding")
+    {
+        DbStructureDefinition profile = AddStructure(package, id, FhirArtifactClassEnum.Profile);
+        profile.Version = "coding-profile-v7";
+        profile.VersionedUrl = profile.UnversionedUrl + "|" + profile.Version;
+        DbStructureDefinition.Update(Connection, [profile]);
+        AddMixedChoiceElement(profile, "Coding", []);
+        return profile;
+    }
+
+    internal void AddMixedChoiceRootCollisionMaps(int targetIndex, bool sourceProfile, bool targetProfile)
+    {
+        if (sourceProfile)
+        {
+            DbStructureDefinition unmapped = AddMixedChoiceOwnerProfile(Packages[2], "UnmappedCoding");
+            DbElement root = DbElement.SelectSingle(Connection, StructureKey: unmapped.Key, ResourceFieldOrder: 0)!;
+            root.BaseStructureKey = Structure(Packages[2], "Coding").Key;
+            root.BaseElementKey = DbElement.SelectSingle(Connection, StructureKey: root.BaseStructureKey, ResourceFieldOrder: 0)!.Key;
+            root.BasePath = "Coding";
+            DbElement.Update(Connection, [root]);
+        }
+
+        foreach ((int source, int target) in new[] { (2, 1), (1, 0), (2, 0) })
+        {
+            bool hasSourceProfile = DbStructureDefinition.SelectSingle(Connection,
+                FhirPackageKey: Packages[source].Key, Id: "SelectedCoding") is not null;
+            bool hasTargetProfile = DbStructureDefinition.SelectSingle(Connection,
+                FhirPackageKey: Packages[target].Key, Id: "SelectedCoding") is not null;
+            string suffix = (source == 1 ? "4B" : "5") + "to" + (target == 1 ? "4B" : "4");
+            string filename = Path.Combine(SourceRoot, "input", "types", "ConceptMap-types-" + suffix + ".json");
+            ConceptMap map = new FhirJsonParser().Parse<ConceptMap>(File.ReadAllText(filename));
+            if (hasSourceProfile)
+            {
+                map.Group[0].Element.Add(new()
+                {
+                    Code = "SelectedCoding",
+                    Target = [new() { Code = hasTargetProfile ? "SelectedCoding" : "Coding", Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                });
+            }
+            else if (hasTargetProfile)
+            {
+                map.Group[0].Element.Single(element => element.Code == "Coding").Target.Add(new()
+                {
+                    Code = "SelectedCoding", Relationship = ConceptMap.ConceptMapRelationship.Equivalent,
+                });
+            }
+            if (source == 2 && sourceProfile)
+            {
+                map.Group[0].Element.Add(new() { Code = "UnmappedCoding", NoMap = true });
+            }
+            File.WriteAllText(filename, map.ToJson());
+
+            filename = Path.Combine(SourceRoot, "input", "elements", "ConceptMap-elements-" + suffix + ".json");
+            map = new FhirJsonParser().Parse<ConceptMap>(File.ReadAllText(filename));
+            map.Group[0].Element.RemoveAll(element => element.Code == "Coding");
+            File.WriteAllText(filename, map.ToJson());
+        }
+    }
+
+    internal DbElement AddDuplicateMixedChoiceRoot(DbStructureDefinition structure)
+    {
+        DbElement duplicate = AddMixedChoiceElement(structure, "MalformedRoot", []);
+        duplicate.ResourceFieldOrder = 0;
+        DbElement.Update(Connection, [duplicate]);
+        return duplicate;
+    }
+
+    internal void WriteMixedChoiceOwnerObservation(string stage)
+    {
+        DbStructureDefinition[] owners = [.. DbStructureDefinition.SelectList(Connection)
+            .Where(structure => structure.Id is "Coding" or "SelectedCoding" or "UnmappedCoding")];
+        HashSet<int> ownerKeys = [.. owners.Select(owner => owner.Key)];
+        WriteMixedChoiceObservation("MEASURED_H2_OWNERS", new
+        {
+            stage, SourceRoot,
+            authored = Directory.GetFiles(Path.Combine(SourceRoot, "input"), "*.json", SearchOption.AllDirectories)
+                .Where(filename => filename.Contains("ConceptMap-elements-") || filename.Contains("ConceptMap-types-"))
+                .Select(filename => new
+                {
+                    filename = Path.GetRelativePath(SourceRoot, filename),
+                    groups = new FhirJsonParser().Parse<ConceptMap>(File.ReadAllText(filename)).Group.Select(group => new
+                    {
+                        group.Source, group.Target,
+                        elements = group.Element.Where(element => element.Code?.Contains("Coding", StringComparison.Ordinal) == true),
+                    }),
+                }),
+            owners = owners.Select(owner => new { owner.Key, owner.FhirPackageKey, owner.Id, owner.Name, owner.VersionedUrl }),
+            roots = DbElement.SelectList(Connection, ResourceFieldOrder: 0).Where(root => ownerKeys.Contains(root.StructureKey))
+                .Select(root => new { root.Key, root.FhirPackageKey, root.StructureKey, root.Id, root.Path, root.BaseElementKey }),
+            structureMaps = DbStructureMapping.SelectList(Connection).Where(map => ownerKeys.Contains(map.SourceStructureKey)),
+            elementMaps = DbElementMapping.SelectList(Connection).Where(map => ownerKeys.Contains(map.SourceStructureKey)),
+            structureComparisons = HasTable("StructureComparisons")
+                ? DbStructureComparison.SelectList(Connection).Where(row => ownerKeys.Contains(row.SourceStructureKey))
+                    .Select(row => new { row.Key, row.SourceFhirPackageKey, row.TargetFhirPackageKey,
+                        row.SourceStructureKey, row.TargetStructureKey, row.StructureMappingKey, row.NotMapped, row.ContentKeys }).ToArray() : [],
+            elementComparisons = HasTable("ElementComparisons")
+                ? DbElementComparison.SelectList(Connection).Where(row => ownerKeys.Contains(row.SourceStructureKey))
+                    .Select(row => new { row.Key, row.StructureComparisonKey, row.SourceFhirPackageKey, row.TargetFhirPackageKey,
+                        row.SourceStructureKey, row.SourceElementKey, row.SourceElementId,
+                        row.TargetStructureKey, row.TargetElementKey, row.TargetElementId,
+                        row.ElementMappingKey, row.NotMapped, row.ContentKeys }).ToArray() : [],
+            structureOutcomes = HasTable("StructureOutcomes")
+                ? DbStructureOutcome.SelectList(Connection).Where(row => row.SourceStructureKey is int key && ownerKeys.Contains(key)).ToArray() : [],
+            elementOutcomes = HasTable("ElementOutcomes")
+                ? DbElementOutcome.SelectList(Connection).Where(row => ownerKeys.Contains(row.SourceStructureKey))
+                    .Select(row => new { row.Key, row.SourceFhirPackageKey, row.TargetFhirPackageKey,
+                        row.SourceStructureKey, row.SourceElementKey, row.SourceResourceOrder }).ToArray() : [],
+            targets = HasTable("ElementOutcomeTargets") ? DbElementOutcomeTarget.SelectList(Connection) : [],
+        });
+
+        bool HasTable(string table)
+        {
+            using SqliteCommand command = Connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $name";
+            command.Parameters.AddWithValue("$name", table);
+            return (long)command.ExecuteScalar()! != 0;
+        }
     }
 
     private DbElement AddMixedChoiceElement(
@@ -477,6 +610,125 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         Console.WriteLine(label + " " + JsonSerializer.Serialize(observation));
     }
 
+    internal static object MixedChoiceAttribution()
+    {
+        string root = AppContext.BaseDirectory;
+        while (!File.Exists(Path.Combine(root, "AGENTS.md")))
+        {
+            root = Directory.GetParent(root)?.FullName ?? throw new InvalidOperationException("Repository root unavailable.");
+        }
+
+        string baseline = Git("rev-parse", "HEAD").Trim();
+        return new
+        {
+            productionBase = baseline,
+            productionDiffSha256 = Hash(Git("--no-pager", "diff", "--binary", "HEAD", "--", "src/Fhir.CodeGen.Comparison")),
+            testDiffSha256 = Hash(Git("--no-pager", "diff", "--binary", "HEAD", "--",
+                "src/Fhir.CodeGen.Lib.Tests/UnsafeCodeTestFixture.cs", "src/Fhir.CodeGen.Lib.Tests/UnsafeCodeProfileTests.cs")),
+        };
+
+        string Git(params string[] arguments)
+        {
+            ProcessStartInfo start = new("git") { WorkingDirectory = root, RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (string argument in arguments)
+            {
+                start.ArgumentList.Add(argument);
+            }
+            using Process process = Process.Start(start)!;
+            string output = process.StandardOutput.ReadToEnd();
+            string error = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException("Cannot attribute mixed-choice measurement: " + error);
+            }
+            return output;
+        }
+
+        static string Hash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+    }
+
+    internal static string ParametersJson(IEnumerable<string>? parameters, string? uri = null)
+    {
+        return """{"resourceType":"Parameters","id":"condition-control" """ +
+            (uri is null ? "" : ""","implicitRules":""" + JsonSerializer.Serialize(uri)) +
+            (parameters is null ? "" : ""","parameter":[""" + string.Join(',', parameters) + "]") + "}";
+    }
+
+    internal void PersistLegacyMixedChoicePlans(FhirPackageComparisonPair pair)
+    {
+        IReadOnlyList<UnsafeCodeConstraintPlan> plans = UnsafeCodeInputStore.ReadConstraintPlans(Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+        foreach (UnsafeCodeConstraintPlan plan in plans)
+        {
+            if (plan.SourcePath[^1].TypeName == "code")
+            {
+                DbUnsafeCodeTrigger.Delete(Connection, Key: plan.Row.Key);
+                continue;
+            }
+
+            DbUnsafeCodeTrigger row = plan.Row;
+            row.SourcePathJson = JsonSerializer.Serialize(plan.SourcePath[..^1]);
+            DbUnsafeCodeTrigger.Update(Connection, [row]);
+        }
+        ReopenPersistedDatabase();
+    }
+
+    internal void AddMixedChoiceRecursion()
+    {
+        foreach (DbFhirPackage package in Packages)
+        {
+            DbStructureDefinition structure = Structure(package, "Parameters");
+            DbElement parent = DbElement.SelectSingle(Connection, StructureKey: structure.Key, Id: "Parameters.parameter")!;
+            DbElement part = AddMixedChoiceElement(structure, "Parameters.parameter.part", [], max: -1);
+            part.ContentReferenceSourceKey = parent.Key;
+            part.DefinedAsContentReference = true;
+            DbElement.Update(Connection, [part]);
+            structure.SnapshotCount++;
+            DbStructureDefinition.Update(Connection, [structure]);
+        }
+
+        foreach (string filename in Directory.GetFiles(Path.Combine(SourceRoot, "input", "elements"), "*.json"))
+        {
+            ConceptMap map = new FhirJsonParser().Parse<ConceptMap>(File.ReadAllText(filename));
+            map.Group[0].Element.Add(new()
+            {
+                Code = "Parameters.parameter.part",
+                Target = [new() { Code = "Parameters.parameter.part", Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+            });
+            File.WriteAllText(filename, map.ToJson());
+        }
+    }
+
+    internal const string MixedCodingProfile = "http://example.org/StructureDefinition/SelectedCoding|coding-profile-v7";
+
+    internal void AddMixedChoiceCodingProfile()
+    {
+        DbFhirPackage package = Packages[2];
+        DbStructureDefinition basis = Structure(package, "Coding");
+        DbElement basisRoot = DbElement.SelectSingle(Connection, StructureKey: basis.Key, Id: "Coding")!;
+        DbStructureDefinition profile = AddStructure(package, "SelectedCoding", FhirArtifactClassEnum.Profile);
+        profile.UnversionedUrl = MixedCodingProfile.Split('|')[0];
+        profile.Version = MixedCodingProfile.Split('|')[1];
+        profile.VersionedUrl = MixedCodingProfile;
+        DbStructureDefinition.Update(Connection, [profile]);
+        DbElement root = AddMixedChoiceElement(profile, "Coding", []);
+        root.BaseStructureKey = basis.Key;
+        root.BaseElementKey = basisRoot.Key;
+        root.BasePath = "Coding";
+        DbElement.Update(Connection, [root]);
+        DbElement choice = DbElement.SelectSingle(Connection, FhirPackageKey: package.Key, Id: MixedChoiceElement)!;
+        DbElementType coding = DbElementType.SelectList(Connection, ElementKey: choice.Key).Single(type => type.TypeName == "Coding");
+        coding.TypeProfile = MixedCodingProfile;
+        coding.TypeProfileStructureKey = profile.Key;
+        DbElementType.Update(Connection, [coding]);
+        List<DbElementType> types = DbElementType.SelectList(Connection, ElementKey: choice.Key);
+        choice.FullCollatedTypeLiteral = string.Join(',', types.Select(type => type.Literal));
+        string[] typeNames = [.. types.Select(type => type.TypeName!).Distinct().Order()];
+        choice.DistinctTypeLiterals = string.Join(',', typeNames);
+        choice.DistinctTypeCount = typeNames.Length;
+        DbElement.Update(Connection, [choice]);
+    }
+
     internal string SafetyPersistenceSnapshot() => JsonSerializer.Serialize(new
     {
         Input = DbUnsafeCodeInputState.SelectList(Connection),
@@ -572,19 +824,23 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal void GenerateProfileOutcomes(params FhirPackageComparisonPair[] pairs)
     {
+        _persistedStage = "GenerateProfileOutcomes entered";
         new OutcomeGenerator(Connection, NullLoggerFactory.Instance).GenerateOutcomes(processValueSets: false,
             specificPairs: pairs.Select(pair => pair.SequencePair).ToHashSet());
+        _persistedStage = "GenerateProfileOutcomes completed";
         ReopenPersistedDatabase();
     }
 
     internal StructureFhirExporter.BuiltDefinitions BuildDefinitions(FhirPackageComparisonPair pair)
     {
+        _persistedStage = "BuildDefinitions entered";
         StructureFhirExporter.BuiltDefinitions built = new StructureFhirExporter(new XVerExporter(Connection, new ConfigXVer { XverArtifactVersion = "0.1.0-test" }),
             Connection, NullLoggerFactory.Instance).BuildDefinitions(new IgExporter.XVerIgExportTrackingRecord
             {
                 PackagePair = pair,
                 PackageId = "hl7.fhir.uv.xver-r5." + pair.TargetFhirSequence.ToRLiteral().ToLowerInvariant(),
             });
+        _persistedStage = "BuildDefinitions completed";
         ReopenPersistedDatabase();
         return built;
     }
@@ -597,10 +853,12 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         }
 
         string connectionString = Connection.ConnectionString;
+        WriteMixedChoiceLifetimeObservation("physical-close");
         Connection.Dispose();
         Connection = new(connectionString);
         Connection.Open();
         ConnectionReopens++;
+        WriteMixedChoiceLifetimeObservation("physical-open");
     }
 
     internal static Hl7.Fhir.Model.ElementDefinition.ConstraintComponent[] SerializedConstraints(
@@ -644,6 +902,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal void LoadProfileMaps()
     {
+        _persistedStage = "LoadProfileMaps entered";
         // The production transitive comparer indexes the package list by release.
         foreach (FhirReleases.FhirSequenceCodes sequence in new[] { FhirReleases.FhirSequenceCodes.DSTU2, FhirReleases.FhirSequenceCodes.STU3 })
         {
@@ -670,6 +929,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             throw new InvalidOperationException("The synthetic cross-version maps did not load.");
         }
 
+        _persistedStage = "LoadProfileMaps completed";
         ReopenPersistedDatabase();
     }
 
@@ -680,11 +940,13 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal void CompareProfilePairs(params FhirPackageComparisonPair[] pairs)
     {
+        _persistedStage = "CompareProfilePairs entered";
         // Match FhirDbComparer.Compare's reset boundary when reusing a database.
         DbComparisonClasses.DropTables(Connection, forValueSets: false);
         DbComparisonClasses.CreateTables(Connection);
         new StructureComparer(Connection, NullLoggerFactory.Instance).CompareStructures(
             specificPairs: pairs.Select(pair => pair.SequencePair).ToHashSet());
+        _persistedStage = "CompareProfilePairs completed";
         ReopenPersistedDatabase();
     }
 
@@ -1572,10 +1834,40 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     public void Dispose()
     {
+        WriteMixedChoiceLifetimeObservation("dispose-entered");
         Connection.Dispose();
-        if (Directory.Exists(SourceRoot))
+        WriteMixedChoiceLifetimeObservation("connection-disposed");
+        try
         {
-            Directory.Delete(SourceRoot, true);
+            if (Directory.Exists(SourceRoot))
+            {
+                Directory.Delete(SourceRoot, true);
+            }
         }
+        catch (IOException failure)
+        {
+            WriteMixedChoiceLifetimeObservation("cleanup-failed", failure);
+            throw;
+        }
+        WriteMixedChoiceLifetimeObservation("cleanup-completed");
+    }
+
+    private void WriteMixedChoiceLifetimeObservation(string boundary, IOException? failure = null)
+    {
+        if (!_persistDatabase)
+        {
+            return;
+        }
+        WriteMixedChoiceObservation("MEASURED_H2_LIFETIME", new
+        {
+            SourceRoot, snapshot = Path.Combine(SourceRoot, "snapshot.sqlite"),
+            process = Environment.ProcessId, boundary, stage = _persistedStage, ConnectionReopens,
+            connectionState = Connection.State.ToString(),
+            failure = failure is null ? null : new
+            {
+                type = failure.GetType().FullName, failure.Message, failure.HResult,
+                failure.StackTrace, inner = failure.InnerException?.ToString(),
+            },
+        });
     }
 }

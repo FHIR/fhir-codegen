@@ -432,6 +432,8 @@ public class ElementComparer
         Dictionary<int, List<DbElementComparison>> comparisonsByParentKey = [];
         Dictionary<int, List<DbElementComparison>> comparisonsBySourceKey = [];
         Dictionary<int, List<int>> sourceKeysByDepth = [];
+        DbElement? sourceRoot = null;
+        DbElement? targetRoot = null;
 
         // iterate over each source element
         foreach (DbElement sourceElement in sourceElements)
@@ -576,7 +578,18 @@ public class ElementComparer
                 continue;
             }
 
-            string targetPath = targetSd.Name + sourceElement.Id[sourceSd.Name.Length..]; 
+            sourceRoot ??= ResolveRoot(sourceSd, trackingRecord.SourcePackage.Key, sourceElement);
+            targetRoot ??= ResolveRoot(targetSd, trackingRecord.TargetPackage.Key, sourceElement);
+            if (sourceElement.Id != sourceRoot.Id &&
+                !sourceElement.Id.StartsWith(sourceRoot.Id + ".", StringComparison.Ordinal) &&
+                !sourceElement.Id.StartsWith(sourceRoot.Id + ":", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Cannot compare element `{sourceElement.Id}` ({sourceElement.Key}) in owner `{sourceSd.VersionedUrl}` ({sourceSd.Key})" +
+                    $" to `{targetSd.VersionedUrl}` ({targetSd.Key}), pair {trackingRecord.SourcePackage.Key}->{trackingRecord.TargetPackage.Key}:" +
+                    $" source element does not have owning root `{sourceRoot.Id}` ({sourceRoot.Key}) as an exact prefix.");
+            }
+            string targetPath = targetRoot.Path + sourceElement.Id[sourceRoot.Id.Length..];
 
             // no explicit explicitMapping, try to find by path
             List<DbElement> possibleTargets = targetElementsByPath[targetPath].ToList();
@@ -739,6 +752,21 @@ public class ElementComparer
 
         // return our list of element comparisons
         return elementComparisons;
+
+        DbElement ResolveRoot(DbStructureDefinition owner, int packageKey, DbElement sourceElement)
+        {
+            List<DbElement> roots = DbElement.SelectList(_db, FhirPackageKey: packageKey, StructureKey: owner.Key, ResourceFieldOrder: 0);
+            if (roots.Count != 1 || string.IsNullOrEmpty(roots[0].Id) || string.IsNullOrEmpty(roots[0].Path) ||
+                roots[0].ParentElementKey is not null || roots[0].Path.Contains('.', StringComparison.Ordinal) ||
+                roots[0].Id != roots[0].Path)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot compare element `{sourceElement.Id}` ({sourceElement.Key}), pair {trackingRecord.SourcePackage.Key}->{trackingRecord.TargetPackage.Key}:" +
+                    $" owner `{owner.VersionedUrl}` ({owner.Key}) requires one well-formed root;" +
+                    $" found [{string.Join(", ", roots.Select(root => $"{root.Key}:{root.Id}/{root.Path}"))}].");
+            }
+            return roots[0];
+        }
     }
 
     //private DbCollatedTypeComparison doCollatedTypeComparison(

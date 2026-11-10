@@ -168,16 +168,16 @@ public class StructureOutcomeGenerator
         Dictionary<int, DbStructureDefinition> allSourceStructures = DbStructureDefinition.SelectDict(_db, FhirPackageKey: packagePair.SourcePackageKey);
         Dictionary<int, DbStructureDefinition> allTargetStructures = DbStructureDefinition.SelectDict(_db, FhirPackageKey: packagePair.TargetPackageKey);
 
-        Dictionary<string, DbElement> sourceStructureRootElements = DbElement.SelectList(
+        Dictionary<int, DbElement> sourceStructureRootElements = DbElement.SelectList(
             _db,
             FhirPackageKey: packagePair.SourcePackageKey,
             ResourceFieldOrder: 0)
-            .ToDictionary(ed => ed.Id);
-        Dictionary<string, DbElement> targetStructureRootElements = DbElement.SelectList(
+            .ToDictionary(ed => ed.StructureKey);
+        Dictionary<int, DbElement> targetStructureRootElements = DbElement.SelectList(
             _db,
             FhirPackageKey: packagePair.TargetPackageKey,
             ResourceFieldOrder: 0)
-            .ToDictionary(ed => ed.Id);
+            .ToDictionary(ed => ed.StructureKey);
 
         List <DbStructureComparison> sdComparisons = DbStructureComparison.SelectList(
             _db,
@@ -220,7 +220,7 @@ public class StructureOutcomeGenerator
                     new()
                     {
                         SourceStructure = sourceSd,
-                        SourceRootElement = sourceStructureRootElements.GetValueOrDefault(sourceSd.Id),
+                        SourceRootElement = sourceStructureRootElements.GetValueOrDefault(sourceSd.Key),
                         StructureComparison = null,
                         TargetStructure = null,
                         StructureOutcomeKey = DbStructureOutcome.GetIndex(),
@@ -254,7 +254,7 @@ public class StructureOutcomeGenerator
                         new()
                         {
                             SourceStructure = sourceSd,
-                            SourceRootElement = sourceStructureRootElements.GetValueOrDefault(sourceSd.Id),
+                            SourceRootElement = sourceStructureRootElements.GetValueOrDefault(sourceSd.Key),
                             StructureComparison = structureComparison,
                             TargetStructure = null,
                             StructureOutcomeKey = DbStructureOutcome.GetIndex(),
@@ -269,10 +269,10 @@ public class StructureOutcomeGenerator
                     new()
                     {
                         SourceStructure = sourceSd,
-                        SourceRootElement = sourceStructureRootElements.GetValueOrDefault(sourceSd.Id),
+                        SourceRootElement = sourceStructureRootElements.GetValueOrDefault(sourceSd.Key),
                         StructureComparison = structureComparison,
                         TargetStructure = targetSd,
-                        TargetRootElement = targetStructureRootElements.GetValueOrDefault(targetSd.Id),
+                        TargetRootElement = targetStructureRootElements.GetValueOrDefault(targetSd.Key),
                         StructureOutcomeKey = DbStructureOutcome.GetIndex(),
                         IsFullyMappedAcrossAllTargets = true,
                         IsFullyMappedToThisTarget = true,

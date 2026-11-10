@@ -37,6 +37,304 @@ public sealed class UnsafeCodeProfileCollection
 [Collection(UnsafeCodeProfileCollection.Name)]
 public class UnsafeCodeProfileTests
 {
+    private const string MixedCodingExpression = "($this.parameter.value.ofType(Coding).where($this.code.where($this = 'unsafe').exists() and " +
+        "$this.system.where($this = 'urn:example:codes').exists()).exists() implies implicitRules.where($this = " +
+        "'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())";
+    private const string MixedVersionedCodingExpression = "($this.parameter.value.ofType(Coding).where($this.code.where($this = 'unsafe').exists() and " +
+        "$this.system.where($this = 'urn:example:primitive').exists() and $this.version.where($this = 'primitive-v1').exists()).exists() " +
+        "implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())";
+    private const string MixedPrimitiveExpression = "($this.parameter.value.ofType(code).where($this.where($this = 'unsafe').exists()).exists() " +
+        "implies implicitRules.where($this = 'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())";
+
+    [Theory]
+    [InlineData(0, "boolean")]
+    [InlineData(1, "boolean")]
+    [InlineData(0, "code")]
+    [InlineData(1, "code")]
+    public void RecoveredMixedChoiceConditionsRequireExactImplicitRules(int targetIndex, string alternative)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, alternative, "qualified", enableRules: true);
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        UnsafeCodeOutcomeTests.AssertMixedChoiceSetup(fixture, pair, alternative, "qualified");
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+        StructureDefinition profile = built.Profiles.Single(candidate => candidate.Definition.Type == "Parameters").Definition;
+        ElementDefinition.ConstraintComponent[] conditions = UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex);
+        conditions.Length.ShouldBe(alternative == "code" ? 2 : 1);
+        RecoveredExpressions(profile, targetIndex).ShouldBe(conditions.Select(condition => condition.Expression));
+        IReadOnlyList<UnsafeCodeConstraintPlan> plans = UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+        plans.Count.ShouldBe(alternative == "code" ? 3 : 1);
+        foreach (ElementDefinition.ConstraintComponent condition in conditions)
+        {
+            bool primitive = condition.Expression.Contains(".ofType(code)", StringComparison.Ordinal);
+            ImmutableArray<UnsafeCodePathStep> path = plans.First(plan => plan.SourcePath[^1].TypeName == (primitive ? "code" : "Coding")).SourcePath;
+            string identity = JsonSerializer.Serialize(new
+            {
+                Profile = profile.Url, Direction = "R5->" + pair.TargetFhirSequence.ToRLiteral(), Owners = Array.Empty<string>(), SourcePath = path,
+            });
+            condition.Key.ShouldBe(UnsafeCodeConstraintEmitter.Key(identity));
+            condition.Severity.ShouldBe(ConstraintSeverity.Error);
+            condition.Human.ShouldBe(UnsafeCodeConstraintEmitter.Human);
+            condition.Source.ShouldBe("http://hl7.org/fhir/5.0/StructureDefinition/profile-Parameters");
+            condition.Expression.ShouldBe(primitive ? MixedPrimitiveExpression : alternative == "code"
+                ? MixedCodingExpression + " and " + MixedVersionedCodingExpression : MixedCodingExpression);
+        }
+
+        List<(string Label, string[]? Parameters, bool Coding, bool Primitive)> rows =
+        [
+            ("absent parameter", null, true, true),
+            ("absent value", ["""{"name":"control"}"""], true, true),
+            ("no Coding identity fields", ["""{"name":"control","valueCoding":{"display":"identity absent"}}"""], true, true),
+            ("missing system", [CodingParameter(null, "unsafe")], true, true),
+            ("missing code", [CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, null)], true, true),
+            ("wrong system", [CodingParameter("urn:example:other", "unsafe")], true, true),
+            ("safe Coding", [CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "safe")], true, true),
+            ("unsafe Coding", [CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "unsafe")], false, true),
+            ("system/code crossmatch", [CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "safe"), CodingParameter("urn:example:other", "unsafe")], true, true),
+        ];
+        string safe = alternative == "boolean" ? """{"name":"safe","valueBoolean":true}""" : """{"name":"safe","valueCode":"safe"}""";
+        if (alternative == "boolean")
+        {
+            rows.Add(("true boolean", [safe], true, true));
+            rows.Add(("false boolean", ["""{"name":"control","valueBoolean":false}"""], true, true));
+        }
+        else
+        {
+            rows.Add(("safe code", [safe], true, true));
+            rows.Add(("unsafe code", ["""{"name":"control","valueCode":"unsafe"}"""], true, false));
+            rows.Add(("version absent", [CodingParameter(UnsafeCodeTestFixture.MixedPrimitiveSystem, "unsafe")], true, true));
+            rows.Add(("version wrong", [CodingParameter(UnsafeCodeTestFixture.MixedPrimitiveSystem, "unsafe", "primitive-v2")], true, true));
+            rows.Add(("version exact", [CodingParameter(UnsafeCodeTestFixture.MixedPrimitiveSystem, "unsafe", UnsafeCodeTestFixture.MixedPrimitiveVersion)], false, true));
+            rows.Add(("version crossmatch", [CodingParameter(UnsafeCodeTestFixture.MixedPrimitiveSystem, "unsafe", "primitive-v2"),
+                CodingParameter("urn:example:other", "safe", UnsafeCodeTestFixture.MixedPrimitiveVersion)], true, true));
+            rows.Add(("code/version crossmatch", [CodingParameter(UnsafeCodeTestFixture.MixedPrimitiveSystem, "safe", UnsafeCodeTestFixture.MixedPrimitiveVersion),
+                CodingParameter(UnsafeCodeTestFixture.MixedPrimitiveSystem, "unsafe", "primitive-v2")], true, true));
+            rows.Add(("both unsafe alternatives", ["""{"name":"scalar","valueCode":"unsafe"}""",
+                CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "unsafe")], false, false));
+        }
+        foreach (bool reverse in new[] { false, true })
+        {
+            string[] repeated = [safe, CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "safe"),
+                CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "unsafe")];
+            rows.Add(("repeated order " + reverse, reverse ? [.. repeated.Reverse()] : repeated, false, true));
+        }
+        int booleanCount = 0;
+        foreach ((string label, string[]? parameters, bool coding, bool primitive) in rows)
+        {
+            foreach (string? uri in new[] { null, "urn:example:wrong", UnsafeCodeConstants.ImplicitRules })
+            {
+                string json = UnsafeCodeTestFixture.ParametersJson(parameters, uri);
+                ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex, json);
+                instance.InstanceType.ShouldBe("Parameters");
+                bool combined = true;
+                foreach (ElementDefinition.ConstraintComponent condition in conditions)
+                {
+                    bool result = Evaluate(condition.Expression, instance);
+                    booleanCount++;
+                    bool expected = uri == UnsafeCodeConstants.ImplicitRules ||
+                        (condition.Expression.Contains(".ofType(code)", StringComparison.Ordinal) ? primitive : coding);
+                    result.ShouldBe(expected, label + "; " + (uri ?? "missing URI") + "; " + condition.Key);
+                    combined &= result;
+                }
+                combined.ShouldBe(uri == UnsafeCodeConstants.ImplicitRules || coding && primitive, label);
+            }
+        }
+        booleanCount.ShouldBe(rows.Count * 3 * conditions.Length);
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+        UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_RECOVERED", new
+        {
+            attribution = UnsafeCodeTestFixture.MixedChoiceAttribution(), targetIndex, alternative, conditions,
+            conditionRows = rows.Count * 3, booleanCount, combinedRows = rows.Count * 3,
+        });
+    }
+
+    private static string CodingParameter(string? system, string? code, string? version = null)
+    {
+        JsonObject coding = new();
+        if (system is not null) coding["system"] = system;
+        if (code is not null) coding["code"] = code;
+        if (version is not null) coding["version"] = version;
+        return new JsonObject { ["name"] = "control", ["valueCoding"] = coding }.ToJsonString();
+    }
+
+    [Theory]
+    [InlineData(0, "boolean", "complete")]
+    [InlineData(1, "boolean", "complete")]
+    [InlineData(0, "code", "complete")]
+    [InlineData(1, "code", "complete")]
+    [InlineData(0, "code", "missing-code-row")]
+    [InlineData(1, "code", "missing-code-row")]
+    [InlineData(0, "boolean", "missing-row")]
+    [InlineData(1, "boolean", "missing-row")]
+    [InlineData(0, "boolean", "conflicting-count")]
+    [InlineData(1, "boolean", "conflicting-count")]
+    [InlineData(0, "boolean", "missing-root")]
+    [InlineData(1, "boolean", "missing-root")]
+    public void LegacyMixedChoicePlansRequireCompleteSourceProof(int targetIndex, string alternative, string facts)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, alternative, "qualified", enableRules: true);
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        // Controlled old-producer persistence, not recovery: only typed broad rows existed at H2.
+        fixture.PersistLegacyMixedChoicePlans(pair);
+        DbElement source = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: UnsafeCodeTestFixture.MixedChoiceElement)!;
+        if (facts is "missing-code-row" or "missing-row")
+        {
+            DbElementType row = DbElementType.SelectList(fixture.Connection, ElementKey: source.Key)
+                .Single(type => type.TypeName == (alternative == "code" ? "code" : "boolean"));
+            DbElementType.Delete(fixture.Connection, Key: row.Key);
+        }
+        if (facts == "conflicting-count")
+        {
+            source.DistinctTypeCount = 1;
+            DbElement.Update(fixture.Connection, [source]);
+        }
+        if (facts == "missing-root")
+        {
+            DbElement root = DbElement.SelectSingle(fixture.Connection, StructureKey: fixture.Structure(pair.SourcePackage, "Coding").Key, Id: "Coding")!;
+            DbElement.Delete(fixture.Connection, Key: root.Key);
+        }
+        IReadOnlyList<UnsafeCodeConstraintPlan> old = UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+        old.Count.ShouldBe(alternative == "code" ? 2 : 1);
+        old.ShouldAllBe(plan => plan.SourcePath.Length == 3 && plan.Row.SourceVersion == null);
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        if (alternative == "boolean" && facts == "complete")
+        {
+            StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+            StructureDefinition profile = built.Profiles.Single(candidate => candidate.Definition.Type == "Parameters").Definition;
+            ElementDefinition.ConstraintComponent condition = UnsafeCodeTestFixture.SerializedConstraints(profile, targetIndex).ShouldHaveSingleItem();
+            string identity = JsonSerializer.Serialize(new
+            {
+                Profile = profile.Url, Direction = "R5->" + pair.TargetFhirSequence.ToRLiteral(),
+                Owners = Array.Empty<string>(), SourcePath = old[0].SourcePath,
+            });
+            condition.Key.ShouldBe(UnsafeCodeConstraintEmitter.Key(identity));
+            condition.Expression.ShouldBe(MixedCodingExpression);
+            foreach (string? uri in new[] { null, "urn:example:wrong", UnsafeCodeConstants.ImplicitRules })
+            {
+                Evaluate(condition.Expression, UnsafeCodeTestFixture.TargetInstance(targetIndex,
+                    UnsafeCodeTestFixture.ParametersJson([CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "unsafe")], uri)))
+                    .ShouldBe(uri == UnsafeCodeConstants.ImplicitRules);
+            }
+        }
+        else
+        {
+            InvalidOperationException failure = Should.Throw<InvalidOperationException>(() => fixture.BuildDefinitions(pair));
+            failure.Message.ShouldContain(alternative == "code" ? "AmbiguousSourceUse" : "InvalidSourceUse");
+            failure.Message.ShouldContain(JsonSerializer.Serialize(old[0].SourcePath));
+            failure.Message.ShouldContain(old[0].ProfileCanonical);
+            failure.Message.ShouldContain(old[0].Provenance);
+            failure.Message.ShouldEndWith("Regenerate load, compare, outcomes, and export after resolving the source-value representation.");
+        }
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+        JsonSerializer.Serialize(UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey))
+            .ShouldBe(JsonSerializer.Serialize(old));
+
+        // Recovery uses fresh complete authoring inputs and the ordinary persisted pipeline.
+        using UnsafeCodeTestFixture regenerated = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, alternative, "qualified", enableRules: true);
+        FhirPackageComparisonPair recoveredPair = regenerated.LoadCompareAndGenerate(targetIndex);
+        UnsafeCodeInputStore.RequireExportReady(regenerated.Connection, [recoveredPair]);
+        StructureDefinition recoveredProfile = regenerated.BuildDefinitions(recoveredPair).Profiles.Single(candidate => candidate.Definition.Type == "Parameters").Definition;
+        string[] expressions = RecoveredExpressions(recoveredProfile, targetIndex);
+        expressions.Length.ShouldBe(alternative == "code" ? 2 : 1);
+        foreach (string? uri in new[] { null, "urn:example:wrong", UnsafeCodeConstants.ImplicitRules })
+        {
+            ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex,
+                UnsafeCodeTestFixture.ParametersJson([CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "unsafe")], uri));
+            bool[] results = [.. expressions.Select(expression => Evaluate(expression, instance))];
+            results.All(result => result).ShouldBe(uri == UnsafeCodeConstants.ImplicitRules);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, "profile")]
+    [InlineData(1, "profile")]
+    [InlineData(0, "recursion")]
+    [InlineData(1, "recursion")]
+    public void SelectedValueEndpointsPreserveTraversalAndEveryAttachment(int targetIndex, string variant)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateMixedChoiceInputs(targetIndex, "code", "qualified", enableRules: true);
+        if (variant == "profile")
+        {
+            fixture.AddMixedChoiceCodingProfile();
+            DbStructureDefinition sourceProfile = fixture.Structure(fixture.Packages[2], "SelectedCoding");
+            DbElement root = DbElement.SelectList(fixture.Connection, StructureKey: sourceProfile.Key).ShouldHaveSingleItem();
+            root.Id.ShouldBe("Coding");
+            root.Path.ShouldBe("Coding");
+            root.ParentElementKey.ShouldBeNull();
+            root.ResourceFieldOrder.ShouldBe(0);
+            root.BaseElementKey.ShouldBe(DbElement.SelectSingle(fixture.Connection,
+                StructureKey: fixture.Structure(fixture.Packages[2], "Coding").Key, Id: "Coding")!.Key);
+            root.BaseStructureKey.ShouldBe(fixture.Structure(fixture.Packages[2], "Coding").Key);
+            sourceProfile.VersionedUrl.ShouldBe(UnsafeCodeTestFixture.MixedCodingProfile);
+            sourceProfile.ArtifactClass.ShouldBe(Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Profile);
+            UnsafeCodeTestFixture.WriteMixedChoiceObservation("MEASURED_H2_PROFILE_INPUT", new
+            {
+                attribution = UnsafeCodeTestFixture.MixedChoiceAttribution(), targetIndex, sourceProfile, root,
+                sourceCodingRoots = DbElement.SelectList(fixture.Connection, FhirPackageKey: fixture.Packages[2].Key, Id: "Coding"),
+            });
+        }
+        if (variant == "recursion") fixture.AddMixedChoiceRecursion();
+        FhirPackageComparisonPair pair = fixture.LoadCompareAndGenerate(targetIndex);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        IReadOnlyList<UnsafeCodeConstraintPlan> plans = UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+        StructureDefinition profile = built.Profiles.Single(candidate => candidate.Definition.Type == "Parameters").Definition;
+        if (variant == "profile")
+        {
+            plans.Count.ShouldBe(3);
+            DbElement choice = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: UnsafeCodeTestFixture.MixedChoiceElement)!;
+            choice.BindingValueSet.ShouldBe("http://example.org/ValueSet/mixed-choice-primitive|primitive-valueset-v3");
+            plans.Where(plan => plan.Row.SourceVersion is not null).ShouldHaveSingleItem().Row.SourceVersion.ShouldBe("primitive-v1");
+            foreach (UnsafeCodeConstraintPlan plan in plans.Where(plan => plan.SourcePath[^1].TypeName != "code"))
+            {
+                plan.SourcePath[^1].ShouldBe(new UnsafeCodePathStep("Coding", UnsafeCodeTestFixture.MixedCodingProfile, false));
+            }
+            RecoveredExpressions(profile, targetIndex).ShouldAllBe(expression => !expression.Contains(UnsafeCodeTestFixture.MixedCodingProfile, StringComparison.Ordinal));
+        }
+        else
+        {
+            plans.ShouldContain(plan => plan.SourcePath.Any(step => step.IsContentReference));
+            plans.ShouldContain(plan => !plan.SourcePath.Any(step => step.IsContentReference));
+        }
+        foreach (UnsafeCodeConstraintPlan plan in plans)
+        {
+            ImmutableArray<UnsafeCodePathStep> prefix = plan.SourcePath[..^1];
+            ImmutableArray<RepresentationLocation> before = built.Representations.Resolve(plan.Row.StructureOutcomeKey, prefix);
+            UnsafeCodeSafetyResolution safety = built.Representations.ResolveSafety(plan.Row.StructureOutcomeKey, plan.SourcePath);
+            safety.Failure.ShouldBeNull();
+            RepresentationLocation selected = safety.Locations.ShouldHaveSingleItem();
+            selected.State.ShouldBe(RepresentationState.Observable);
+            RepresentationLocation ordinary = before.Single(location => location.SourceType == selected.SourceType);
+            JsonSerializer.Serialize(selected).ShouldBe(JsonSerializer.Serialize(ordinary));
+            selected.Steps.OfType<ResourceOwnerStep>().ShouldBeEmpty();
+            selected.SourceBinding.ShouldBe(new UnsafeCodeCanonical("http://example.org/ValueSet/mixed-choice-primitive", "primitive-valueset-v3"));
+            selected.Transformations.ShouldBeEmpty();
+            if (!prefix.Any(step => step.IsContentReference))
+            {
+                selected.Steps.ShouldBe(ImmutableArray.Create<RepresentationStep>(new MemberStep("parameter"), new MemberStep("value"),
+                    new ChoiceStep(selected.TargetType!)));
+            }
+        }
+        string[] conditions = RecoveredExpressions(profile, targetIndex);
+        foreach (int depth in variant == "recursion" ? new[] { 0, 1, 4 } : new[] { 0 })
+        {
+            JsonObject parameter = JsonNode.Parse(CodingParameter(UnsafeCodeTestFixture.MixedCodingSystem, "unsafe"))!.AsObject();
+            for (int i = 0; i < depth; i++)
+            {
+                parameter = new() { ["name"] = "parent", ["part"] = new JsonArray(parameter) };
+            }
+            foreach (string? uri in new[] { null, "urn:example:wrong", UnsafeCodeConstants.ImplicitRules })
+            {
+                ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex, UnsafeCodeTestFixture.ParametersJson([parameter.ToJsonString()], uri));
+                bool[] results = [.. conditions.Select(condition => Evaluate(condition, instance))];
+                results.All(result => result).ShouldBe(uri == UnsafeCodeConstants.ImplicitRules, variant + " depth " + depth);
+            }
+        }
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
