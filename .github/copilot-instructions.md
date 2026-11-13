@@ -4,11 +4,11 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 
 ## Toolchain
 
-- **.NET 10 SDK** is required. Despite what `README.md` says, every applicable project targets `net11.0` (see `fhir-codegen.props` and `*.csproj` files). The CI workflow pins `DOTNET_VERSION: '10'`.
+- **.NET 11 SDK** is required. Target frameworks are declared in the `*.csproj` files: all projects target `net11.0` except `Fhir.CodeGen.SQLiteGenerator`, which remains on `netstandard2.0`. There is no `global.json`. Both CI workflows select SDK `11`. The test workflow's `main-disabled` branch filter is intentional and must remain unchanged for now.
 - **C# `<LangVersion>14.0</LangVersion>`**, `Nullable enable`, `ImplicitUsings enable` are set globally in `fhir-codegen.props`.
-- Current package baselines after the .NET 10 upgrade: `Microsoft.Extensions.*` and `Microsoft.Data.Sqlite` are `10.0.14`; retained `System.Text.Json` references are `10.0.11`; `System.CommandLine` is `2.0.14`; test infrastructure is `Microsoft.NET.Test.Sdk 18.11.0`, `xunit.runner.visualstudio 4.0.1`, and `coverlet.collector 10.1.0`; SQLite generator Roslyn packages are `5.9.0`. FHIR package acquisition comes from `fhir-pkg-lib 2026.1029.15100`, referenced only by `Fhir.CodeGen.Lib`. FHIR packages are `5.13.4`, `brianpos.Fhir.Base.FhirPath.Validator` is `5.13.4-rc2`, and `Microsoft.OpenApi` is `1.6.31`; the FHIR and OpenAPI major-version migrations remain deferred.
+- Dependency versions are declared per-project in `*.csproj`. See [AGENTS.md — Toolchain pins](../AGENTS.md#toolchain-pins) for the current package baselines and conditional references; keep that table aligned with the project files rather than duplicating it here.
 - Solution file: `fhir-codegen.sln` at the repo root.
-- Style is enforced via `.editorconfig` and `stylecop.json`. Notable: 4-space indent, CRLF, accessibility modifiers required, copyright header on every `.cs` file:
+- Style follows `.editorconfig` and `stylecop.json`; it is not enforced by the build, and `StyleCop.Analyzers` is not referenced. Notable: 4-space indent, CRLF, accessibility modifiers required, copyright header on every new `.cs` file:
   ```csharp
   // <copyright file="Foo.cs" company="Microsoft Corporation">
   //     Copyright (c) Microsoft Corporation. All rights reserved.
@@ -22,7 +22,7 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 # Restore & build everything
 dotnet build fhir-codegen.sln -c Release
 
-# Full test suite (matches CI; skips tests that need external FHIR IG repos)
+# Full test suite (skips tests that need external FHIR IG repos)
 dotnet test --configuration Release --framework net11.0 --filter "RequiresExternalRepo!=true"
 
 # Run a single test class or method (xUnit + Shouldly)
@@ -78,7 +78,7 @@ Different FHIR major versions ship as separate `Hl7.Fhir.*` assemblies whose typ
 ### Coding style preferences (from custom instructions)
 - Prefer **explicit types** in C#; use `var` only when the type is obvious from the right-hand side.
 - Use **collection expressions `[]`** for empty initializers, not `new List<T>()` / `new()`.
-- Prefer C# 14 / .NET 10 features when adding new code (this repo targets .NET 10 today; don't downgrade to older patterns when newer ones are cleaner).
+- Prefer C# 14 / .NET 11 features when adding new code. The language version remains explicitly set to C# 14; do not assume the .NET 11 SDK's default language version.
 - HTTP services (where present) listen on **HTTP only** — no `UseHttpsRedirection`/`UseHsts`; HTTPS is terminated by a reverse proxy.
 - If adding SQLite interaction code, prefer the `cslightdbgen.sqlitegen` NuGet package over hand-rolled ADO.
 

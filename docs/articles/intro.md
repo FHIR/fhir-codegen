@@ -1,6 +1,6 @@
 # Introduction
 
-`fhir-codegen` is a .NET solution for ingesting FHIR specification
+`fhir-codegen` is a .NET 11 solution for ingesting FHIR specification
 packages and exporting them into other languages and formats.
 
 The FHIR specification (both core and implementation guides) is itself
@@ -74,10 +74,16 @@ cross-platform, and pleasant to work in; the toolchain (`dotnet`,
 xUnit, Shouldly) is also enough to keep contributors productive without
 extra glue.
 
+Building from source requires a .NET 11 SDK. The solution explicitly
+sets C# `14.0` in `fhir-codegen.props`; the SDK upgrade does not change
+the language version. The SQLite source generator is the only project
+that remains on `netstandard2.0`; the others target `net11.0`.
+
 ## Documentation site
 
 This documentation site is built with
-[DocFX](https://dotnet.github.io/docfx/) on every push to `main` and
+[DocFX](https://dotnet.github.io/docfx/), with builds configured for
+source or documentation changes in pull requests and pushes to `main`, and
 served from [GitHub Pages](https://pages.github.com/) at
 <https://fhir.github.io/fhir-codegen/>. The full source for the site
 lives under `docs/` in the repository; the

@@ -5,7 +5,6 @@
         {
           "files": [
             "Fhir.CodeGen.Common/Fhir.CodeGen.Common.csproj",
-            "Fhir.CodeGen.Packages/Fhir.CodeGen.Packages.csproj",
             "Fhir.CodeGen.CrossVersionLoader/Fhir.CodeGen.CrossVersionLoader.csproj",
             "Fhir.CodeGen.MappingLanguage/Fhir.CodeGen.MappingLanguage.csproj",
             "Fhir.CodeGen.LangSQLite/Fhir.CodeGen.LangSQLite.csproj",

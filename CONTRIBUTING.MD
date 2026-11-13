@@ -6,6 +6,28 @@ To ensure a welcoming environment, we follow the [HL7 Code of Conduct](https://w
 
 Before making a contribution, please familiarize yourself with this document, as well as our [LICENSE](LICENSE) and [README](README.md).
 
+## Building and Testing
+
+Install the **.NET 11 SDK**. The solution targets `net11.0`, except for
+`Fhir.CodeGen.SQLiteGenerator`, which targets `netstandard2.0`.
+`fhir-codegen.props` explicitly sets **C# 14.0**; the SDK upgrade does
+not change that setting.
+
+Run these commands from the repository root:
+
+```powershell
+dotnet build fhir-codegen.sln -c Release
+dotnet test --configuration Release --framework net11.0 --filter "RequiresExternalRepo!=true"
+```
+
+Tests use xUnit and Shouldly. Populate the FHIR package cache before
+running package-dependent tests; see
+[Required setup](AGENTS.md#required-setup--the-fhir-package-cache).
+Keep the `RequiresExternalRepo!=true` filter to skip tests that clone
+external HL7 repositories. For focused test commands, current dependency
+versions, and CI settings, see [AGENTS.md](AGENTS.md).
+For documentation builds, see [the docs guide](docs/README.md).
+
 
 ## Submitting Pull Requests
 
@@ -21,9 +43,11 @@ Before making a contribution, please familiarize yourself with this document, as
 
 ## Coding Style
 
-The coding style is enforced through [StyleCop.Analyzers](https://github.com/DotNetAnalyzers/StyleCopAnalyzers), [.editorconfig](.editorconfig), and [stylecop.json](stylecop.json). Contributors should ensure these guidelines are followed when making submissions.
+The coding style is defined in [.editorconfig](.editorconfig) and
+[stylecop.json](stylecop.json). These are conventions, not build-enforced
+checks: `StyleCop.Analyzers` is not referenced, and there is no separate
+lint step. Contributors should follow these guidelines when making submissions.
 
-- **DO** address the StyleCop.Analyzers errors.
 - **DO** follow the [.editorconfig](.editorconfig) and [stylecop.json](stylecop.json) settings.
 
 ## Creating Issues
