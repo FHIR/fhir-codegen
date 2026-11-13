@@ -103,6 +103,56 @@ public class CorePartialPackageCliTests : IDisposable
         autoLoadCount.ShouldBe(1, $"expected exactly one auto-expansion request, saw {autoLoadCount}");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void XVerReuseOnlyCommandReportsMissingOrEmptyDatabaseFailure(bool existingEmptyFile)
+    {
+        string dbDirectory = Path.Combine(_tempDir, "xver-db");
+        string dbFile = Path.Combine(dbDirectory, Guid.NewGuid().ToString("N") + ".sqlite");
+        if (existingEmptyFile)
+        {
+            Directory.CreateDirectory(dbDirectory);
+            File.WriteAllBytes(dbFile, []);
+        }
+
+        StringBuilder standardError = new();
+        (bool exited, int exitCode, string output) = RunCli(
+            standardError,
+            "xver",
+            "compare-vs",
+            "--db",
+            dbFile,
+            "--use-official-registries",
+            "false",
+            "--fhir-cache",
+            _tempDir,
+            "--output-path",
+            _tempDir);
+
+        exited.ShouldBeTrue("the xver CLI did not terminate");
+        exitCode.ShouldBe(1);
+        string error = standardError.ToString();
+        error.ShouldContain("DoXVer <<< caught:");
+        error.ShouldContain(dbFile);
+        error.ShouldContain("xver load");
+        error.ShouldContain("--reload-db true");
+        error.ShouldContain("destructive");
+        output.ShouldNotContain("Failed to install package");
+        if (existingEmptyFile)
+        {
+            error.ShouldContain("FhirPackages");
+            File.Exists(dbFile).ShouldBeTrue();
+            new FileInfo(dbFile).Length.ShouldBe(0);
+        }
+        else
+        {
+            error.ShouldContain("does not exist");
+            File.Exists(dbFile).ShouldBeFalse();
+            Directory.Exists(dbDirectory).ShouldBeFalse();
+        }
+    }
+
     /// <summary>Counts emissions, not substring hits: the logger's message template already carries
     /// the "Auto-loading core expansion" prefix that the call site repeats, so a single emitted line
     /// contains the marker twice.</summary>
@@ -198,7 +248,10 @@ public class CorePartialPackageCliTests : IDisposable
         return executablePath;
     }
 
-    private static (bool Exited, int ExitCode, string Output) RunCli(params string[] args)
+    private static (bool Exited, int ExitCode, string Output) RunCli(params string[] args) =>
+        RunCli(null, args);
+
+    private static (bool Exited, int ExitCode, string Output) RunCli(StringBuilder? standardError, params string[] args)
     {
         ProcessStartInfo startInfo = new()
         {
@@ -238,6 +291,7 @@ public class CorePartialPackageCliTests : IDisposable
                 lock (sink)
                 {
                     sink.AppendLine(e.Data);
+                    standardError?.AppendLine(e.Data);
                 }
             }
         };

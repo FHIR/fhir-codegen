@@ -169,24 +169,46 @@ public class ComparisonDatabase : IDisposable
             ?? NullLoggerFactory.Instance.CreateLogger(nameof(ComparisonDatabase));
 
         _dbPath = dbPath;
-        if (!Directory.Exists(_dbPath))
+        _dbName = dbName;
+        string dbFilePath = Path.Combine(_dbPath, _dbName);
+        if (!File.Exists(dbFilePath))
         {
-            Directory.CreateDirectory(_dbPath);
+            throw new FileNotFoundException(
+                $"Comparison database '{dbFilePath}' does not exist. Initialize with 'xver load' or '--reload-db true'; reloading is destructive and replaces existing content.",
+                dbFilePath);
         }
 
-        _dbName = dbName;
         string connectionString = new SqliteConnectionStringBuilder()
         {
-            DataSource = Path.Combine(_dbPath, _dbName),
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            DataSource = dbFilePath,
+            Mode = SqliteOpenMode.ReadWrite,
         }.ToString();
 
-        _logger.LogInformation($"Opened database: `{connectionString}`");
-
         _db = new SqliteConnection(connectionString);
-        _db.Open();
+        try
+        {
+            _db.Open();
+            _logger.LogInformation($"Opened database: `{connectionString}`");
 
-        DbContentClasses.LoadIndices(_db);
+            using IDbCommand command = _db.CreateCommand();
+            command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $tableName";
+            IDbDataParameter tableName = command.CreateParameter();
+            tableName.ParameterName = "$tableName";
+            tableName.Value = DbFhirPackage.DefaultTableName;
+            command.Parameters.Add(tableName);
+            if (command.ExecuteScalar() is null)
+            {
+                throw new InvalidDataException(
+                    $"Comparison database '{dbFilePath}' is missing table '{DbFhirPackage.DefaultTableName}'. Rebuild with 'xver load' or '--reload-db true'; rebuilding is destructive and replaces existing content.");
+            }
+
+            DbContentClasses.LoadIndices(_db);
+        }
+        catch
+        {
+            _db.Dispose();
+            throw;
+        }
     }
 
     public bool IsCoreComparison => _isCoreComparison;

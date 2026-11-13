@@ -4,6 +4,8 @@
 
 `LoadDatabase` either reuses a named SQLite comparison database or creates a fresh comparison database and loads all configured FHIR core package definitions into it. The fresh-load path seeds content tables such as `DbFhirPackage`, `DbCodeSystem`, `DbValueSet`, `DbStructureDefinition`, `DbElement`, and `DbElementType` from the configured `DefinitionCollection` instances. This is the foundational step for the remaining cross-version pipeline: maps, substitutions, FHIR-type value sets, comparison, outcome generation, and export all require `_db`.
 
+**Current revised behavior (2026-11-13):** The default full pipeline initializes a missing named database. Reuse-only commands instead reject missing named files, and existing files without the package table are rejected without automatic rebuilding. The line references below retain the historical source snapshot cited at the end of this document.
+
 ## Invocation & Preconditions
 
 Direct command dispatch in `ProcessCommand` invokes this step before later pipeline work:
@@ -11,7 +13,7 @@ Direct command dispatch in `ProcessCommand` invokes this step before later pipel
 - `load` calls `LoadDatabase(true)`, then loads cross-version maps, extension substitutions, and FHIR-type value sets (`XVerProcessor.cs:314-319`).
 - `load-base` calls `LoadDatabase(true)`, then loads extension substitutions (`XVerProcessor.cs:321-324`).
 - `compare`, `compare-vs`, `compare-sd`, `outcomes`, `outcomes-vs`, `outcomes-sd`, and `export` call `LoadDatabase(_config.ReloadDatabase)` when `_config.ReloadDatabase` is true before running their requested step (`XVerProcessor.cs:336-418`).
-- The default full-pipeline branch always calls `LoadDatabase(_config.ReloadDatabase)` before maps, substitutions, FHIR-type value sets, compare, outcomes, and export (`XVerProcessor.cs:421-428`).
+- The default full-pipeline branch calls `LoadDatabase` with forced creation when `_config.ReloadDatabase` is true or the configured named database file is missing, before maps, substitutions, FHIR-type value sets, compare, outcomes, and export (historical branch: `XVerProcessor.cs:421-428`).
 
 Several public step methods also lazily call `LoadDatabase(false)` if `_db` is null:
 
@@ -21,6 +23,8 @@ Several public step methods also lazily call `LoadDatabase(false)` if `_db` is n
 - `LoadExtensionSubstitutions` (`XVerProcessor.cs:749-757`)
 - `LoadFhirTypeValueSets` (`XVerProcessor.cs:766-774`)
 - `LoadFhirCrossVersionMaps` (`XVerProcessor.cs:790-798`)
+
+These lazy calls do not create a missing named database: they require an existing comparison database unless the command explicitly requests reload. Directory-only paths still use the existing generated-name fresh-load behavior.
 
 Preconditions:
 
@@ -51,7 +55,7 @@ Preconditions:
 ## Outputs
 
 - `_db` is set to a `ComparisonDatabase` instance backed by an on-disk SQLite file (`XVerProcessor.cs:514`, `XVerProcessor.cs:528`).
-- On existing-DB reuse, the method opens the database, loads table indices through `DbContentClasses.LoadIndices`, and returns without re-seeding content (`XVerProcessor.cs:510-519`, `ComparisonDatabase.cs:161-190`).
+- On existing-DB reuse, the method opens the existing file in read/write mode, verifies the `DbFhirPackage.DefaultTableName` table in `sqlite_master`, loads table indices through `DbContentClasses.LoadIndices`, and returns without re-seeding content (historical locations: `XVerProcessor.cs:510-519`, `ComparisonDatabase.cs:161-190`). This is a package-table guard, not a complete schema/version migration check.
 - On fresh DB creation, the definitions-based constructor opens/creates the SQLite file, deletes existing content tables, recreates content/support tables, and inserts package metadata (`ComparisonDatabase.cs:80-158`, `ComparisonDatabase.cs:593-647`). The content/support schema includes `DbFhirPackage`, `DbCodeSystem`, `DbCodeSystemConcept`, `DbValueSet`, `DbValueSetConcept`, `DbStructureDefinition`, `DbElement`, `DbElementAdditionalBinding`, `DbElementType`, `DbExternalInclusion`, `DbExtensionSubstitution`, and `DbFhirTypeValueSet` (`DbContentClasses.cs:31-109`).
 - `_dbName` is updated from the database instance after fresh construction (`XVerProcessor.cs:528-529`).
 - Fresh creation is seeded by `_db.TryLoadFromDefinitionCollections(_exclusionSet, _escapeValveCodes)` (`XVerProcessor.cs:531-535`). That method loads code systems, value sets, and structures, then runs value-set, element, and code-system post-processing (`ComparisonDatabase.cs:652-696`).
@@ -59,7 +63,7 @@ Preconditions:
 
 ## Algorithm
 
-1. If `forceCreate` is false and `_dbName` is not empty, open the named database with `_db = new(_dbPath, _dbName)` and return (`XVerProcessor.cs:509-519`). The `_db != null` check immediately after construction is redundant in C# because `new` cannot return null; the only non-return path is an exception during construction.
+1. If `forceCreate` is false and `_dbName` is not empty, open the named database with `_db = new(_dbPath, _dbName, _config.LogFactory)` and return (historical location: `XVerProcessor.cs:509-519`). The existing-database constructor rejects a missing file with `FileNotFoundException` and its path, without creating a parent directory. It opens with `SqliteOpenMode.ReadWrite`, checks `sqlite_master` for `DbFhirPackage.DefaultTableName` before loading indices, and throws `InvalidDataException` with the database path and rebuild guidance if the table is absent. Constructor initialization failures dispose the connection and rethrow the original exception; there is no fallback to fresh creation.
 2. If `_definitions.Length == 0`, call `loadDefinitionCollections()` (`XVerProcessor.cs:521-525`). That helper iterates `ComparePackages`, validates each directive, creates a `PackageLoader` per directive, expands R5 loads to include `hl7.terminology@5.1.0`, calls `LoadPackages(loadDirectives).Result`, and stores the resulting `DefinitionCollection` array and lookup indexes (`XVerProcessor.cs:213-250`). See the package-filter decision below for the apparent `PackageIsFhirCore` anomaly.
 3. Construct the database with definitions: `_db = new(_definitions, _dbPath, _dbName, _config.LogFactory)` (`XVerProcessor.cs:527-528`). The constructor opens/creates the SQLite file in read/write/create mode and calls `initNewDb(ensureDeleted: true)` (`ComparisonDatabase.cs:147-158`).
 4. Store `_dbName = _db.DbFileName` so later lazy calls can reuse the generated or supplied filename (`XVerProcessor.cs:528-529`).
@@ -68,12 +72,12 @@ Preconditions:
 ## Decision Points
 
 - **Existing-DB reuse.**  
-  **Rule:** When `forceCreate=false` and `_dbName` is set, `LoadDatabase` opens the named SQLite database and returns without loading definitions or re-seeding content.  
-  **Source:** `XVerProcessor.cs:510-519`; the existing-database constructor opens the file with `SqliteOpenMode.ReadWriteCreate` and loads indices at `ComparisonDatabase.cs:177-190`.  
+  **Rule:** When `forceCreate=false` and `_dbName` is set, `LoadDatabase` opens a validated existing named SQLite database and returns without loading definitions or re-seeding content. Only the default full-pipeline branch automatically requests fresh loading for a missing named file; reuse-only subcommands must explicitly request initialization. Invalid existing databases are never automatically rebuilt.\
+  **Source:** `XVerProcessor.ProcessCommand` default branch and `LoadDatabase`; the existing-database constructor now uses `SqliteOpenMode.ReadWrite` and checks the package table before loading indices (historical locations: `XVerProcessor.cs:510-519`, `ComparisonDatabase.cs:177-190`).\
   **Rationale:** AI Guess: the cross-version pipeline can be expensive; reusing a previously loaded database keeps inner-loop operations from re-downloading packages and re-importing all content.
 
 - **Fresh creation is destructive for content tables.**  
-  **Rule:** The definitions-based constructor always calls `initNewDb(ensureDeleted: true)`, and `initNewDb` drops then recreates content/support tables before inserting package metadata.  
+  **Rule:** The definitions-based constructor always calls `initNewDb(ensureDeleted: true)`, and `initNewDb` drops then recreates content/support tables before inserting package metadata. Recovery with `xver load` or `--reload-db true` explicitly selects this destructive path and replaces existing content; preserve valuable database contents first.\
   **Source:** `ComparisonDatabase.cs:147-158`, `ComparisonDatabase.cs:593-647`, `DbContentClasses.cs:31-109`.  
   **Rationale:** The code path explicitly requests `ensureDeleted: true` and recreates a clean content schema before loading definitions, so a forced/fresh load is designed to replace the prior content snapshot rather than merge into it.
 
@@ -118,7 +122,10 @@ Decisions: 8 total — cited: 2 — AI Guess: 5 — unresolved: 1
 - `loadDefinitionCollections` currently throws when `PackageIsFhirCore(directive)` returns true (`XVerProcessor.cs:217-222`). Per the suspected bug above, this practically means fresh loading fails for FHIR core package directives unless the predicate semantics differ from the method name.
 - `PackageLoader.LoadPackages(loadDirectives).Result` can throw if a package cannot be downloaded or resolved. A null result is converted to `Could not load package: {directive}` (`XVerProcessor.cs:224-239`).
 - When `forceCreate=false` and `_dbName` is empty, the method silently falls through to the fresh-DB branch (`XVerProcessor.cs:510-528`).
-- When `forceCreate=false` and `_dbName` is set but the file does not exist, the existing-database constructor uses `SqliteOpenMode.ReadWriteCreate`, so it can create/open an empty SQLite file and return without content seeding (`ComparisonDatabase.cs:177-190`). Downstream steps may then fail because expected content tables or rows are missing.
+- When `forceCreate=false` and `_dbName` is set but the file does not exist, reuse throws `FileNotFoundException` including the path, without creating the file or its parent directory. The default full pipeline avoids this reuse path by requesting fresh loading for a missing named file.
+- An empty or unrelated existing SQLite database lacking `DbFhirPackage.DefaultTableName` throws `InvalidDataException` including its path and explicit `xver load` / `--reload-db true` recovery guidance. Existing data is not overwritten automatically; explicit rebuilding is destructive for existing content.
+- Other SQLite errors, such as a corrupt/non-SQLite file, propagate unchanged rather than being converted to schema guidance or triggering a rebuild. Connections are disposed when reuse constructor initialization fails.
+- `Program.DoXVer` writes caught errors (including inner-exception messages when present) to stderr and returns exit code 1. Successful processing still returns 0. Historically these errors were written to stdout and the command returned 0 even after failure.
 - `artifactFilter` does not limit what is loaded; callers expecting a value-set-only or structure-only load still get the full fresh-load path (`XVerProcessor.cs:505-538`, `ComparisonDatabase.cs:670-677`).
 
 ## Coverage Checklist
@@ -141,6 +148,7 @@ Decisions: 8 total — cited: 2 — AI Guess: 5 — unresolved: 1
   - `src/Fhir.CodeGen.Comparison/Models/DbContentClasses.cs` (lines 31-109)
   - `src/Fhir.CodeGen.Lib/Configuration/ConfigXVer.cs` (lines 16-92, 459-472)
   - `src/Fhir.CodeGen.Lib/Configuration/ConfigRoot.cs` (lines 30-32)
+  - `src/fhir-codegen/Program.cs` (`DoXVer`, revised failure stream and exit code)
 - Related specs:
   - [`xver-load-fhir-cross-version-maps.md`](./xver-load-fhir-cross-version-maps.md)
   - [`xver-load-extension-substitutions.md`](./xver-load-extension-substitutions.md)
@@ -150,3 +158,5 @@ Decisions: 8 total — cited: 2 — AI Guess: 5 — unresolved: 1
 
 ---
 *Verified against commit `d02100974b2dc1b05ecf1af69c29095e6973f4c8` on `2026-06-04`.*
+
+*Database lifecycle and xver failure behavior revised on `2026-11-13`; historical references retained.*

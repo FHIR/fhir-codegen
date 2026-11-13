@@ -392,7 +392,8 @@ public partial class XVerProcessor
                 break;
 
             default:
-                LoadDatabase(_config.ReloadDatabase);
+                LoadDatabase(_config.ReloadDatabase ||
+                    (!string.IsNullOrEmpty(_dbName) && !File.Exists(Path.Combine(_dbPath, _dbName))));
                 LoadFhirCrossVersionMaps();
                 LoadExtensionSubstitutions();
                 LoadFhirTypeValueSets();
@@ -522,11 +523,8 @@ public partial class XVerProcessor
             !string.IsNullOrEmpty(_dbName))
         {
             // try loading an existing database
-            _db = new(_dbPath, _dbName);
-            if (_db != null)
-            {
-                return;
-            }
+            _db = new(_dbPath, _dbName, _config.LogFactory);
+            return;
         }
 
         // load definitions if we have not done so
