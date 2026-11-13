@@ -63,10 +63,10 @@ public API changes in `Fhir.CodeGen.*` are breaking changes.
 
 - **.NET 10 targeting pack is required.** There is **no `global.json`**, so
   the SDK version is a *floor*, not an exact pin — any SDK that can target
-  `net10.0` works. CI pins `DOTNET_VERSION: '10'`
-  (`.github/workflows/build-and-test.yml`); a .NET 10 SDK targeting `net10.0` is known-good locally.
-- **Every project targets `net10.0`** except `Fhir.CodeGen.SQLiteGenerator`,
-  which targets **`netstandard2.0`**. Do not "fix" that one to `net10.0`.
+  `net11.0` works. CI pins `DOTNET_VERSION: '11'`
+  (`.github/workflows/build-and-test.yml`); a .NET 11 SDK targeting `net11.0` is known-good locally.
+- **Every project targets `net11.0`** except `Fhir.CodeGen.SQLiteGenerator`,
+  which targets **`netstandard2.0`**. Do not "fix" that one to `net11.0`.
 - `fhir-codegen.props` (imported by the project files) sets
   **`LangVersion 14.0`**, **`Nullable enable`**, **`ImplicitUsings enable`**
   solution-wide. Change these there, not per-project.
@@ -127,7 +127,7 @@ syntax**, supporting `FullyQualifiedName~Substring`,
 ### Full suite
 
 ```powershell
-dotnet test --configuration Release --framework net10.0 --filter "RequiresExternalRepo!=true"
+dotnet test --configuration Release --framework net11.0 --filter "RequiresExternalRepo!=true"
 ```
 
 This is exactly what CI runs. **Always keep the

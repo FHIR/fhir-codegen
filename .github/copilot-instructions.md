@@ -4,7 +4,7 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 
 ## Toolchain
 
-- **.NET 10 SDK** is required. Despite what `README.md` says, every applicable project targets `net10.0` (see `fhir-codegen.props` and `*.csproj` files). The CI workflow pins `DOTNET_VERSION: '10'`.
+- **.NET 10 SDK** is required. Despite what `README.md` says, every applicable project targets `net11.0` (see `fhir-codegen.props` and `*.csproj` files). The CI workflow pins `DOTNET_VERSION: '10'`.
 - **C# `<LangVersion>14.0</LangVersion>`**, `Nullable enable`, `ImplicitUsings enable` are set globally in `fhir-codegen.props`.
 - Current package baselines after the .NET 10 upgrade: `Microsoft.Extensions.*` and `Microsoft.Data.Sqlite` are `10.0.14`; retained `System.Text.Json` references are `10.0.11`; `System.CommandLine` is `2.0.14`; test infrastructure is `Microsoft.NET.Test.Sdk 18.11.0`, `xunit.runner.visualstudio 4.0.1`, and `coverlet.collector 10.1.0`; SQLite generator Roslyn packages are `5.9.0`. FHIR package acquisition comes from `fhir-pkg-lib 2026.1029.15100`, referenced only by `Fhir.CodeGen.Lib`. FHIR packages are `5.13.4`, `brianpos.Fhir.Base.FhirPath.Validator` is `5.13.4-rc2`, and `Microsoft.OpenApi` is `1.6.31`; the FHIR and OpenAPI major-version migrations remain deferred.
 - Solution file: `fhir-codegen.sln` at the repo root.
@@ -23,7 +23,7 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 dotnet build fhir-codegen.sln -c Release
 
 # Full test suite (matches CI; skips tests that need external FHIR IG repos)
-dotnet test --configuration Release --framework net10.0 --filter "RequiresExternalRepo!=true"
+dotnet test --configuration Release --framework net11.0 --filter "RequiresExternalRepo!=true"
 
 # Run a single test class or method (xUnit + Shouldly)
 dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName~GenerationTests"
