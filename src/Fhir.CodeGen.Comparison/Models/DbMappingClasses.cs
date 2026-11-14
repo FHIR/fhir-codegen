@@ -19,11 +19,14 @@ public static class DbMappingClasses
         try { DbUnsafeCodeRule.LoadMaxKey(db); } catch { }
         try { DbUnsafeCodeInputState.LoadMaxKey(db); } catch { }
         try { DbUnsafeCodePairState.LoadMaxKey(db); } catch { }
+        StructureDefinitionFactsStore.LoadMappingIndices(db);
     }
 
     public static void DropTables(IDbConnection db)
     {
+        DefinitionInventoryStore.InvalidateMapInputs(db);
         UnsafeCodeInputStore.InvalidateInputs(db);
+        DbProfileMapOwnerFacts.DropTable(db);
         DbUnsafeCodeElementAnnotation.DropTable(db);
         DbUnsafeCodeMapEvidence.DropTable(db);
         DbUnsafeCodeRule.DropTable(db);
@@ -47,6 +50,7 @@ public static class DbMappingClasses
         DbUnsafeCodeMapEvidence.CreateTable(db);
         DbUnsafeCodeRule.CreateTable(db);
         UnsafeCodeInputStore.EnsureStateTables(db);
+        DbProfileMapOwnerFacts.CreateTable(db);
     }
 }
 

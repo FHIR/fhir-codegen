@@ -12,6 +12,42 @@ namespace Fhir.CodeGen.Lib.Tests;
 
 public class SQLiteExplicitPrimaryKeyTests
 {
+    [Fact]
+    public void InternalFactsTablesKeepGeneratedContainersInternal()
+    {
+        Type[] internalContainers =
+        [
+            typeof(DbStructureDefinitionFacts),
+            typeof(DbStructureDefinitionFactsExtensions),
+            typeof(DbDefinitionInventoryState),
+            typeof(DbDefinitionInventoryStateExtensions),
+            typeof(DbProfileMapOwnerFacts),
+            typeof(DbProfileMapOwnerFactsExtensions),
+        ];
+        Type[] exported = typeof(DbStructureDefinition).Assembly.GetExportedTypes();
+        foreach (Type container in internalContainers)
+        {
+            container.IsNotPublic.ShouldBeTrue();
+            exported.ShouldNotContain(container);
+        }
+
+        Type[] publicContainers =
+        [
+            typeof(DbStructureDefinition),
+            typeof(DbStructureDefinitionExtensions),
+            typeof(DbElementMapping),
+            typeof(DbElementMappingExtensions),
+            typeof(DbUnsafeCodeRule),
+            typeof(DbUnsafeCodeRuleExtensions),
+        ];
+        foreach (Type container in publicContainers)
+        {
+            container.IsPublic.ShouldBeTrue();
+            exported.ShouldContain(container);
+            container.GetMethods().ShouldContain(method => method.Name == "Insert" && method.IsPublic && method.IsStatic);
+        }
+    }
+
     [Theory]
     [InlineData("single")]
     [InlineData("list")]

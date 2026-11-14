@@ -241,6 +241,16 @@ public sealed class CgSQLiteGenerator : IIncrementalGenerator
         CgGenCategory genCategory)
     {
         string className = symbol.Name;
+        string classAccessibility = symbol.DeclaredAccessibility switch
+        {
+            Accessibility.Public => "public",
+            Accessibility.Internal => "internal",
+            Accessibility.Private => "private",
+            Accessibility.Protected => "protected",
+            Accessibility.ProtectedOrInternal => "protected internal",
+            Accessibility.ProtectedAndInternal => "private protected",
+            _ => "internal",
+        };
         string? classNamespace = symbol.ContainingNamespace?.ToDisplayString();
         string? classAssembly = symbol.ContainingAssembly?.Name;
 
@@ -1341,7 +1351,7 @@ public sealed class CgSQLiteGenerator : IIncrementalGenerator
                 
                     [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
                     [global::System.Runtime.CompilerServices.CompilerGeneratedAttribute()]
-                    public partial {{{decForGenCategory(genCategory)}}} {{{className}}}
+                    {{{classAccessibility}}} partial {{{decForGenCategory(genCategory)}}} {{{className}}}
                     {
                     {{{genClassVars}}}
 
@@ -1383,7 +1393,7 @@ public sealed class CgSQLiteGenerator : IIncrementalGenerator
 
                     [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
                     [global::System.Runtime.CompilerServices.CompilerGeneratedAttribute()]
-                    public static class {{{className}}}Extensions
+                    {{{classAccessibility}}} static class {{{className}}}Extensions
                     {
                         public static {{{className}}}? SelectSingle<T>(
                             this IDbConnection dbCon,

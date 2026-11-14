@@ -26,6 +26,7 @@ public static class DbContentClasses
         try { DbExternalInclusion.LoadMaxKey(db); } catch { }
         try { DbExtensionSubstitution.LoadMaxKey(db); } catch { }
         try { DbFhirTypeValueSet.LoadMaxKey(db); } catch { }
+        StructureDefinitionFactsStore.LoadContentIndices(db);
     }
 
     public static void DropTables(
@@ -37,6 +38,7 @@ public static class DbContentClasses
     {
         if (forPackages || forTerminologies || forStructures || forSupport)
         {
+            DefinitionInventoryStore.InvalidateCompletion(db);
             UnsafeCodeInputStore.InvalidateInputs(db);
         }
 
@@ -59,6 +61,8 @@ public static class DbContentClasses
 
         if (forStructures)
         {
+            DbStructureDefinitionFacts.DropTable(db);
+            DbDefinitionInventoryState.DropTable(db);
             DbStructureDefinition.DropTable(db);
             DbElement.DropTable(db);
             DbElementAdditionalBinding.DropTable(db);
@@ -103,6 +107,8 @@ public static class DbContentClasses
             DbElement.CreateTable(db);
             DbElementAdditionalBinding.CreateTable(db);
             DbElementType.CreateTable(db);
+            DbStructureDefinitionFacts.CreateTable(db);
+            DbDefinitionInventoryState.CreateTable(db);
         }
 
         if (forSupport)
