@@ -5,6 +5,7 @@
 
 using System.Data;
 using System.Text.Json;
+using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.SQLiteGenerator;
 using Hl7.Fhir.Serialization;
 using Hl7.Fhir.Utility;
@@ -125,8 +126,19 @@ internal static class StructureDefinitionFactsStore
             StructureDefinitionJson = new FhirJsonSerializer().SerializeToString(definition),
         };
 
-    internal static StructureDefinition ReadDefinition(DbStructureDefinitionFacts facts) =>
-        new FhirJsonParser().Parse<StructureDefinition>(facts.StructureDefinitionJson);
+    internal static StructureDefinition ReadDefinition(DbStructureDefinitionFacts facts)
+    {
+        try
+        {
+            return new FhirJsonParser().Parse<StructureDefinition>(facts.StructureDefinitionJson);
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                $"Malformed normalized StructureDefinition payload in facts {facts.Key}, package {facts.FhirPackageKey}, owner {facts.StructureKey}.",
+                exception);
+        }
+    }
 
     internal static void LoadContentIndices(IDbConnection db)
     {
@@ -209,8 +221,128 @@ internal static class DefinitionInventoryStore
     internal static void CompleteInventory(IDbConnection db, string startedRevision)
     {
         DbDefinitionInventoryState state = RequireStartedState(db, startedRevision);
+        InvalidateCompletion(db);
+        ClearMapBindings(state);
+        ValidateInventory(db, state);
         state.CompletedRevision = startedRevision;
         DbDefinitionInventoryState.Update(db, state);
+    }
+
+    private static void ValidateInventory(IDbConnection db, DbDefinitionInventoryState state)
+    {
+        DefinitionInventoryPackageCounts[] expected = JsonSerializer.Deserialize<DefinitionInventoryPackageCounts[]>(state.ExpectedPackageCountsJson)
+            ?? throw new InvalidOperationException("Definition inventory expected source counts are missing.");
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(db);
+        if (!packages.Select(row => row.Key).Order().SequenceEqual(expected.Select(row => row.FhirPackageKey).Order()) ||
+            expected.Select(row => row.FhirPackageKey).Distinct().Count() != expected.Length)
+        {
+            throw new InvalidOperationException("Definition inventory package set does not match the expected source package set.");
+        }
+
+        List<DbStructureDefinition> structures = DbStructureDefinition.SelectList(db);
+        List<DbStructureDefinitionFacts> facts = DbStructureDefinitionFacts.SelectList(db);
+        List<DbElement> elements = DbElement.SelectList(db);
+        List<DbElementType> types = DbElementType.SelectList(db);
+        List<DbElementAdditionalBinding> bindings = DbElementAdditionalBinding.SelectList(db);
+        Dictionary<int, DbStructureDefinition> owners = structures.ToDictionary(row => row.Key);
+        Dictionary<int, DbElement> elementOwners = elements.ToDictionary(row => row.Key);
+        ILookup<int, DbElement> elementsByOwner = elements.ToLookup(row => row.StructureKey);
+        ILookup<int?, DbElement> children = elements.ToLookup(row => row.ParentElementKey);
+        ILookup<int, DbElementType> typesByElement = types.ToLookup(row => row.ElementKey);
+        ILookup<int, DbElementAdditionalBinding> bindingsByElement = bindings.ToLookup(row => row.ElementKey);
+        HashSet<int> packageKeys = [.. packages.Select(row => row.Key)];
+        if (structures.Any(row => !packageKeys.Contains(row.FhirPackageKey)) ||
+            facts.Count != structures.Count || facts.GroupBy(row => row.StructureKey).Any(group => group.Count() != 1) ||
+            facts.Any(row => !owners.TryGetValue(row.StructureKey, out DbStructureDefinition? owner) || owner.FhirPackageKey != row.FhirPackageKey))
+        {
+            throw new InvalidOperationException("Definition inventory requires exactly one package-consistent facts row per structure.");
+        }
+
+        foreach (DbElement element in elements)
+        {
+            int separator = element.Id.LastIndexOf('.');
+            if (!owners.TryGetValue(element.StructureKey, out DbStructureDefinition? owner) || owner.FhirPackageKey != element.FhirPackageKey ||
+                (element.ParentElementKey is int parentKey && (!elementOwners.TryGetValue(parentKey, out DbElement? parent) ||
+                    parent.StructureKey != element.StructureKey || parent.FhirPackageKey != element.FhirPackageKey ||
+                    separator < 0 || parent.Id != element.Id[..separator])) ||
+                element.ChildElementCount != children[element.Key].Count())
+            {
+                throw new InvalidOperationException($"Definition inventory element {element.Key} '{element.Id}' has an invalid owner, parent, or child count.");
+            }
+        }
+
+        foreach ((int packageKey, int structureKey, int elementKey) in types.Select(row => (row.FhirPackageKey, row.StructureKey, row.ElementKey))
+            .Concat(bindings.Select(row => (row.FhirPackageKey, row.StructureKey, row.ElementKey))))
+        {
+            if (!elementOwners.TryGetValue(elementKey, out DbElement? element) ||
+                element.FhirPackageKey != packageKey || element.StructureKey != structureKey)
+            {
+                throw new InvalidOperationException($"Definition inventory projection has invalid owner {packageKey}/{structureKey}, element {elementKey}.");
+            }
+        }
+
+        foreach (DbStructureDefinitionFacts row in facts)
+        {
+            DbStructureDefinition owner = owners[row.StructureKey];
+            StructureDefinition definition = StructureDefinitionFactsStore.ReadDefinition(row);
+            DefinitionSnapshotAvailability availability = definition.Snapshot is null ? DefinitionSnapshotAvailability.Missing :
+                definition.Snapshot.Element.Count == 0 ? DefinitionSnapshotAvailability.Empty : DefinitionSnapshotAvailability.Available;
+            if (definition.Url != owner.UnversionedUrl || definition.Version != owner.Version ||
+                definition.Type != row.Type || definition.BaseDefinition != row.BaseDefinition ||
+                definition.Kind?.GetLiteral() != row.Kind || definition.Derivation?.GetLiteral() != row.Derivation ||
+                availability != row.SnapshotAvailability ||
+                owner.SnapshotCount != (definition.Snapshot?.Element.Count ?? 0) ||
+                owner.DifferentialCount != (definition.Differential?.Element.Count ?? 0))
+            {
+                throw new InvalidOperationException($"Definition inventory facts contradict owner {owner.Key} '{owner.VersionedUrl}'.");
+            }
+
+            List<Hl7.Fhir.Model.ElementDefinition> projection = owner.ArtifactClass != FhirArtifactClassEnum.Profile && owner.Message == "Manually excluded"
+                ? [] : availability == DefinitionSnapshotAvailability.Available ? definition.Snapshot!.Element : definition.Differential?.Element ?? [];
+            DbElement[] ownedElements = [.. elementsByOwner[owner.Key]];
+            if (!projection.Select(element => (element.ElementId, element.Path)).Order()
+                .SequenceEqual(ownedElements.Select(element => (element.Id, element.Path)).Order()))
+            {
+                throw new InvalidOperationException($"Definition inventory available element projection contradicts owner {owner.Key} '{owner.VersionedUrl}'.");
+            }
+
+            foreach (Hl7.Fhir.Model.ElementDefinition source in projection)
+            {
+                DbElement element = ownedElements.Single(element => element.Id == source.ElementId);
+                int expectedTypes = source.Type.Sum(type => Math.Max(1, type.ProfileElement.Count) * Math.Max(1, type.TargetProfileElement.Count));
+                if (source.Type.Count == 0 && availability == DefinitionSnapshotAvailability.Available &&
+                    element.ResourceFieldOrder == 0 && !string.IsNullOrEmpty(definition.Type))
+                {
+                    expectedTypes++;
+                }
+
+                if (typesByElement[element.Key].Count() != expectedTypes ||
+                    bindingsByElement[element.Key].Count() != (source.Binding?.Additional.Count ?? 0) ||
+                    element.AdditionalBindingCount != (source.Binding?.Additional.Count ?? 0))
+                {
+                    throw new InvalidOperationException($"Definition inventory type/binding projection contradicts owner {owner.Key} '{owner.VersionedUrl}' element '{source.ElementId}'.");
+                }
+            }
+        }
+
+        foreach (DefinitionInventoryPackageCounts counts in expected)
+        {
+            int packageKey = counts.FhirPackageKey;
+            DefinitionInventoryPackageCounts actual = new(packageKey,
+                structures.Count(row => row.FhirPackageKey == packageKey && row.ArtifactClass == FhirArtifactClassEnum.PrimitiveType),
+                structures.Count(row => row.FhirPackageKey == packageKey && row.ArtifactClass == FhirArtifactClassEnum.ComplexType),
+                structures.Count(row => row.FhirPackageKey == packageKey && row.ArtifactClass == FhirArtifactClassEnum.Resource),
+                structures.Count(row => row.FhirPackageKey == packageKey && row.ArtifactClass == FhirArtifactClassEnum.Profile),
+                elements.Count(row => row.FhirPackageKey == packageKey), types.Count(row => row.FhirPackageKey == packageKey),
+                bindings.Count(row => row.FhirPackageKey == packageKey));
+            if (actual != counts)
+            {
+                throw new InvalidOperationException($"Definition inventory package {packageKey} does not match independent expected source counts. Expected {counts}; stored {actual}.");
+            }
+        }
+
+        XVerStructureCatalog catalog = new(db);
+        catalog.ValidateStoredLinks(types);
     }
 
     internal static void BeginMapInputs(IDbConnection db, string inputSnapshotId, string inventoryRevision)

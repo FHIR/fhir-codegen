@@ -1,4 +1,9 @@
-﻿using System.Data;
+﻿// <copyright file="DbContentExtensions.cs" company="Microsoft Corporation">
+//     Copyright (c) Microsoft Corporation. All rights reserved.
+//     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
+// </copyright>
+
+using System.Data;
 using Hl7.Fhir.Model;
 using Fhir.CodeGen.Common.Utils;
 using Fhir.CodeGen.Comparison.Models;
@@ -150,21 +155,7 @@ public static class DbContentExtensions
         string? elementTypeTableName = null,
         string? structureTableName = null)
     {
-        elementTypeTableName ??= DbElementType.DefaultTableName;
-        structureTableName ??= DbStructureDefinition.DefaultTableName;
-
-        IDbCommand command = dbConnection.CreateCommand();
-        command.CommandText = $$$"""
-            UPDATE {{{elementTypeTableName}}}
-            SET
-                {{{nameof(DbElementType.TypeStructureKey)}}} = S.Key
-            FROM {{{structureTableName}}} S
-            WHERE {{{elementTypeTableName}}}.{{{nameof(DbElementType.TypeName)}}} = S.{{{nameof(DbStructureDefinition.Id)}}}
-            AND {{{elementTypeTableName}}}.{{{nameof(DbElementType.FhirPackageKey)}}} = S.{{{nameof(DbStructureDefinition.FhirPackageKey)}}}
-            AND {{{elementTypeTableName}}}.{{{nameof(DbElementType.FhirPackageKey)}}} = {{{FhirPackageKey}}}
-            """;
-
-        return command.ExecuteNonQuery();
+        return UpdateTypeKeys(dbConnection, FhirPackageKey, elementTypeTableName, structureTableName, 0);
     }
 
     public static int UpdateElementTypeProfileStructureKeys(
@@ -173,25 +164,7 @@ public static class DbContentExtensions
         string? elementTypeTableName = null,
         string? structureTableName = null)
     {
-        elementTypeTableName ??= DbElementType.DefaultTableName;
-        structureTableName ??= DbStructureDefinition.DefaultTableName;
-
-        IDbCommand command = dbConnection.CreateCommand();
-        command.CommandText = $$$"""
-            UPDATE {{{elementTypeTableName}}}
-            SET
-                {{{nameof(DbElementType.TypeProfileStructureKey)}}} = S.Key
-            FROM {{{structureTableName}}} S
-            WHERE {{{elementTypeTableName}}}.{{{nameof(DbElementType.TypeProfile)}}} IS NOT NULL
-            AND (
-                {{{elementTypeTableName}}}.{{{nameof(DbElementType.TypeProfile)}}} = S.{{{nameof(DbStructureDefinition.Id)}}}
-                OR {{{elementTypeTableName}}}.{{{nameof(DbElementType.TypeProfile)}}} = S.{{{nameof(DbStructureDefinition.UnversionedUrl)}}}
-                )
-            AND {{{elementTypeTableName}}}.{{{nameof(DbElementType.FhirPackageKey)}}} = S.{{{nameof(DbStructureDefinition.FhirPackageKey)}}}
-            AND {{{elementTypeTableName}}}.{{{nameof(DbElementType.FhirPackageKey)}}} = {{{FhirPackageKey}}}
-            """;
-
-        return command.ExecuteNonQuery();
+        return UpdateTypeKeys(dbConnection, FhirPackageKey, elementTypeTableName, structureTableName, 1);
     }
 
     public static int UpdateElementTargetProfileStructureKeys(
@@ -200,25 +173,7 @@ public static class DbContentExtensions
         string? elementTypeTableName = null,
         string? structureTableName = null)
     {
-        elementTypeTableName ??= DbElementType.DefaultTableName;
-        structureTableName ??= DbStructureDefinition.DefaultTableName;
-
-        IDbCommand command = dbConnection.CreateCommand();
-        command.CommandText = $$$"""
-            UPDATE {{{elementTypeTableName}}}
-            SET
-                {{{nameof(DbElementType.TargetProfileStructureKey)}}} = S.Key
-            FROM {{{structureTableName}}} S
-            WHERE {{{elementTypeTableName}}}.{{{nameof(DbElementType.TargetProfile)}}} IS NOT NULL
-            AND (
-                {{{elementTypeTableName}}}.{{{nameof(DbElementType.TargetProfile)}}} = S.{{{nameof(DbStructureDefinition.Id)}}}
-                OR {{{elementTypeTableName}}}.{{{nameof(DbElementType.TargetProfile)}}} = S.{{{nameof(DbStructureDefinition.UnversionedUrl)}}}
-                )
-            AND {{{elementTypeTableName}}}.{{{nameof(DbElementType.FhirPackageKey)}}} = S.{{{nameof(DbStructureDefinition.FhirPackageKey)}}}
-            AND {{{elementTypeTableName}}}.{{{nameof(DbElementType.FhirPackageKey)}}} = {{{FhirPackageKey}}}
-            """;
-
-        return command.ExecuteNonQuery();
+        return UpdateTypeKeys(dbConnection, FhirPackageKey, elementTypeTableName, structureTableName, 2);
     }
 
     public static int UpdateElementBaseKeys(
@@ -226,23 +181,64 @@ public static class DbContentExtensions
         int FhirPackageKey,
         string? dbTableName = null)
     {
-        dbTableName ??= DbElement.DefaultTableName;
+        XVerStructureCatalog catalog = new(dbConnection, elementTableName: dbTableName);
+        List<DbElement> changed = [];
+        foreach (DbElement element in DbElement.SelectList(dbConnection, dbTableName: dbTableName, FhirPackageKey: FhirPackageKey))
+        {
+            DbElement? inherited = catalog.ResolveBaseElement(element, required: false);
+            if (inherited is not null && (element.BaseElementKey != inherited.Key || element.BaseStructureKey != inherited.StructureKey))
+            {
+                element.BaseElementKey = inherited.Key;
+                element.BaseStructureKey = inherited.StructureKey;
+                changed.Add(element);
+            }
+        }
 
-        IDbCommand command = dbConnection.CreateCommand();
-        command.CommandText = $$$"""
-            UPDATE {{{dbTableName}}}
-            SET
-                {{{nameof(DbElement.BaseElementKey)}}} = E.{{{nameof(DbElement.Key)}}},
-                {{{nameof(DbElement.BaseStructureKey)}}} = E.{{{nameof(DbElement.StructureKey)}}}
-            FROM {{{dbTableName}}} E
-            WHERE {{{dbTableName}}}.{{{nameof(DbElement.Key)}}} = E.{{{nameof(DbElement.Key)}}}
-            AND {{{dbTableName}}}.{{{nameof(DbElement.BasePath)}}} is not NULL
-            AND {{{dbTableName}}}.{{{nameof(DbElement.BasePath)}}} = E.{{{nameof(DbElement.Id)}}}
-            AND {{{dbTableName}}}.{{{nameof(DbElement.BaseElementKey)}}} is NULL
-            AND {{{dbTableName}}}.{{{nameof(DbElement.FhirPackageKey)}}} = {{{FhirPackageKey}}}
-            """;
+        DbElement.Update(dbConnection, changed, dbTableName: dbTableName);
+        return changed.Count;
+    }
 
-        return command.ExecuteNonQuery();
+    private static int UpdateTypeKeys(
+        IDbConnection db, int packageKey, string? elementTypeTableName, string? structureTableName, int kind)
+    {
+        List<DbStructureDefinition> structures = DbStructureDefinition.SelectList(db, dbTableName: structureTableName);
+        List<DbElementType> changed = [];
+        foreach (DbElementType type in DbElementType.SelectList(db, dbTableName: elementTypeTableName, FhirPackageKey: packageKey))
+        {
+            string context = $"element type {type.Key}, owner {packageKey}/{type.StructureKey}";
+            int? existing = kind == 0 ? type.TypeStructureKey : kind == 1 ? type.TypeProfileStructureKey : type.TargetProfileStructureKey;
+            string? literal = kind == 0 ? type.TypeName : kind == 1 ? type.TypeProfile : type.TargetProfile;
+            if (literal is null && existing is null)
+            {
+                continue;
+            }
+
+            DbStructureDefinition? resolved = kind == 0
+                ? XVerStructureCatalog.ResolveNativeType(structures, packageKey, literal, existing, required: false, context)
+                : XVerStructureCatalog.ResolveDefinition(structures, packageKey, literal, existing, required: false, context);
+            if (resolved is null || resolved.Key == existing)
+            {
+                continue;
+            }
+
+            if (kind == 0)
+            {
+                type.TypeStructureKey = resolved.Key;
+            }
+            else if (kind == 1)
+            {
+                type.TypeProfileStructureKey = resolved.Key;
+            }
+            else
+            {
+                type.TargetProfileStructureKey = resolved.Key;
+            }
+
+            changed.Add(type);
+        }
+
+        DbElementType.Update(db, changed, dbTableName: elementTypeTableName);
+        return changed.Count;
     }
 
     private static readonly string[] _quantityTypes = [
