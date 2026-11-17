@@ -3,10 +3,15 @@
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
 
+using System.Collections.Immutable;
 using System.Data;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
+using System.Xml;
+using System.Xml.Linq;
+using System.Xml.XPath;
+using Fhir.CodeGen.Common.FhirExtensions;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.Extensions;
@@ -14,7 +19,11 @@ using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.XVer;
 using Fhir.CodeGen.Lib.Loader;
 using Fhir.CodeGen.Lib.Models;
+using Hl7.Fhir.ElementModel;
+using Hl7.Fhir.FhirPath;
 using Hl7.Fhir.Serialization;
+using Hl7.FhirPath;
+using Hl7.FhirPath.Expressions;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -961,6 +970,1294 @@ public class XVerProfileCatalogTests
 
     private const string QuantityUrl = "http://hl7.org/fhir/StructureDefinition/Quantity";
 
+    [Fact]
+    public void LocalProhibitionsAndBindingsOverrideInheritedFacts()
+    {
+        StructureDefinition inherited = ConstraintProfile("InheritedQuantity");
+        inherited.Snapshot.Element.Single(element => element.Path == "Quantity.code").Binding = new()
+        {
+            Strength = Hl7.Fhir.Model.BindingStrength.Required, ValueSet = "http://example.org/units|1",
+        };
+        StructureDefinition local = (StructureDefinition)inherited.DeepCopy();
+        local.Id = local.Name = "LocalQuantity";
+        local.Url = "http://example.org/LocalQuantity";
+        local.BaseDefinition = inherited.Url;
+        local.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        local.Snapshot.Element.Single(element => element.Path == "Quantity.code").Binding.ValueSet = "http://example.org/units|2";
+        using CatalogImport imported = ImportUses(inherited, local);
+        ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileUse use = QuantityUse(imported, facts, local);
+        use.Diagnostics.ShouldBeEmpty();
+        EffectiveProfileBranch branch = use.Branches.ShouldHaveSingleItem();
+        branch.Diagnostics.ShouldBeEmpty();
+        branch.Elements[".comparator"].Maximum.ShouldBe(0);
+        use.Permits(".comparator").ShouldBeFalse();
+        branch.Elements[".code"].Restrictions.Where(fact => fact.Kind == ProfileRestrictionKind.Binding)
+            .Select(fact => ProfileUseFacts.Text(fact.Value, "valueSet")).Distinct().ShouldBe(["http://example.org/units|1", "http://example.org/units|2"]);
+        UnsafeCodeIdentity mg = new("http://unitsofmeasure.org", "ucum-2", "mg");
+        ProfileQualification qualification = facts.QualifiedIdentities(branch, ".code",
+            new Dictionary<string, ImmutableArray<UnsafeCodeIdentity>>
+            {
+                ["http://example.org/units|1"] = [mg, new("http://unitsofmeasure.org", "ucum-1", "mg")],
+                ["http://example.org/units|2"] = [mg],
+            });
+        qualification.Identities.ShouldBe([mg]);
+        qualification.Diagnostics.ShouldBeEmpty();
+        facts.QualifiedIdentities(branch, ".code", new Dictionary<string, ImmutableArray<UnsafeCodeIdentity>>())
+            .Kind.ShouldBe(ProfileProofKind.Unsupported);
+    }
+
+    [Fact]
+    public void ProfileAlternativesDoNotConjoinBranchRestrictions()
+    {
+        StructureDefinition prohibited = ConstraintProfile("NoComparator");
+        prohibited.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        StructureDefinition permitted = ConstraintProfile("AllowsComparator");
+        DefinitionCollection definitions = UseDefinitions(prohibited, permitted);
+        StructureDefinition holder = definitions.ResourcesByName["UseHolder"];
+        holder.Snapshot.Element.Single(element => element.Path == "UseHolder.quantity").Type[0].Profile = [prohibited.Url, permitted.Url];
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = imported.Catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        DbElement element = imported.Catalog.ResolveOwnedElement(owner, "UseHolder.quantity")!;
+        DbElementType.SelectList(imported.Connection, ElementKey: element.Key).Count.ShouldBe(2);
+        EffectiveProfileUse use = facts.AtUse(owner, element, 0);
+        use.Diagnostics.ShouldBeEmpty();
+        use.Branches.Count().ShouldBe(2);
+        use.Branches.Select(branch => branch.Key.ProfileAlternative).ShouldBe([prohibited.Url, permitted.Url]);
+        use.Branches.Single(branch => branch.Key.ProfileAlternative == prohibited.Url).Elements[".comparator"].Prohibited.ShouldBeTrue();
+        use.Branches.Single(branch => branch.Key.ProfileAlternative == permitted.Url).Elements[".comparator"].Prohibited.ShouldBeFalse();
+        use.Permits(".comparator").ShouldBeTrue();
+        facts.AtUse(owner, element, 0).ShouldBeSameAs(use);
+        EffectiveProfileBranch allowed = use.Branches.Single(branch => branch.Key.ProfileAlternative == permitted.Url);
+        DbStructureDefinition native = imported.Catalog.ResolveDefinition(imported.PackageKey, permitted.Url)!;
+        ProfileRepresentationProof allowedProof = facts.Prove(allowed, native, nativeContext: allowed);
+        allowedProof.Kind.ShouldBe(ProfileProofKind.NativeReuse);
+        allowedProof.RequiredFacts[".comparator"].Maximum.ShouldBe(1);
+        ProfileRepresentationProof narrower = facts.Prove(
+            use.Branches.Single(branch => branch.Key.ProfileAlternative == prohibited.Url), native, nativeContext: allowed);
+        narrower.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        narrower.PreservesRestrictions.ShouldBeFalse();
+        narrower.RequiredFacts[".comparator"].Maximum.ShouldBe(0);
+    }
+
+    [Fact]
+    public void InheritedNarrowingAndSliceContextsRemainApplicable()
+    {
+        StructureDefinition parent = ConstraintProfile("SlicedQuantity");
+        ElementDefinition extension = parent.Snapshot.Element.Single(element => element.Path == "Quantity.extension");
+        extension.Slicing = new()
+        {
+            Rules = ElementDefinition.SlicingRules.Closed, Ordered = false,
+            Discriminator = [new() { Type = ElementDefinition.DiscriminatorType.Value, Path = "url" }],
+        };
+        foreach (string slice in new[] { "units", "other" })
+        {
+            parent.Snapshot.Element.Add(new()
+            {
+                ElementId = "Quantity.extension:" + slice, Path = "Quantity.extension", SliceName = slice,
+                Min = 0, Max = "1", Type = [new() { Code = "Extension" }],
+            });
+            parent.Snapshot.Element.Add(new()
+            {
+                ElementId = "Quantity.extension:" + slice + ".url", Path = "Quantity.extension.url",
+                Min = 1, Max = "1", Type = [new() { Code = "uri" }], Fixed = new Hl7.Fhir.Model.FhirUri("http://example.org/" + slice),
+            });
+        }
+        StructureDefinition child = (StructureDefinition)parent.DeepCopy();
+        child.Id = child.Name = "InheritedSlices";
+        child.Url = "http://example.org/InheritedSlices";
+        child.BaseDefinition = parent.Url;
+        child.Snapshot.Element.Single(element => element.ElementId == "Quantity.extension:units").Max = "0";
+        using CatalogImport imported = ImportUses(parent, child);
+        ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileUse use = QuantityUse(imported, facts, child);
+        EffectiveProfileBranch branch = use.Branches.ShouldHaveSingleItem();
+        branch.Diagnostics.ShouldBeEmpty();
+        branch.Elements.Keys.ShouldContain(".extension:units.url");
+        branch.Elements.Keys.ShouldContain(".extension:other.url");
+        branch.Elements[".extension:units.url"].Minimum.ShouldBe(1);
+        branch.Elements[".extension:units.url"].Restrictions.Where(fact => fact.Kind == ProfileRestrictionKind.Fixed)
+            .Select(fact => fact.Value.GetString()).Distinct().ShouldBe(["http://example.org/units"]);
+        branch.Elements[".extension:other.url"].Restrictions.Where(fact => fact.Kind == ProfileRestrictionKind.Fixed)
+            .Select(fact => fact.Value.GetString()).Distinct().ShouldBe(["http://example.org/other"]);
+        use.Permits(".extension:units").ShouldBeFalse();
+        use.Permits(".extension:units.url").ShouldBeFalse();
+        use.Permits(".extension:other").ShouldBeTrue();
+        branch.Elements[".extension"].Restrictions.ShouldContain(fact => fact.Kind == ProfileRestrictionKind.Slicing);
+    }
+
+    [Fact]
+    public void UnprovenNumericAndLengthBoundsRefuseNativeReuse()
+    {
+        StructureDefinition bounded = ConstraintProfile("BoundedQuantity");
+        bounded.Snapshot.Element.Single(element => element.Path == "Quantity.value").MinValue = new Hl7.Fhir.Model.FhirDecimal(0);
+        bounded.Snapshot.Element.Single(element => element.Path == "Quantity.value").MaxValue = new Hl7.Fhir.Model.FhirDecimal(100);
+        bounded.Snapshot.Element.Single(element => element.Path == "Quantity.unit").MaxLength = 8;
+        using CatalogImport imported = ImportUses(bounded);
+        ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = QuantityUse(imported, facts, bounded).Branches.ShouldHaveSingleItem();
+        DbStructureDefinition target = imported.Catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
+        ProfileRepresentationProof comparison = facts.Prove(branch, target);
+        comparison.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        comparison.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.OwnerProjectionRequired);
+        comparison.RequiredFacts.ShouldBeSameAs(branch.Elements);
+        comparison.NativeFacts.ShouldNotBeEmpty();
+        comparison.TargetCanonical.ShouldBeNull();
+        comparison.Projection.ShouldBeEmpty();
+        comparison.PreservesRestrictions.ShouldBeFalse();
+        comparison.Diagnostics.ShouldContain(message => message.Contains("minValueDecimal"));
+        comparison.Diagnostics.ShouldContain(message => message.Contains("maxLength"));
+        DbStructureDefinition holder = imported.Catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        DbElement targetUse = imported.Catalog.ResolveOwnedElement(holder, "UseHolder.native")!;
+        ProfileRepresentationProof projection = facts.Prove(branch, target, holder, targetUse, new HashSet<int> { holder.Key });
+        projection.Kind.ShouldBe(ProfileProofKind.OwnerProjection);
+        projection.Projection.Single(element => element.TargetElementId == "UseHolder.native.value").Restrictions
+            .ShouldContain(fact => fact.Name == "minValueDecimal");
+        projection.Projection.Single(element => element.TargetElementId == "UseHolder.native.unit").Restrictions
+            .ShouldContain(fact => fact.Name == "maxLength");
+    }
+
+    [Fact]
+    public void PassiveProfilesConstrainUsesWithoutStandaloneOwners()
+    {
+        StructureDefinition coding = Definition("Coding", "Coding");
+        coding.Snapshot.Element.Add(new() { ElementId = "Coding.code", Path = "Coding.code", Min = 0, Max = "1", Type = [new() { Code = "code" }] });
+        StructureDefinition passive = (StructureDefinition)coding.DeepCopy();
+        passive.Id = passive.Name = "PassiveUseCoding";
+        passive.Url = "http://example.org/PassiveUseCoding";
+        passive.Derivation = StructureDefinition.TypeDerivationRule.Constraint;
+        passive.BaseDefinition = coding.Url;
+        passive.Snapshot.Element[1].Min = 1;
+        passive.Snapshot.Element[1].Fixed = new Hl7.Fhir.Model.Code("qualified");
+        DefinitionCollection definitions = UseDefinitions();
+        AddNative(definitions, coding);
+        AddProfile(definitions, passive);
+        definitions.ResourcesByName["UseHolder"].Snapshot.Element.Add(new()
+        {
+            ElementId = "UseHolder.coding", Path = "UseHolder.coding", Min = 0, Max = "1",
+            Type = [new() { Code = "Coding", Profile = [passive.Url] }],
+        });
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        DbStructureDefinition profileOwner = catalog.ResolveDefinition(imported.PackageKey, passive.Url)!;
+        catalog.IsProcessed(profileOwner).ShouldBeFalse();
+        catalog.GetProcessedStructures(imported.PackageKey).ShouldNotContain(owner => owner.Key == profileOwner.Key);
+        DbStructureDefinition holder = catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileUse use = facts.AtUse(holder, catalog.ResolveOwnedElement(holder, "UseHolder.coding")!, 0);
+        use.Branches.ShouldHaveSingleItem().Elements[".code"].Minimum.ShouldBe(1);
+        use.Branches[0].Elements[".code"].Restrictions.ShouldContain(fact => fact.Name == "fixedCode" && fact.Value.GetString() == "qualified");
+    }
+
+    [Fact]
+    public void OpaqueInvariantIsNotQualificationOrCompatibility()
+    {
+        StructureDefinition profile = ConstraintProfile("OpaqueQuantity");
+        profile.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "sqty-1", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error, Human = "Not a comparator theorem",
+            Expression = "code.exists() implies system.exists()",
+            Extension = [new() { Url = ProfileUseFacts.XPathExtensionUrl, Value = new Hl7.Fhir.Model.FhirString("f:code/f:unexpected") }],
+            Source = profile.Url + "|definition-1",
+        });
+        using CatalogImport imported = ImportUses(profile);
+        XVerStructureCatalog catalog = imported.Catalog;
+        ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        ProfileInvariant invariant = branch.Elements[""].Invariants.ShouldHaveSingleItem();
+        invariant.Key.ShouldBe("sqty-1");
+        invariant.Expression.ShouldBe(profile.Snapshot.Element[0].Constraint[0].Expression);
+        invariant.XPath.ShouldBe("f:code/f:unexpected");
+        invariant.Human.ShouldBe("Not a comparator theorem");
+        invariant.Source.ShouldBe(profile.Url + "|definition-1");
+        invariant.Origin.OwnerKey.ShouldBe(owner.Key);
+        facts.QualifiedIdentities(branch, ".code", new Dictionary<string, ImmutableArray<UnsafeCodeIdentity>>())
+            .Kind.ShouldBe(ProfileProofKind.Unsupported);
+        ProfileRepresentationProof negative = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!);
+        negative.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        negative.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.InvariantTransformation);
+        negative.RequiredFacts[""].Invariants.ShouldHaveSingleItem().Value.GetRawText().ShouldBe(invariant.Value.GetRawText());
+        negative.PreservesRestrictions.ShouldBeFalse();
+        negative.TargetCanonical.ShouldBeNull();
+        negative.Projection.ShouldBeEmpty();
+        ProfileRepresentationProof exact = facts.Prove(branch, owner);
+        exact.Kind.ShouldBe(ProfileProofKind.NativeReuse);
+        exact.TargetCanonical.ShouldBe(profile.Url + "|definition-1");
+        exact.RequiredFacts[""].Invariants.ShouldHaveSingleItem().Value.GetRawText().ShouldBe(invariant.Value.GetRawText());
+    }
+
+    [Fact]
+    public void NativeReuseOrProjectionMustPreserveAllRequiredRestrictions()
+    {
+        StructureDefinition simple = ConstraintProfile("SlicedSimple", slicedRoot: true);
+        simple.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        simple.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "sqty-1", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error, Human = "No comparator",
+            Expression = "comparator.empty()", Source = simple.Url,
+            Extension = [new() { Url = ProfileUseFacts.XPathExtensionUrl, Value = new Hl7.Fhir.Model.FhirString("not(exists(f:comparator))") }],
+        });
+        using CatalogImport imported = ImportUses(simple);
+        XVerStructureCatalog catalog = imported.Catalog;
+        ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch source = QuantityUse(imported, facts, simple).Branches.ShouldHaveSingleItem();
+        source.Root.Id.ShouldBe("Quantity:fixture");
+        DbStructureDefinition holder = catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        DbElement targetUse = catalog.ResolveOwnedElement(holder, "UseHolder.native")!;
+        ProfileRepresentationProof proof = facts.Prove(source, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!, holder, targetUse,
+            new HashSet<int> { holder.Key });
+        proof.Kind.ShouldBe(ProfileProofKind.OwnerProjection);
+        proof.PreservesRestrictions.ShouldBeTrue();
+        proof.SourceRoot.ElementId.ShouldBe("Quantity:fixture");
+        proof.Projection.Single(element => element.TargetElementId == targetUse.Id + ".comparator").Maximum.ShouldBe(0);
+        ProfileRestriction projected = proof.Projection.Single(element => element.TargetElementId == targetUse.Id).Restrictions
+            .Single(fact => fact.Kind == ProfileRestrictionKind.Invariant);
+        projected.Value.GetProperty("expression").GetString().ShouldBe("comparator.empty()");
+        ProfileUseFacts.InvariantXPath(projected.Value).ShouldBe("not(exists(f:comparator))");
+        projected.Origin.ElementId.ShouldBe("Quantity:fixture");
+        facts.Prove(source, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).PreservesRestrictions.ShouldBeFalse();
+
+        simple.Snapshot.Element.Single(element => element.Path == "Quantity.value").Extension.Add(new()
+        {
+            Url = "http://example.org/required-semantic-extension", Value = new Hl7.Fhir.Model.FhirBoolean(true),
+        });
+        using CatalogImport unsupported = ImportUses(simple);
+        ProfileUseFacts unknown = new(unsupported.Catalog, unsupported.PackageKey, unsupported.PackageKey);
+        EffectiveProfileBranch required = QuantityUse(unsupported, unknown, simple).Branches.ShouldHaveSingleItem();
+        ProfileRepresentationProof refusal = unknown.Prove(required, unsupported.Catalog.ResolveNativeType(unsupported.PackageKey, "Quantity")!);
+        refusal.Kind.ShouldBe(ProfileProofKind.Unsupported);
+        refusal.IsAcceptedDecision.ShouldBeFalse();
+        refusal.RequiredFacts.ShouldBeSameAs(required.Elements);
+        refusal.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.UnclassifiedRestriction);
+        refusal.Diagnostics.ShouldContain(message => message.Contains("pair") && message.Contains(simple.Url) &&
+            message.Contains("Quantity:fixture.value") && message.Contains("extension"));
+        refusal.PreservesRestrictions.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void XPathOnlyComparatorRuleHasBoundedProjectionWhenActuallyPresent()
+    {
+        StructureDefinition simple = ConstraintProfile("XPathQuantity");
+        simple.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        simple.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "sqty-1", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error, Human = "No comparator",
+            Extension = [new() { Url = ProfileUseFacts.XPathExtensionUrl, Value = new Hl7.Fhir.Model.FhirString("not(exists(f:comparator))") }],
+        });
+        using CatalogImport imported = ImportUses(simple);
+        XVerStructureCatalog catalog = imported.Catalog;
+        ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = QuantityUse(imported, facts, simple).Branches.ShouldHaveSingleItem();
+        branch.Elements[""].Invariants.ShouldHaveSingleItem().XPath.ShouldBe("not(exists(f:comparator))");
+        DbStructureDefinition holder = catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!,
+            holder, catalog.ResolveOwnedElement(holder, "UseHolder.native")!, new HashSet<int> { holder.Key });
+        proof.Kind.ShouldBe(ProfileProofKind.OwnerProjection);
+        ProfileRestriction constraint = proof.Projection.Single(element => element.TargetElementId == "UseHolder.native")
+            .Restrictions.Single(fact => fact.Kind == ProfileRestrictionKind.Invariant);
+        ProfileUseFacts.Text(constraint.Value, "expression").ShouldBe("comparator.empty()");
+        ProfileUseFacts.InvariantXPath(constraint.Value).ShouldBe("not(exists(f:comparator))");
+    }
+
+    [Fact]
+    public void ConvertedDstu2XPathSurvivesPersistedFactsAndEffectiveInheritance()
+    {
+        const string xpath = "not(exists(f:comparator))";
+        string json = """
+            {
+              "resourceType":"StructureDefinition","id":"RetainedQuantity",
+              "url":"http://example.org/RetainedQuantity","version":"fixture-2","name":"RetainedQuantity",
+              "status":"active","kind":"datatype","abstract":false,"constrainedType":"Quantity",
+              "base":"http://hl7.org/fhir/StructureDefinition/Quantity",
+              "snapshot":{"element":[{"path":"Quantity","min":0,"max":"*","constraint":[{
+                "key":"original-key","severity":"warning","human":"Original human text",
+                "source":"http://example.org/original|origin-2","xpath":"not(exists(f:comparator))"
+              }]}]},
+              "differential":{"element":[{"path":"Quantity","constraint":[{
+                "key":"original-key","severity":"warning","human":"Original human text",
+                "source":"http://example.org/original|origin-2","xpath":"not(exists(f:comparator))"
+              }]}]}
+            }
+            """;
+        Fhir.CodeGen.CrossVersionLoader.Converter_20_50 converter = new();
+        StructureDefinition profile = converter.Convert(FhirJsonNode.Parse(json)).ShouldBeOfType<StructureDefinition>();
+        profile.Snapshot.Element[0].Constraint[0].Expression.ShouldBeNull();
+        profile.Snapshot.Element[0].Constraint[0].Extension.ShouldHaveSingleItem().Url
+            .ShouldBe(CommonDefinitions.ExtUrlEdConstraintXPath);
+        StructureDefinition child = ConstraintProfile("InheritedRetainedQuantity");
+        child.BaseDefinition = profile.Url;
+        using CatalogImport imported = ImportUses(profile, child);
+        DbStructureDefinition owner = imported.Catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
+        DbStructureDefinitionFacts persisted = DbStructureDefinitionFacts.SelectList(imported.Connection)
+            .Single(row => row.StructureKey == owner.Key);
+        StructureDefinition recovered = new FhirJsonParser().Parse<StructureDefinition>(persisted.StructureDefinitionJson);
+        recovered.Differential.Element.ShouldHaveSingleItem().Constraint.ShouldHaveSingleItem()
+            .Extension.ShouldHaveSingleItem().Value.ShouldBeOfType<Hl7.Fhir.Model.FhirString>().Value.ShouldBe(xpath);
+        ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch effective = facts.ForDefinition(imported.Catalog.ResolveDefinition(imported.PackageKey, child.Url)!);
+        ProfileInvariant invariant = effective.Elements[""].Invariants.ShouldHaveSingleItem();
+        invariant.Key.ShouldBe("original-key");
+        invariant.Severity.ShouldBe("warning");
+        invariant.Human.ShouldBe("Original human text");
+        invariant.Source.ShouldBe("http://example.org/original|origin-2");
+        invariant.XPath.ShouldBe(xpath);
+        invariant.Expression.ShouldBeNull();
+        invariant.Origin.OwnerKey.ShouldBe(owner.Key);
+        invariant.Origin.Canonical.ShouldBe(profile.Url);
+        invariant.Origin.Version.ShouldBe("fixture-2");
+        invariant.Origin.ElementId.ShouldBe("Quantity");
+        facts.Prove(effective, imported.Catalog.ResolveDefinition(imported.PackageKey, child.Url)!)
+            .Kind.ShouldBe(ProfileProofKind.NativeReuse);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("wrong-value")]
+    [InlineData("duplicate")]
+    [InlineData("duplicate-with-expression")]
+    [InlineData("unknown-url")]
+    [InlineData("old-guessed-url")]
+    public void MalformedOrUnknownXPathCannotAuthorizeProof(string scenario)
+    {
+        StructureDefinition profile = ConstraintProfile("MalformedXPath");
+        Hl7.Fhir.Model.Extension extension = new()
+        {
+            Url = CommonDefinitions.ExtUrlEdConstraintXPath,
+            Value = new Hl7.Fhir.Model.FhirString("not(exists(f:comparator))"),
+        };
+        ElementDefinition.ConstraintComponent constraint = new()
+        {
+            Key = "sqty-1", Human = "A name is not semantic evidence.", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error,
+        };
+        if (scenario != "missing")
+        {
+            constraint.Extension.Add(extension);
+        }
+        if (scenario == "wrong-value")
+        {
+            extension.Value = new Hl7.Fhir.Model.FhirBoolean(true);
+        }
+        if (scenario.StartsWith("duplicate", StringComparison.Ordinal))
+        {
+            constraint.Extension.Add((Hl7.Fhir.Model.Extension)extension.DeepCopy());
+        }
+        if (scenario == "duplicate-with-expression")
+        {
+            constraint.Expression = "comparator.empty()";
+        }
+        if (scenario == "unknown-url")
+        {
+            extension.Url = "http://example.org/extension-ElementDefinition.constraint.xpath";
+        }
+        if (scenario == "old-guessed-url")
+        {
+            extension.Url = "http://hl7.org/fhir/4.0/StructureDefinition/extension-ElementDefinition.constraint.xpath";
+        }
+        profile.Snapshot.Element[0].Constraint.Add(constraint);
+        using CatalogImport imported = ImportUses(profile);
+        XVerStructureCatalog catalog = imported.Catalog;
+        DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
+        ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        branch.Elements[""].Invariants.ShouldHaveSingleItem().XPath.ShouldBeNull();
+        string? revision = DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision;
+        ProfileRepresentationProof proof = facts.Prove(branch, owner);
+        proof.Kind.ShouldBe(ProfileProofKind.Unsupported);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+        proof.RequiredFacts.ShouldBeSameAs(branch.Elements);
+        proof.NativeFacts.ShouldNotBeEmpty();
+        proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.UnclassifiedRestriction);
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.Diagnostics.ShouldContain(message => message.Contains(profile.Url) && message.Contains("pair"));
+        DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision.ShouldBe(revision);
+        catalog.ReadPayload(owner).ToJson().ShouldBe(profile.ToJson());
+    }
+
+    [Fact]
+    public void ProjectionRequiresTheActualEmittedOwnerSchedule()
+    {
+        StructureDefinition profile = ConstraintProfile("RequiresProjection");
+        profile.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        using CatalogImport imported = ImportUses(profile);
+        XVerStructureCatalog catalog = imported.Catalog;
+        ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = QuantityUse(imported, facts, profile).Branches.ShouldHaveSingleItem();
+        DbStructureDefinition holder = catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        DbElement occurrence = catalog.ResolveOwnedElement(holder, "UseHolder.native")!;
+        ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!, holder, occurrence);
+        proof.Kind.ShouldBe(ProfileProofKind.Unsupported);
+        proof.Diagnostics.ShouldContain(message => message.Contains("actual emitted owner schedule"));
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData("unknown-extension", false)]
+    [InlineData("unknown-extension", true)]
+    [InlineData("binding-extension", false)]
+    [InlineData("binding-extension", true)]
+    [InlineData("missing-binding-domain", false)]
+    [InlineData("missing-invariant-semantics", true)]
+    [InlineData("unknown-slicing", false)]
+    [InlineData("type-obligation", true)]
+    [InlineData("default-value", false)]
+    public void UnclassifiedFactsCannotHideBehindAKnownNegative(string scenario, bool onTarget)
+    {
+        StructureDefinition source = ConstraintProfile("KnownNarrowing");
+        source.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        StructureDefinition target = ConstraintProfile("UnknownTarget");
+        ElementDefinition element = (onTarget ? target : source).Snapshot.Element.Single(element => element.Path == "Quantity.code");
+        switch (scenario)
+        {
+            case "unknown-extension":
+                element.Extension.Add(new("http://example.org/unknown-semantics", new Hl7.Fhir.Model.FhirBoolean(true)));
+                break;
+            case "binding-extension":
+            case "missing-binding-domain":
+                element.Binding = new() { Strength = Hl7.Fhir.Model.BindingStrength.Required };
+                if (scenario == "binding-extension")
+                {
+                    element.Binding.ValueSet = "http://example.org/domain|1";
+                    element.Binding.Extension.Add(new("http://example.org/unknown-binding", new Hl7.Fhir.Model.FhirBoolean(true)));
+                }
+                break;
+            case "missing-invariant-semantics":
+                element.Constraint.Add(new() { Key = "unknown", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error, Human = "No semantics." });
+                break;
+            case "unknown-slicing":
+                element.Slicing = new() { Rules = ElementDefinition.SlicingRules.Closed,
+                    Discriminator = [new() { Type = ElementDefinition.DiscriminatorType.Value }] };
+                break;
+            case "type-obligation":
+                element.Type[0].Aggregation = [ElementDefinition.AggregationMode.Contained];
+                break;
+            case "default-value":
+                element.DefaultValue = new Hl7.Fhir.Model.Code("implicit");
+                break;
+        }
+        using CatalogImport imported = ImportUses(source, target);
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!);
+        ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveDefinition(imported.PackageKey, target.Url)!);
+        proof.Kind.ShouldBe(ProfileProofKind.Unsupported);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+        proof.RequiredFacts.ShouldBeSameAs(branch.Elements);
+        proof.NativeFacts.ShouldNotBeEmpty();
+        proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.UnclassifiedRestriction &&
+            reason.Origin.Canonical == (onTarget ? target.Url : source.Url));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void MissingRootFactsAndInvalidOwnersRemainUnresolved(bool missingRoot)
+    {
+        StructureDefinition profile = ConstraintProfile("InvalidDecision");
+        profile.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        using CatalogImport imported = ImportUses(profile);
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, profile.Url)!);
+        branch = missingRoot ? branch with { Elements = branch.Elements.Remove("") } :
+            branch with { Key = branch.Key with { OwnerKey = -1 } };
+        ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!);
+        proof.Kind.ShouldBe(missingRoot ? ProfileProofKind.MissingFacts : ProfileProofKind.ConflictingFacts);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+        proof.ProjectionOwner.ShouldBeNull();
+        proof.RequiredFacts.ShouldBeSameAs(branch.Elements);
+        proof.NativeFacts.ShouldNotBeEmpty();
+    }
+
+    [Fact]
+    public void BindingMetadataDoesNotEraseAdditionalDomainObligations()
+    {
+        StructureDefinition profile = ConstraintProfile("AdditionalDomain");
+        profile.Snapshot.Element[0].Binding = new()
+        {
+            Extension = [new(CommonDefinitions.ExtUrlBindingName, new Hl7.Fhir.Model.FhirString("Only a name"))],
+        };
+        ElementDefinition code = profile.Snapshot.Element.Single(element => element.Path == "Quantity.code");
+        code.Binding = new()
+        {
+            Strength = Hl7.Fhir.Model.BindingStrength.Required, ValueSet = "http://example.org/domain|1",
+            Additional = [new() { Purpose = ElementDefinition.AdditionalBindingPurposeVS.Maximum,
+                ValueSet = "http://example.org/maximum|2", Documentation = "Retained additional domain." }],
+        };
+        using CatalogImport imported = ImportUses(profile);
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        branch.Elements[""].Restrictions.ShouldNotContain(fact => fact.Kind == ProfileRestrictionKind.Binding);
+        ProfileRepresentationProof negative = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!);
+        negative.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        negative.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.Binding);
+        JsonElement additional = negative.RequiredFacts[".code"].Restrictions.Single(fact => fact.Kind == ProfileRestrictionKind.Binding)
+            .Value.GetProperty("additional")[0];
+        additional.GetProperty("purpose").GetString().ShouldBe("maximum");
+        additional.GetProperty("valueSet").GetString().ShouldBe("http://example.org/maximum|2");
+        additional.GetProperty("documentation").GetString().ShouldBe("Retained additional domain.");
+        negative.PreservesRestrictions.ShouldBeFalse();
+        negative.TargetCanonical.ShouldBeNull();
+        negative.Projection.ShouldBeEmpty();
+        facts.Prove(branch, owner).Kind.ShouldBe(ProfileProofKind.NativeReuse);
+    }
+
+    [Fact]
+    public void OccurrenceBindingSupplementsRatherThanWeakensDatatypeDomain()
+    {
+        StructureDefinition profile = ConstraintProfile("RequiredUnits");
+        profile.Snapshot.Element[0].Binding = new()
+        {
+            Strength = Hl7.Fhir.Model.BindingStrength.Required, ValueSet = "http://example.org/units|1",
+        };
+        DefinitionCollection definitions = UseDefinitions(profile);
+        definitions.ResourcesByName["UseHolder"].Snapshot.Element.Single(element => element.Path == "UseHolder.quantity").Binding = new()
+        {
+            Strength = Hl7.Fhir.Model.BindingStrength.Extensible, ValueSet = "http://example.org/occurrence|2",
+        };
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = QuantityUse(imported, facts, profile).Branches.ShouldHaveSingleItem();
+        branch.Diagnostics.ShouldBeEmpty();
+        ProfileRestriction[] bindings = [.. branch.Elements[""].Restrictions.Where(fact => fact.Kind == ProfileRestrictionKind.Binding)];
+        bindings.Select(fact => ProfileUseFacts.Text(fact.Value, "strength")).ShouldBe(["required", "extensible"]);
+        bindings.Select(fact => ProfileUseFacts.Text(fact.Value, "valueSet")).ShouldBe(["http://example.org/units|1", "http://example.org/occurrence|2"]);
+        ProfileRepresentationProof negative = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!);
+        negative.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        negative.RequiredFacts[""].Restrictions.Where(fact => fact.Kind == ProfileRestrictionKind.Binding).ShouldBe(bindings);
+        negative.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.Binding);
+        negative.PreservesRestrictions.ShouldBeFalse();
+        negative.TargetCanonical.ShouldBeNull();
+        negative.Projection.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void IncompleteTargetProjectionIsNotEvidenceOfAnAbsentField()
+    {
+        StructureDefinition source = ConstraintProfile("CompleteSource");
+        StructureDefinition target = ConstraintProfile("IncompleteTarget");
+        using CatalogImport imported = ImportUses(source, target);
+        DbStructureDefinition targetOwner = imported.Catalog.ResolveDefinition(imported.PackageKey, target.Url)!;
+        DbStructureDefinitionFacts payload = DbStructureDefinitionFacts.SelectList(imported.Connection)
+            .Single(row => row.StructureKey == targetOwner.Key);
+        target.Snapshot.Element.Add(new() { ElementId = "Quantity.unprojected", Path = "Quantity.unprojected",
+            Min = 0, Max = "1", Type = [new() { Code = "code" }] });
+        payload.StructureDefinitionJson = new FhirJsonSerializer().SerializeToString(target);
+        DbStructureDefinitionFacts.Update(imported.Connection, payload);
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!);
+        string? revision = DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision;
+        ProfileRepresentationProof proof = facts.Prove(branch, targetOwner);
+        proof.Kind.ShouldBe(ProfileProofKind.MissingFacts);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+        proof.Diagnostics.ShouldContain(message => message.Contains("projection") && message.Contains(target.Url));
+        DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision.ShouldBe(revision);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void MissingDeclaredDatatypeOrKindCannotBecomeANegativeDecision(bool missingType)
+    {
+        StructureDefinition profile = ConstraintProfile("MissingDeclaration");
+        using CatalogImport imported = ImportUses(profile);
+        DbStructureDefinition owner = imported.Catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
+        DbStructureDefinitionFacts stored = DbStructureDefinitionFacts.SelectList(imported.Connection)
+            .Single(row => row.StructureKey == owner.Key);
+        if (missingType)
+        {
+            profile.Type = stored.Type = null;
+        }
+        else
+        {
+            profile.Kind = null;
+            stored.Kind = null;
+        }
+        stored.StructureDefinitionJson = new FhirJsonSerializer().SerializeToString(profile);
+        DbStructureDefinitionFacts.Update(imported.Connection, stored);
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, profile.Url)!);
+        ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!);
+        proof.Kind.ShouldBe(ProfileProofKind.MissingFacts);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+        proof.RequiredFacts.ShouldBeSameAs(branch.Elements);
+        proof.NativeFacts.ShouldNotBeEmpty();
+    }
+
+    [Theory]
+    [InlineData("id", false)]
+    [InlineData("extension", true)]
+    [InlineData("value", true)]
+    public void ElementExistenceTransformIsBoundedToTheActualQuantityShape(string content, bool expected)
+    {
+        const string xpath = "@value|f:*|h:div";
+        const string expression = "hasValue() or (children().count() > id.count()) or $this is Parameters";
+        StructureDefinition legacy = ConstraintProfile("LegacyElementRule");
+        legacy.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "legacy-key", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error, Human = "An XML child is required.",
+            Extension = [new() { Url = CommonDefinitions.ExtUrlEdConstraintXPath, Value = new Hl7.Fhir.Model.FhirString(xpath) }],
+        });
+        StructureDefinition modern = ConstraintProfile("ModernElementRule");
+        modern.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "different-key", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error,
+            Human = "A non-id child is required.", Expression = expression,
+        });
+        DefinitionCollection definitions = UseDefinitions(legacy, modern);
+        definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Add(new()
+        {
+            ElementId = "Quantity.id", Path = "Quantity.id", Min = 0, Max = "1",
+            Representation = [ElementDefinition.PropertyRepresentation.XmlAttr], Type = [new() { Code = "id" }],
+        });
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, legacy.Url)!);
+        ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveDefinition(imported.PackageKey, modern.Url)!);
+        proof.Kind.ShouldBe(ProfileProofKind.NativeReuse);
+        proof.RequiredFacts[""].Invariants.ShouldHaveSingleItem().XPath.ShouldBe(xpath);
+        proof.RequiredFacts[""].Invariants.ShouldHaveSingleItem().Key.ShouldBe("legacy-key");
+        proof.NativeFacts[""].Invariants.ShouldHaveSingleItem().Key.ShouldBe("different-key");
+        string xmlChild = content switch
+        {
+            "extension" => """<extension url="http://example.org/test"><valueBoolean value="true"/></extension>""",
+            "value" => """<value value="1"/>""",
+            _ => "",
+        };
+        XDocument xml = XDocument.Parse($"""<Quantity xmlns="http://hl7.org/fhir" id="fixture">{xmlChild}</Quantity>""");
+        XmlNamespaceManager namespaces = new(new NameTable());
+        namespaces.AddNamespace("f", "http://hl7.org/fhir");
+        namespaces.AddNamespace("h", "http://www.w3.org/1999/xhtml");
+        ((bool)xml.Root!.XPathEvaluate("boolean(" + xpath + ")", namespaces)).ShouldBe(expected);
+        Hl7.Fhir.Model.Quantity instance = new() { ElementId = "fixture" };
+        if (content == "value")
+        {
+            instance.Value = 1;
+        }
+        else if (content == "extension")
+        {
+            instance.Extension.Add(new("http://example.org/test", new Hl7.Fhir.Model.FhirBoolean(true)));
+        }
+        FhirPathCompiler compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+        compiler.Compile(expression)(instance.ToTypedElement(), new EvaluationContext())
+            .ShouldHaveSingleItem().Value.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void ContradictoryOrUnknownXPathIsNotAnExpressionAlias()
+    {
+        StructureDefinition source = ConstraintProfile("ContradictoryQuantity");
+        source.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "sqty-1", Human = "The key and expression do not excuse another unknown representation.",
+            Severity = Hl7.Fhir.Model.ConstraintSeverity.Error, Expression = "comparator.empty()",
+            Extension = [new() { Url = CommonDefinitions.ExtUrlEdConstraintXPath, Value = new Hl7.Fhir.Model.FhirString("f:unexpected") }],
+        });
+        StructureDefinition target = ConstraintProfile("ExpressionOnlyQuantity");
+        target.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "sqty-1", Human = "No comparator.", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error, Expression = "comparator.empty()",
+        });
+        using CatalogImport imported = ImportUses(source, target);
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!),
+            catalog.ResolveDefinition(imported.PackageKey, target.Url)!);
+        proof.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.InvariantTransformation);
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+        proof.Diagnostics.ShouldContain(message => message.Contains("unsupported projection of constraint"));
+    }
+
+    [Fact]
+    public void LocalUnboundedMaximumCannotLoosenAnInheritedLimit()
+    {
+        StructureDefinition parent = ConstraintProfile("LimitedQuantity");
+        StructureDefinition child = (StructureDefinition)parent.DeepCopy();
+        child.Id = child.Name = "IllegalLoosening";
+        child.Url = "http://example.org/IllegalLoosening";
+        child.BaseDefinition = parent.Url;
+        child.Snapshot.Element.Single(element => element.Path == "Quantity.code").Max = "*";
+        using CatalogImport imported = ImportUses(parent, child);
+        ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileUse use = QuantityUse(imported, facts, child);
+        EffectiveProfileBranch branch = use.Branches.ShouldHaveSingleItem();
+        branch.Elements[".code"].Maximum.ShouldBe(1);
+        branch.Diagnostics.ShouldContain(message => message.Contains("illegally loosens"));
+        use.Permits(".code").ShouldBeFalse();
+        facts.Prove(branch, imported.Catalog.ResolveNativeType(imported.PackageKey, "Quantity")!)
+            .Kind.ShouldBe(ProfileProofKind.ConflictingFacts);
+    }
+
+    [Fact]
+    public void ProjectionCannotIgnoreRestrictionsAtTheActualTargetOccurrence()
+    {
+        StructureDefinition profile = ConstraintProfile("SourceQuantity");
+        profile.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        DefinitionCollection definitions = UseDefinitions(profile);
+        definitions.ResourcesByName["UseHolder"].Snapshot.Element.Add(new()
+        {
+            ElementId = "UseHolder.native.system", Path = "UseHolder.native.system", Min = 1, Max = "1",
+            Type = [new() { Code = "uri" }], Fixed = new Hl7.Fhir.Model.FhirUri("http://example.org/target-only"),
+        });
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch source = QuantityUse(imported, facts, profile).Branches.ShouldHaveSingleItem();
+        DbStructureDefinition holder = imported.Catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        ProfileRepresentationProof refusal = facts.Prove(source,
+            imported.Catalog.ResolveNativeType(imported.PackageKey, "Quantity")!, holder,
+            imported.Catalog.ResolveOwnedElement(holder, "UseHolder.native")!, new HashSet<int> { holder.Key });
+        refusal.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        refusal.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.RestrictionTransformation);
+        refusal.PreservesRestrictions.ShouldBeFalse();
+        refusal.TargetCanonical.ShouldBeNull();
+        refusal.Projection.ShouldBeEmpty();
+        refusal.Diagnostics.ShouldContain(message => message.Contains("target restriction not entailed") &&
+            message.Contains("UseHolder.native.system"));
+    }
+
+    [Theory]
+    [InlineData("different", false)]
+    [InlineData("different", true)]
+    [InlineData("missing", false)]
+    [InlineData("missing", true)]
+    [InlineData("ambiguous", false)]
+    [InlineData("ambiguous", true)]
+    [InlineData("qualified", false)]
+    [InlineData("qualified", true)]
+    [InlineData("wrong-version", false)]
+    [InlineData("wrong-version", true)]
+    [InlineData("identical", false)]
+    [InlineData("identical", true)]
+    public void ChildProfileReuseRequiresResolvedApplicableFacts(string scenario, bool targetProfile)
+    {
+        DefinitionCollection sourceDefinitions = ChildProfileDefinitions("source", "http://example.org/source", targetProfile);
+        DefinitionCollection targetDefinitions = ChildProfileDefinitions("target",
+            scenario == "different" ? "http://example.org/target" : "http://example.org/source", targetProfile);
+        if (scenario == "different")
+        {
+            targetDefinitions.ProfilesByUrl[ChildProfileUrl].Version = "child-2";
+        }
+        foreach (DefinitionCollection definitions in new[] { sourceDefinitions, targetDefinitions })
+        {
+            StructureDefinition quantity = definitions.ComplexTypesByName["Quantity"];
+            ElementDefinition.TypeRefComponent type = quantity.Snapshot.Element.Single(element =>
+                element.Path == (targetProfile ? "Quantity.reference" : "Quantity.extension")).Type[0];
+            if (scenario is "qualified" or "wrong-version")
+            {
+                string canonical = ChildProfileUrl + (scenario == "wrong-version" ? "|absent-version" : "|child-1");
+                if (targetProfile)
+                {
+                    type.TargetProfile = [canonical];
+                }
+                else
+                {
+                    type.Profile = [canonical];
+                }
+            }
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        if (scenario is "missing" or "ambiguous" or "qualified")
+        {
+            foreach (DbStructureDefinition child in DbStructureDefinition.SelectList(imported.Connection)
+                .Where(owner => owner.UnversionedUrl == ChildProfileUrl))
+            {
+                if (scenario == "missing")
+                {
+                    using IDbCommand delete = imported.Connection.CreateCommand();
+                    delete.CommandText = $"DELETE FROM StructureDefinitionFacts WHERE StructureKey = {child.Key}; DELETE FROM Structures WHERE Key = {child.Key}";
+                    delete.ExecuteNonQuery();
+                }
+                else
+                {
+                    StructureDefinition extra = (StructureDefinition)(child.FhirPackageKey == imported.PackageKey
+                        ? sourceDefinitions : targetDefinitions).ProfilesByUrl[ChildProfileUrl].DeepCopy();
+                    extra.Version = "child-2";
+                    extra.Snapshot.Element[1].Fixed = new Hl7.Fhir.Model.FhirUri("http://example.org/other-version");
+                    int key = DbStructureDefinition.SelectList(imported.Connection).Max(owner => owner.Key) + 1;
+                    DbFhirPackage package = DbFhirPackage.SelectSingle(imported.Connection, Key: child.FhirPackageKey)!;
+                    DbStructureDefinition.Insert(imported.Connection, new TestStructure(package, key, extra), insertPrimaryKey: true);
+                    DbStructureDefinitionFacts.Insert(imported.Connection,
+                        StructureDefinitionFactsStore.CreateFacts(key, package.Key, key, extra), insertPrimaryKey: true);
+                    // Copy the exact owner projection with fresh keys, without introducing another native Extension.
+                    foreach (DbElement element in DbElement.SelectList(imported.Connection, StructureKey: child.Key).OrderBy(row => row.ResourceFieldOrder))
+                    {
+                        int? parentOrder = element.ParentElementKey is null ? null : 0;
+                        element.Key = DbElement.SelectList(imported.Connection).Max(row => row.Key) + 1;
+                        element.StructureKey = key;
+                        element.ParentElementKey = parentOrder is null ? null :
+                            DbElement.SelectList(imported.Connection, StructureKey: key).Single(row => row.ResourceFieldOrder == parentOrder).Key;
+                        DbElement.Insert(imported.Connection, element, insertPrimaryKey: true);
+                    }
+                }
+            }
+            // Stale importer links cannot be used to disambiguate an unversioned declaration.
+            foreach (DbElementType type in DbElementType.SelectList(imported.Connection).Where(type =>
+                UnsafeCodeCanonical.Parse(targetProfile ? type.TargetProfile : type.TypeProfile).Url == ChildProfileUrl))
+            {
+                type.TypeProfileStructureKey = null;
+                type.TargetProfileStructureKey = null;
+                DbElementType.Update(imported.Connection, type);
+            }
+        }
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        DbStructureDefinition source = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
+        DbStructureDefinition target = catalog.ResolveNativeType(targetPackage, "Quantity")!;
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), target);
+        if (scenario is "missing" or "ambiguous" or "wrong-version")
+        {
+            proof.Kind.ShouldBe(ProfileProofKind.MissingFacts);
+            proof.IsAcceptedDecision.ShouldBeFalse();
+            proof.Diagnostics.ShouldContain(message => message.Contains(ChildProfileUrl) &&
+                message.Contains(scenario == "wrong-version" ? "absent-version" : scenario));
+        }
+        else if (scenario == "different")
+        {
+            proof.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+            proof.IsAcceptedDecision.ShouldBeTrue();
+            proof.PreservesRestrictions.ShouldBeFalse();
+            proof.Reasons.ShouldContain(reason => reason.Restriction != null &&
+                reason.Restriction.Name == "fixedUri" && reason.Origin.Canonical == ChildProfileUrl);
+            proof.ChildProofs.ShouldContain(child => child.TargetRoot!.Version == "child-2" &&
+                child.RequiredFacts.Values.Any(element => element.Restrictions.Any(fact => fact.Name == "fixedUri")));
+        }
+        else
+        {
+            proof.Kind.ShouldBe(ProfileProofKind.NativeReuse, string.Join("; ", proof.Diagnostics));
+            proof.PreservesRestrictions.ShouldBeTrue();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MissingOrdinaryChildTypesAreNotAcceptedNegatives(bool onTarget)
+    {
+        DefinitionCollection sourceDefinitions = UseDefinitions();
+        DefinitionCollection targetDefinitions = UseDefinitions();
+        targetDefinitions.MainPackageId = "example.target";
+        (onTarget ? targetDefinitions : sourceDefinitions).ComplexTypesByName["Quantity"]
+            .Snapshot.Element.Single(element => element.Path == "Quantity.code").Type.Clear();
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+            catalog.ResolveNativeType(targetPackage, "Quantity")!);
+        proof.Kind.ShouldBe(ProfileProofKind.MissingFacts);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.Diagnostics.ShouldContain(message => message.Contains("Quantity.code") && message.Contains("type"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NewOptionalSlicesDoNotInheritTheAggregateMinimum(bool patterned)
+    {
+        StructureDefinition parent = ConstraintProfile("AggregateQuantity");
+        ElementDefinition group = parent.Snapshot.Element.Single(element => element.Path == "Quantity.extension");
+        group.Min = 1;
+        group.Max = "*";
+        group.Pattern = patterned ? new Hl7.Fhir.Model.Extension { Url = "http://example.org/group-pattern" } : null;
+        group.Slicing = new() { Rules = ElementDefinition.SlicingRules.Open,
+            Discriminator = [new() { Type = ElementDefinition.DiscriminatorType.Value, Path = "url" }] };
+        StructureDefinition child = (StructureDefinition)parent.DeepCopy();
+        child.Id = child.Name = "OptionalSlices";
+        child.Url = "http://example.org/OptionalSlices";
+        child.BaseDefinition = parent.Url;
+        foreach (string slice in new[] { "first", "second" })
+        {
+            child.Snapshot.Element.Add(new() { ElementId = "Quantity.extension:" + slice, Path = "Quantity.extension",
+                SliceName = slice, Min = 0, Max = "1", Type = [new() { Code = "Extension" }] });
+        }
+        DefinitionCollection definitions = UseDefinitions(parent, child);
+        definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.extension").Max = "*";
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, child.Url)!;
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        branch.Diagnostics.ShouldBeEmpty();
+        branch.Elements[".extension"].Minimum.ShouldBe(1);
+        foreach (string slice in new[] { "first", "second" })
+        {
+            EffectiveProfileElement element = branch.Elements[".extension:" + slice];
+            element.Minimum.ShouldBe(0);
+            element.Maximum.ShouldBe(1);
+            element.Types.ShouldHaveSingleItem().Code.ShouldBe("Extension");
+            if (patterned)
+            {
+                ProfileRestriction[] patterns = [.. element.Restrictions.Where(fact => fact.Kind == ProfileRestrictionKind.Pattern)];
+                patterns.ShouldNotBeEmpty();
+                foreach (ProfileRestriction pattern in patterns)
+                {
+                    pattern.Name.ShouldBe("patternExtension");
+                    pattern.Value.GetProperty("url").GetString().ShouldBe("http://example.org/group-pattern");
+                }
+            }
+            element.Restrictions.ShouldContain(fact => fact.Kind == ProfileRestrictionKind.Slicing);
+        }
+        ProfileRepresentationProof proof = facts.Prove(branch, owner);
+        proof.Kind.ShouldBe(patterned ? ProfileProofKind.Unsupported : ProfileProofKind.NativeReuse);
+        proof.IsAcceptedDecision.ShouldBe(!patterned);
+    }
+
+    [Fact]
+    public void ExactInheritedSliceMinimumCannotBeLoosenedOrBorrowedByAnotherSlice()
+    {
+        StructureDefinition parent = ConstraintProfile("RequiredSlice");
+        parent.Snapshot.Element.Add(new() { ElementId = "Quantity.extension:required", Path = "Quantity.extension",
+            SliceName = "required", Min = 1, Max = "1", Type = [new() { Code = "Extension" }] });
+        StructureDefinition child = (StructureDefinition)parent.DeepCopy();
+        child.Id = child.Name = "LoosenedSlice";
+        child.Url = "http://example.org/LoosenedSlice";
+        child.BaseDefinition = parent.Url;
+        child.Snapshot.Element.Single(element => element.SliceName == "required").Min = 0;
+        child.Snapshot.Element.Add(new() { ElementId = "Quantity.extension:optional", Path = "Quantity.extension",
+            SliceName = "optional", Min = 0, Max = "1", Type = [new() { Code = "Extension" }] });
+        using CatalogImport imported = ImportUses(parent, child);
+        using ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = imported.Catalog.ResolveDefinition(imported.PackageKey, child.Url)!;
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        branch.Elements[".extension:required"].Minimum.ShouldBe(1);
+        branch.Elements[".extension:optional"].Minimum.ShouldBe(0);
+        branch.Diagnostics.ShouldContain(message => message.Contains("required") && message.Contains("illegally loosens"));
+        ProfileRepresentationProof proof = facts.Prove(branch, owner);
+        proof.Kind.ShouldBe(ProfileProofKind.ConflictingFacts);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ChildProfileAlternativesRemainAUnionDuringProof(bool targetProfile)
+    {
+        DefinitionCollection sourceDefinitions = ChildProfileDefinitions("source", "http://example.org/first", targetProfile);
+        DefinitionCollection targetDefinitions = ChildProfileDefinitions("target", "http://example.org/first", targetProfile);
+        foreach (DefinitionCollection definitions in new[] { sourceDefinitions, targetDefinitions })
+        {
+            StructureDefinition other = (StructureDefinition)definitions.ProfilesByUrl[ChildProfileUrl].DeepCopy();
+            other.Id = other.Name = "OtherExtension";
+            other.Url = "http://example.org/OtherExtension";
+            other.Snapshot.Element[1].Fixed = new Hl7.Fhir.Model.FhirUri("http://example.org/second");
+            AddProfile(definitions, other);
+            ElementDefinition.TypeRefComponent type = definitions.ComplexTypesByName["Quantity"].Snapshot.Element
+                .Single(element => element.Path == (targetProfile ? "Quantity.reference" : "Quantity.extension")).Type[0];
+            string[] alternatives = definitions == sourceDefinitions ? [ChildProfileUrl, other.Url] : [other.Url, ChildProfileUrl];
+            if (targetProfile)
+            {
+                type.TargetProfile = [.. alternatives];
+            }
+            else
+            {
+                type.Profile = [.. alternatives];
+            }
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+            catalog.ResolveNativeType(targetPackage, "Quantity")!);
+        proof.Kind.ShouldBe(ProfileProofKind.NativeReuse, string.Join("; ", proof.Diagnostics));
+        proof.ChildProofs.ShouldNotBeEmpty();
+        proof.ChildProofs.ShouldAllBe(child => child.Kind == ProfileProofKind.NativeReuse);
+    }
+
+    [Fact]
+    public void RecursiveChildProfileObligationsNeverAssumeTheirOwnProof()
+    {
+        DefinitionCollection definitions = ChildProfileDefinitions("recursive", "http://example.org/recursive", targetProfile: false);
+        definitions.ProfilesByUrl[ChildProfileUrl].Snapshot.Element.Add(new()
+        {
+            ElementId = "Extension.extension", Path = "Extension.extension", Min = 0, Max = "*",
+            Type = [new() { Code = "Extension", Profile = [ChildProfileUrl] }],
+        });
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(quantity), quantity);
+        proof.Kind.ShouldBe(ProfileProofKind.Unsupported);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.Diagnostics.ShouldContain(message => message.Contains("recursive"));
+    }
+
+    [Fact]
+    public void ValidContentReferenceSuppliesEffectiveFactsWithoutInventingAType()
+    {
+        DefinitionCollection definitions = UseDefinitions();
+        ElementDefinition code = definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.code");
+        definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.system").Min = 1;
+        code.Type.Clear();
+        code.ContentReference = "#Quantity.system";
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
+        EffectiveProfileBranch branch = facts.ForDefinition(quantity);
+        branch.Elements[".code"].Types.ShouldHaveSingleItem().Code.ShouldBe("uri");
+        branch.Elements[".code"].Minimum.ShouldBe(0);
+        ProfileRepresentationProof proof = facts.Prove(branch, quantity);
+        proof.Kind.ShouldBe(ProfileProofKind.NativeReuse, string.Join("; ", proof.Diagnostics));
+    }
+
+    [Fact]
+    public void UnrelatedRecursiveOwnerChildrenDoNotBlockAQuantityOccurrence()
+    {
+        DefinitionCollection definitions = UseDefinitions();
+        StructureDefinition holder = definitions.ResourcesByName["UseHolder"];
+        holder.Snapshot.Element.Add(new() { ElementId = "UseHolder.group", Path = "UseHolder.group", Min = 0, Max = "*",
+            Type = [new() { Code = "BackboneElement" }] });
+        holder.Snapshot.Element.Add(new() { ElementId = "UseHolder.group.again", Path = "UseHolder.group.again",
+            Min = 0, Max = "*", ContentReference = "#UseHolder.group" });
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        EffectiveProfileUse use = facts.AtUse(owner, catalog.ResolveOwnedElement(owner, "UseHolder.quantity")!, 0);
+        use.Diagnostics.ShouldBeEmpty();
+        EffectiveProfileBranch branch = use.Branches.ShouldHaveSingleItem();
+        branch.Diagnostics.ShouldBeEmpty();
+        facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!, nativeContext: branch)
+            .Kind.ShouldBe(ProfileProofKind.NativeReuse);
+    }
+
+    [Fact]
+    public void DeclaredRootsAndProhibitedChildrenNeedNoInventedTypes()
+    {
+        DefinitionCollection definitions = UseDefinitions();
+        ElementDefinition code = definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.code");
+        code.Type.Clear();
+        code.Max = "0";
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
+        EffectiveProfileBranch branch = facts.ForDefinition(quantity);
+        branch.Elements[""].Types.ShouldBeEmpty();
+        branch.Elements[".code"].Types.ShouldBeEmpty();
+        facts.Prove(branch, quantity).Kind.ShouldBe(ProfileProofKind.NativeReuse);
+    }
+
+    [Fact]
+    public void OmittedLocalTypesRequireActualInheritedDatatypeFacts()
+    {
+        StructureDefinition profile = ConstraintProfile("InheritedDatatype");
+        profile.Snapshot.Element.Single(element => element.Path == "Quantity.code").Type.Clear();
+        using CatalogImport imported = ImportUses(profile);
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        branch.Elements[".code"].Types.ShouldHaveSingleItem().Code.ShouldBe("code");
+        branch.Elements[".code"].Origins.ShouldContain(origin => origin.Canonical == QuantityUrl);
+        facts.Prove(branch, owner).Kind.ShouldBe(ProfileProofKind.NativeReuse);
+    }
+
+    [Fact]
+    public void NewSlicesStillRespectTheUnslicedMaximum()
+    {
+        StructureDefinition profile = ConstraintProfile("ExcessiveSlice");
+        profile.Snapshot.Element.Add(new() { ElementId = "Quantity.extension:excessive", Path = "Quantity.extension",
+            SliceName = "excessive", Min = 0, Max = "2", Type = [new() { Code = "Extension" }] });
+        using CatalogImport imported = ImportUses(profile);
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        branch.Elements[".extension:excessive"].Maximum.ShouldBe(1);
+        branch.Diagnostics.ShouldContain(message => message.Contains("excessive") && message.Contains("illegally loosens"));
+        ProfileRepresentationProof proof = facts.Prove(branch, owner);
+        proof.Kind.ShouldBe(ProfileProofKind.ConflictingFacts);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void IncompleteChildProfilesCannotHideBehindKnownOuterNegatives(bool unknownRestriction, bool onTarget)
+    {
+        DefinitionCollection sourceDefinitions = ChildProfileDefinitions("source", "http://example.org/first", targetProfile: false);
+        DefinitionCollection targetDefinitions = ChildProfileDefinitions("target", "http://example.org/first", targetProfile: false);
+        sourceDefinitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        DefinitionCollection incomplete = onTarget ? targetDefinitions : sourceDefinitions;
+        if (unknownRestriction)
+        {
+            incomplete.ProfilesByUrl[ChildProfileUrl].Snapshot.Element[1].Extension.Add(
+                new("http://example.org/unclassified", new Hl7.Fhir.Model.FhirBoolean(true)));
+        }
+        else
+        {
+            incomplete.ProfilesByUrl[ChildProfileUrl].Snapshot.Element[1].Type.Clear();
+            incomplete.ComplexTypesByName["Extension"].Snapshot.Element[1].Type.Clear();
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+            catalog.ResolveNativeType(targetPackage, "Quantity")!);
+        proof.Kind.ShouldBe(unknownRestriction ? ProfileProofKind.Unsupported : ProfileProofKind.MissingFacts);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Diagnostics.ShouldContain(message => message.Contains(ChildProfileUrl));
+        if (unknownRestriction)
+        {
+            proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.UnclassifiedRestriction &&
+                reason.Restriction!.Value.GetProperty("url").GetString() == "http://example.org/unclassified");
+        }
+    }
+
+    private const string ChildProfileUrl = "http://example.org/PassiveExtension";
+
+    private static DefinitionCollection ChildProfileDefinitions(string package, string fixedUrl, bool targetProfile)
+    {
+        DefinitionCollection definitions = UseDefinitions();
+        definitions.MainPackageId = "example." + package;
+        string datatype = targetProfile ? "Endpoint" : "Extension";
+        string field = targetProfile ? "address" : "url";
+        StructureDefinition extension = Definition(datatype, datatype);
+        extension.Snapshot.Element.Add(new() { ElementId = datatype + "." + field, Path = datatype + "." + field, Min = 1, Max = "1",
+            Type = [new() { Code = "uri" }] });
+        if (targetProfile)
+        {
+            extension.Kind = StructureDefinition.StructureDefinitionKind.Resource;
+            definitions.AddStructureDefinition(extension, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+            AddNative(definitions, Definition("Reference", "Reference"));
+            definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Add(new()
+            {
+                ElementId = "Quantity.reference", Path = "Quantity.reference", Min = 0, Max = "1",
+                Type = [new() { Code = "Reference", TargetProfile = [ChildProfileUrl] }],
+            });
+        }
+        else
+        {
+            AddNative(definitions, extension);
+        }
+        StructureDefinition profile = (StructureDefinition)extension.DeepCopy();
+        profile.Id = profile.Name = "PassiveExtension";
+        profile.Url = ChildProfileUrl;
+        profile.Version = "child-1";
+        profile.BaseDefinition = extension.Url;
+        profile.Derivation = StructureDefinition.TypeDerivationRule.Constraint;
+        profile.Snapshot.Element[1].Fixed = new Hl7.Fhir.Model.FhirUri(fixedUrl);
+        AddProfile(definitions, profile);
+        if (!targetProfile)
+        {
+            ElementDefinition.TypeRefComponent type = definitions.ComplexTypesByName["Quantity"].Snapshot.Element
+                .Single(element => element.Path == "Quantity.extension").Type[0];
+            type.Profile = [profile.Url];
+        }
+        return definitions;
+    }
+
+    private static StructureDefinition ConstraintProfile(string id, bool slicedRoot = false)
+    {
+        StructureDefinition profile = NativeQuantity();
+        profile.Snapshot.Element.Add(new() { ElementId = "Quantity.value", Path = "Quantity.value", Min = 0, Max = "1", Type = [new() { Code = "decimal" }] });
+        profile.Snapshot.Element.Add(new() { ElementId = "Quantity.unit", Path = "Quantity.unit", Min = 0, Max = "1", Type = [new() { Code = "string" }] });
+        profile.Id = profile.Name = id;
+        profile.Url = "http://example.org/" + id;
+        profile.BaseDefinition = QuantityUrl;
+        profile.Derivation = StructureDefinition.TypeDerivationRule.Constraint;
+        if (slicedRoot)
+        {
+            foreach (ElementDefinition element in profile.Snapshot.Element)
+            {
+                element.ElementId = "Quantity:fixture" + element.ElementId["Quantity".Length..];
+            }
+        }
+        return profile;
+    }
+
+    private static DefinitionCollection UseDefinitions(params StructureDefinition[] profiles)
+    {
+        DefinitionCollection definitions = Definitions();
+        StructureDefinition native = NativeQuantity();
+        native.Snapshot.Element.Add(new() { ElementId = "Quantity.value", Path = "Quantity.value", Min = 0, Max = "1", Type = [new() { Code = "decimal" }] });
+        native.Snapshot.Element.Add(new() { ElementId = "Quantity.unit", Path = "Quantity.unit", Min = 0, Max = "1", Type = [new() { Code = "string" }] });
+        AddNative(definitions, native);
+        foreach (StructureDefinition profile in profiles)
+        {
+            AddProfile(definitions, profile);
+        }
+        StructureDefinition holder = Definition("UseHolder", "UseHolder");
+        holder.Kind = StructureDefinition.StructureDefinitionKind.Resource;
+        holder.Snapshot.Element.Add(new()
+        {
+            ElementId = "UseHolder.quantity", Path = "UseHolder.quantity", Min = 0, Max = "1",
+            Type = [new() { Code = "Quantity", Profile = profiles.Length == 0 ? [] : [profiles[^1].Url] }],
+        });
+        holder.Snapshot.Element.Add(new()
+        {
+            ElementId = "UseHolder.native", Path = "UseHolder.native", Min = 0, Max = "1", Type = [new() { Code = "Quantity" }],
+        });
+        definitions.AddStructureDefinition(holder, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+        return definitions;
+    }
+
+    private static CatalogImport ImportUses(params StructureDefinition[] profiles)
+    {
+        CatalogImport imported = new(UseDefinitions(profiles));
+        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        return imported;
+    }
+
+    private static EffectiveProfileUse QuantityUse(CatalogImport imported, ProfileUseFacts facts, StructureDefinition profile)
+    {
+        DbStructureDefinition holder = imported.Catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        EffectiveProfileUse use = facts.AtUse(holder, imported.Catalog.ResolveOwnedElement(holder, "UseHolder.quantity")!, 0);
+        use.Branches.ShouldHaveSingleItem().Key.ProfileAlternative.ShouldBe(profile.Url);
+        return use;
+    }
+
     private static DefinitionCollection Definitions(FhirReleases.FhirSequenceCodes sequence = FhirReleases.FhirSequenceCodes.R4) => new()
     {
         Logger = NullLogger.Instance, Name = "Catalog fixture", FhirSequence = sequence,
@@ -1003,10 +2300,11 @@ public class XVerProfileCatalogTests
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "fhir-codegen-tests", "catalog-" + Guid.NewGuid().ToString("N"));
 
-        internal CatalogImport(DefinitionCollection definitions)
+        internal CatalogImport(DefinitionCollection definitions, DefinitionCollection? targetDefinitions = null)
         {
-            Database = new([definitions], _directory, "catalog.sqlite", NullLoggerFactory.Instance);
-            PackageKey = DbFhirPackage.SelectList(Connection).Single().Key;
+            Database = new(targetDefinitions is null ? [definitions] : [definitions, targetDefinitions],
+                _directory, "catalog.sqlite", NullLoggerFactory.Instance);
+            PackageKey = DbFhirPackage.SelectList(Connection).First().Key;
         }
 
         internal ComparisonDatabase Database { get; }
@@ -1019,7 +2317,18 @@ public class XVerProfileCatalogTests
             SqliteConnection connection = (SqliteConnection)Connection;
             ((IDisposable)Database).Dispose();
             SqliteConnection.ClearPool(connection);
-            Directory.Delete(_directory, recursive: true);
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    Directory.Delete(_directory, recursive: true);
+                    break;
+                }
+                catch (IOException) when (attempt < 5)
+                {
+                    Thread.Sleep(100);
+                }
+            }
         }
     }
 

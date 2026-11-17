@@ -17,6 +17,75 @@ namespace Fhir.CodeGen.Lib.Tests.FromFailures;
 /// <summary>A structure parse tests.</summary>
 public class ParseTests
 {
+    [Theory]
+    [InlineData("snapshot", "@value|f:*|h:div")]
+    [InlineData("differential", "not(exists(f:comparator))")]
+    public void Dstu2ConstraintXPathIsRetainedOnConstraint(string projection, string xpath)
+    {
+        string json = $$"""
+            {
+              "resourceType": "StructureDefinition",
+              "id": "SimpleQuantity",
+              "url": "http://hl7.org/fhir/StructureDefinition/SimpleQuantity",
+              "name": "SimpleQuantity",
+              "status": "draft",
+              "kind": "datatype",
+              "abstract": false,
+              "constrainedType": "Quantity",
+              "base": "http://hl7.org/fhir/StructureDefinition/Quantity",
+              "{{projection}}": {
+                "element": [{
+                  "path": "Quantity",
+                  "min": 0,
+                  "max": "*",
+                  "constraint": [
+                    {
+                      "key": "with-xpath",
+                      "severity": "error",
+                      "human": "Preserve the original XPath.",
+                      "xpath": "{{xpath}}"
+                    },
+                    {
+                      "key": "without-xpath",
+                      "severity": "warning",
+                      "human": "No XPath was supplied."
+                    }
+                  ]
+                }]
+              }
+            }
+            """;
+
+        const string extensionUrl = "http://hl7.org/fhir/1.0/StructureDefinition/extension-ElementDefinition.constraint.xpath";
+        Fhir.CodeGen.CrossVersionLoader.Converter_20_50 converter = new();
+        StructureDefinition definition = converter.Convert(FhirJsonNode.Parse(json)).ShouldBeOfType<StructureDefinition>();
+        List<ElementDefinition> elements = projection == "snapshot"
+            ? definition.Snapshot.Element : definition.Differential.Element;
+        ElementDefinition element = elements.ShouldHaveSingleItem();
+        element.Constraint.Count.ShouldBe(2);
+        ElementDefinition.ConstraintComponent constraint = element.Constraint[0];
+        Extension extension = constraint.Extension.ShouldHaveSingleItem();
+        extension.Url.ShouldBe(extensionUrl);
+        extension.Value.ShouldBeOfType<FhirString>().Value.ShouldBe(xpath);
+        extension.Extension.ShouldBeEmpty();
+        constraint.Expression.ShouldBeNull();
+        element.Constraint[1].Extension.ShouldBeEmpty();
+        element.Extension.ShouldNotContain(item => item.Url == extensionUrl);
+        definition.Extension.ShouldNotContain(item => item.Url == extensionUrl);
+
+        string serialized = new FhirJsonSerializer().SerializeToString(definition);
+        using JsonDocument document = JsonDocument.Parse(serialized);
+        JsonElement serializedConstraint = document.RootElement.GetProperty(projection)
+            .GetProperty("element")[0].GetProperty("constraint")[0];
+        serializedConstraint.GetProperty("extension")[0].GetProperty("valueString").GetString().ShouldBe(xpath);
+        serializedConstraint.TryGetProperty("expression", out _).ShouldBeFalse();
+        StructureDefinition roundTrip = new FhirJsonParser().Parse<StructureDefinition>(serialized);
+        List<ElementDefinition> roundTripElements = projection == "snapshot"
+            ? roundTrip.Snapshot.Element : roundTrip.Differential.Element;
+        roundTripElements.ShouldHaveSingleItem().Constraint[0].Extension.ShouldHaveSingleItem()
+            .Value.ShouldBeOfType<FhirString>().Value.ShouldBe(xpath);
+    }
+
     ///// <summary>
     ///// Note that the Expansion is WRONG in several publications
     ///// TODO(ginoc): Remove this test when current build is verified correct.

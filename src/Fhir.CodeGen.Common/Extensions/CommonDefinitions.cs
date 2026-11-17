@@ -54,6 +54,7 @@ public static class CommonDefinitions
     public const string ExtUrlSpXPathUsage = "http://hl7.org/fhir/1.0/StructureDefinition/extension-SearchParameter.xpathUsage";
 
     public const string ExtUrlEdProfileElement = "http://hl7.org/fhir/StructureDefinition/elementdefinition-profile-element";
+    public const string ExtUrlEdConstraintXPath = "http://hl7.org/fhir/1.0/StructureDefinition/extension-ElementDefinition.constraint.xpath";
 
     public const string FhirStructureUrlPrefix = "http://hl7.org/fhir/StructureDefinition/";
     public const string FhirUrlPrefix = "http://hl7.org/fhir/";

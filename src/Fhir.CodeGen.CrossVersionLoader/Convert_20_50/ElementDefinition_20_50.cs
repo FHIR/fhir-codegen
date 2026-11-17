@@ -1689,8 +1689,7 @@ public class ElementDefinition_20_50 : ICrossVersionProcessor<ElementDefinition>
 					break;
 
 				case "xpath":
-                    // element ElementDefinition.constraint.xpath has been removed in the target spec
-                    //current.ExpressionElement = new FhirString(node.Text);
+					current.AddExtension(CommonDefinitions.ExtUrlEdConstraintXPath, new FhirString(node.Text));
 					break;
 
 				case "source":

@@ -7,12 +7,14 @@ using System.Data;
 using System.Text.RegularExpressions;
 using Fhir.CodeGen.Common.Models;
 using Hl7.Fhir.Model;
+using Hl7.Fhir.Utility;
 
 namespace Fhir.CodeGen.Comparison.Models;
 
 internal sealed class XVerStructureCatalog
 {
     private readonly Dictionary<int, DbStructureDefinition> _structures;
+    private readonly Dictionary<int, DbFhirPackage> _packages;
     private readonly Dictionary<int, DbElement> _elements;
     private readonly Dictionary<int, DbStructureDefinitionFacts> _facts;
     private readonly ILookup<int, DbElement> _elementsByOwner;
@@ -20,12 +22,15 @@ internal sealed class XVerStructureCatalog
     private readonly Dictionary<(int, int, string), DbElement> _ownedElements;
     private readonly Dictionary<int, IReadOnlyList<DbStructureDefinition>> _ancestors = [];
     private readonly Dictionary<int, StructureDefinition> _payloads = [];
+    private readonly Dictionary<int, Dictionary<string, ElementDefinition>> _payloadElements = [];
+    private readonly Dictionary<int, DbElement> _roots = [];
     private readonly HashSet<string> _exclusions;
     private readonly List<string> _diagnostics = [];
 
     internal XVerStructureCatalog(IDbConnection db, HashSet<string>? exclusions = null, string? elementTableName = null)
     {
         _structures = DbStructureDefinition.SelectList(db).ToDictionary(row => row.Key);
+        _packages = DbFhirPackage.SelectList(db).ToDictionary(row => row.Key);
         _elements = DbElement.SelectList(db, dbTableName: elementTableName).ToDictionary(row => row.Key);
         _facts = DbStructureDefinitionFacts.SelectList(db).ToDictionary(row => row.StructureKey);
         _exclusions = exclusions ?? [];
@@ -168,6 +173,10 @@ internal sealed class XVerStructureCatalog
 
     internal DbElement ResolveRoot(DbStructureDefinition owner)
     {
+        if (_roots.TryGetValue(owner.Key, out DbElement? cached))
+        {
+            return cached;
+        }
         if (RequireFacts(owner).SnapshotAvailability != DefinitionSnapshotAvailability.Available)
         {
             throw Error(owner, "effective root requires an available snapshot");
@@ -194,6 +203,7 @@ internal sealed class XVerStructureCatalog
             }
         }
 
+        _roots.Add(owner.Key, roots[0]);
         return roots[0];
     }
 
@@ -454,6 +464,16 @@ internal sealed class XVerStructureCatalog
             context: context)!;
     }
 
+    internal DbElement ResolveContentReference(DbElement element)
+    {
+        DbElement source = ResolveContentReference(element, []);
+        while (source.DefinedAsContentReference)
+        {
+            source = ResolveContentReference(source, []);
+        }
+        return source;
+    }
+
     private DbElement ResolveContentReference(DbElement element, HashSet<int> visited)
     {
         DbStructureDefinition owner = RequireOwner(element);
@@ -485,15 +505,89 @@ internal sealed class XVerStructureCatalog
         return source;
     }
 
-    private StructureDefinition ReadPayload(DbStructureDefinition owner)
+    internal StructureDefinition ReadPayload(DbStructureDefinition owner)
     {
+        if (!_structures.TryGetValue(owner.Key, out DbStructureDefinition? recorded) ||
+            recorded.FhirPackageKey != owner.FhirPackageKey || recorded.UnversionedUrl != owner.UnversionedUrl ||
+            recorded.Version != owner.Version)
+        {
+            throw Error(owner, "payload request contradicts the catalog owner identity");
+        }
         if (!_payloads.TryGetValue(owner.Key, out StructureDefinition? definition))
         {
-            definition = StructureDefinitionFactsStore.ReadDefinition(RequireFacts(owner));
+            DbStructureDefinitionFacts facts = RequireFacts(owner);
+            definition = StructureDefinitionFactsStore.ReadDefinition(facts);
+            if (definition.Url != owner.UnversionedUrl || (definition.Version ?? "") != owner.Version ||
+                definition.Type != facts.Type || definition.BaseDefinition != facts.BaseDefinition ||
+                definition.Kind?.GetLiteral() != facts.Kind || definition.Derivation?.GetLiteral() != facts.Derivation)
+            {
+                throw Error(owner, "normalized payload contradicts canonical/version or declared type/kind/derivation/base facts");
+            }
             _payloads.Add(owner.Key, definition);
         }
 
         return definition;
+    }
+
+    internal DbStructureDefinition GetOwner(DbElement element) => RequireOwner(element);
+
+    internal string? GetDeclaredType(DbStructureDefinition owner) => RequireFacts(owner).Type;
+
+    internal void ReleasePayloads()
+    {
+        _payloadElements.Clear();
+        _payloads.Clear();
+    }
+
+    internal DbFhirPackage GetPackage(int key) => _packages.TryGetValue(key, out DbFhirPackage? package)
+        ? package : throw new InvalidOperationException($"Definition catalog package {key} is missing.");
+
+    internal IReadOnlyList<DbElement> GetOwnedElements(DbStructureDefinition owner) =>
+        [.. _elementsByOwner[owner.Key].Where(row => row.FhirPackageKey == owner.FhirPackageKey)
+            .OrderBy(row => row.ResourceFieldOrder)];
+
+    internal IReadOnlyList<DbElement> GetOwnedChildren(DbElement parent) =>
+        [.. GetOwnedElements(RequireOwner(parent)).Where(row => row.ParentElementKey == parent.Key)];
+
+    internal IReadOnlyList<DbElementType> GetTypeUses(DbElement element)
+    {
+        RequireOwner(element);
+        DbElementType[] types = [.. _typesByElement[element.Key]];
+        foreach (DbElementType type in types)
+        {
+            ValidateTypeKeys(type);
+        }
+        return types;
+    }
+
+    internal ElementDefinition ReadElement(DbElement element)
+    {
+        DbStructureDefinition owner = RequireOwner(element);
+        ResolveOwnedElement(owner, element.Id, element.Key);
+        ResolveRoot(owner);
+        if (!_payloadElements.TryGetValue(owner.Key, out Dictionary<string, ElementDefinition>? elements))
+        {
+            elements = [];
+            foreach (ElementDefinition row in ReadPayload(owner).Snapshot.Element)
+            {
+                if (row.ElementId is null || !elements.TryAdd(row.ElementId, row))
+                {
+                    throw Error(owner, "normalized snapshot has missing/duplicate exact element identities");
+                }
+            }
+            IReadOnlyList<DbElement> owned = GetOwnedElements(owner);
+            if (elements.Count != owned.Count || owned.Any(row =>
+                !elements.TryGetValue(row.Id, out ElementDefinition? payload) || payload.Path != row.Path))
+            {
+                throw Error(owner, "normalized snapshot and owned relational projection are incomplete or inconsistent");
+            }
+            _payloadElements.Add(owner.Key, elements);
+        }
+        if (!elements.TryGetValue(element.Id, out ElementDefinition? match) || match.Path != element.Path)
+        {
+            throw Error(owner, $"normalized snapshot contradicts the exact owned element '{element.Id}'");
+        }
+        return match;
     }
 
     private void ValidateTypeKeys(DbElementType type)
