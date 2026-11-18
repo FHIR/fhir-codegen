@@ -38,11 +38,13 @@ public sealed class UnsafeCodeProfileCollection
 [Collection(UnsafeCodeProfileCollection.Name)]
 public class UnsafeCodeProfileTests
 {
-    [Fact]
-    public void PassiveProfileAlternativesRetainTheirOwnConstraintsAndExactNativeReferences()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void PassiveProfileAlternativesRetainTheirOwnConstraintsAndExactNativeReferences(int targetIndex)
     {
         using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
-        FhirPackageComparisonPair pair = fixture.PreparePair();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
         Dictionary<int, DbElement> uses = [];
         foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
         {
@@ -81,7 +83,7 @@ public class UnsafeCodeProfileTests
         DbElementOutcome.SelectSingle(fixture.Connection, Key: outcome.Key)!.ExtensionDefinitionIsProhibited.ShouldBeFalse();
 
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
-        StructureDefinition extension = built.Extensions.Single(item => item.OutcomeKey == outcome.Key).Definition;
+        StructureDefinition extension = RoundTripProjectionDefinition(built.Extensions.Single(item => item.OutcomeKey == outcome.Key).Definition, targetIndex);
         ElementDefinition.TypeRefComponent value = extension.Differential.Element.Single(element => element.Path == "Extension.value[x]")
             .Type.ShouldHaveSingleItem();
         value.Code.ShouldBe("Coding");
@@ -93,6 +95,164 @@ public class UnsafeCodeProfileTests
         json.ShouldContain(fixture.Structure(pair.TargetPackage, "Coding-b").VersionedUrl);
         catalog.GetDefinitions(pair.TargetPackageKey).Where(owner => owner.ArtifactClass == FhirArtifactClassEnum.Profile)
             .ShouldAllBe(owner => catalog.ReadPayload(owner).Snapshot.Element.Any(element => element.Fixed is Code));
+        StructureDefinition[] nativeAlternatives = [.. value.Profile.Select(canonical =>
+        {
+            DbStructureDefinition owner = catalog.ResolveDefinition(pair.TargetPackageKey, canonical)!;
+            owner.VersionedUrl.ShouldBe(canonical);
+            owner.FhirPackageKey.ShouldBe(pair.TargetPackageKey);
+            catalog.IsProcessed(owner).ShouldBeFalse();
+            return RoundTripProjectionDefinition(catalog.ReadPayload(owner), targetIndex);
+        })];
+        foreach ((string code, bool valid) in new[] { ("a", true), ("b", true), ("c", false) })
+        {
+            string instanceJson = $$$"""{"resourceType":"Parameters","parameter":[{"name":"choice","valueCoding":{"code":"{{{code}}}"}}]}""";
+            ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex, instanceJson);
+            ITypedElement occurrence = instance.Children("parameter").Single().Children("value").Single();
+            nativeAlternatives.Any(definition => definition.Snapshot.Element.Where(element => element.Fixed is Code)
+                .All(element => occurrence.Children("code").Count() >= element.Min &&
+                    occurrence.Children("code").Count() <= int.Parse(element.Max) &&
+                    Equals(occurrence.Children("code").Single().Value, ((Code)element.Fixed).Value))).ShouldBe(valid, code);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void NativePassiveRangeReuseRetainsTargetVersionBoundsAndClosedSlices(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true);
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        Dictionary<int, DbElement> uses = [];
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            fixture.AddElement(fixture.AddStructure(package, "decimal", FhirArtifactClassEnum.PrimitiveType), "decimal");
+            fixture.AddTypedElement(fixture.Structure(package, "Quantity"), "Quantity.value", "decimal");
+            foreach (DbElement child in DbElement.SelectList(fixture.Connection, StructureKey: fixture.Structure(package, "Quantity").Key)
+                .Where(element => element.Id.Contains('.')))
+            {
+                child.MinCardinality = 0;
+                DbElement.Update(fixture.Connection, [child]);
+            }
+            DbStructureDefinition range = fixture.AddStructure(package, "Range");
+            fixture.AddElement(range, "Range");
+            fixture.AddTypedElement(range, "Range.low", "Quantity");
+            DbElement extensions = fixture.AddTypedElement(range, "Range.extension", "Extension");
+            extensions.MinCardinality = 0;
+            extensions.MaxCardinality = -1;
+            extensions.MaxCardinalityString = "*";
+            DbElement.Update(fixture.Connection, [extensions]);
+            fixture.AddType(DbElement.SelectSingle(fixture.Connection, StructureKey: fixture.Structure(package, "Extension").Key,
+                Id: "Extension.value[x]")!, "Range", range);
+            DbStructureDefinition profile = fixture.AddStructure(package, "BoundedRange", FhirArtifactClassEnum.Profile);
+            fixture.DeclareProfile(profile, range);
+            fixture.AddElement(profile, "Range");
+            fixture.AddTypedElement(profile, "Range.low", "Quantity");
+            fixture.AddTypedElement(profile, "Range.low.value", "decimal");
+            fixture.AddTypedElement(profile, "Range.extension", "Extension");
+            DbElement markerElement = fixture.AddTypedElement(profile, "Range.extension:marker", "Extension");
+            markerElement.Path = "Range.extension";
+            markerElement.SliceName = "marker";
+            DbElement.Update(fixture.Connection, [markerElement]);
+            DbElement markerUrlElement = fixture.AddTypedElement(profile, "Range.extension:marker.url", "uri");
+            markerUrlElement.Path = "Range.extension.url";
+            DbElement.Update(fixture.Connection, [markerUrlElement]);
+            fixture.ConfigureDefinition(profile, definition =>
+            {
+                definition.Snapshot.Element.Single(element => element.Path == "Range.low").Min = 1;
+                ElementDefinition value = definition.Snapshot.Element.Single(element => element.Path == "Range.low.value");
+                value.Min = 1;
+                value.MinValue = new FhirDecimal(0);
+                value.MaxValue = new FhirDecimal(100);
+                ElementDefinition aggregate = definition.Snapshot.Element.Single(element => element.ElementId == "Range.extension");
+                aggregate.Min = 0;
+                aggregate.Max = "2";
+                aggregate.Slicing = new()
+                {
+                    Rules = ElementDefinition.SlicingRules.Closed, Ordered = false,
+                    Discriminator = [new() { Type = ElementDefinition.DiscriminatorType.Value, Path = "url" }],
+                };
+                ElementDefinition slice = definition.Snapshot.Element.Single(element => element.ElementId == "Range.extension:marker");
+                slice.Path = "Range.extension";
+                slice.SliceName = "marker";
+                slice.Min = 0;
+                slice.Max = "1";
+                ElementDefinition url = definition.Snapshot.Element.Single(element => element.ElementId == "Range.extension:marker.url");
+                url.Path = "Range.extension.url";
+                url.Min = 1;
+                url.Fixed = new FhirUri("urn:example:range-marker");
+            });
+            DbElement use = fixture.AddElement(fixture.Structure(package), "ValueSet.selected", "Range");
+            fixture.AddType(use, "Range", range, profile);
+            uses.Add(package.Key, use);
+        }
+        fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElementOutcome outcome = fixture.AddRepresentationOutcome(pair, uses[pair.SourcePackageKey], "ValueSet");
+        fixture.CompleteAuthoredArrangement(pair);
+        fixture.GenerateSafety(pair);
+        fixture.ReopenPersistedDatabase();
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        XVerStructureCatalog catalog = new(fixture.Connection);
+        StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+        StructureDefinition emitted = RoundTripProjectionDefinition(built.Extensions.Single(item => item.OutcomeKey == outcome.Key).Definition, targetIndex);
+        ElementDefinition.TypeRefComponent valueType = emitted.Differential.Element.Single(element => element.Path == "Extension.value[x]")
+            .Type.ShouldHaveSingleItem();
+        valueType.Code.ShouldBe("Range");
+        string canonical = valueType.Profile.ShouldHaveSingleItem();
+        DbStructureDefinition target = catalog.ResolveDefinition(pair.TargetPackageKey, canonical)!;
+        target.Key.ShouldBe(fixture.Structure(pair.TargetPackage, "BoundedRange").Key);
+        target.VersionedUrl.ShouldBe(canonical);
+        catalog.IsProcessed(target).ShouldBeFalse();
+        ProfileRepresentationProof proof = ProfileUseFacts.ClassifyPair(fixture.Connection, pair)
+            .Single(decision => decision.Input.ElementKey == uses[pair.SourcePackageKey].Key);
+        proof.Kind.ShouldBe(ProfileProofKind.NativeReuse);
+        proof.TargetCanonical.ShouldBe(target.VersionedUrl);
+        proof.TargetRoot!.OwnerKey.ShouldBe(target.Key);
+        StructureDefinition native = RoundTripProjectionDefinition(catalog.ReadPayload(target), targetIndex);
+        ElementDefinition low = native.Snapshot.Element.Single(element => element.ElementId == "Range.low");
+        ElementDefinition bound = native.Snapshot.Element.Single(element => element.ElementId == "Range.low.value");
+        ElementDefinition aggregateDefinition = native.Snapshot.Element.Single(element => element.ElementId == "Range.extension");
+        ElementDefinition marker = native.Snapshot.Element.Single(element => element.ElementId == "Range.extension:marker");
+        ElementDefinition markerUrl = native.Snapshot.Element.Single(element => element.ElementId == "Range.extension:marker.url");
+        low.Min.ShouldBe(1);
+        bound.Min.ShouldBe(1);
+        bound.MinValue.ShouldBeOfType<FhirDecimal>().Value.ShouldBe(0);
+        bound.MaxValue.ShouldBeOfType<FhirDecimal>().Value.ShouldBe(100);
+        aggregateDefinition.Max.ShouldBe("2");
+        aggregateDefinition.Slicing.Rules.ShouldBe(ElementDefinition.SlicingRules.Closed);
+        aggregateDefinition.Slicing.Discriminator.ShouldHaveSingleItem().Path.ShouldBe("url");
+        marker.Max.ShouldBe("1");
+        markerUrl.Fixed.ShouldBeOfType<FhirUri>().Value.ShouldBe("urn:example:range-marker");
+        // Focused checks of these serialized restrictions, not a full instance validator.
+        foreach ((string json, bool valid) in new[]
+        {
+            ("""{"low":{"value":0}}""", true),
+            ("""{"low":{"value":100},"extension":[{"url":"urn:example:range-marker","valueString":"tag"}]}""", true),
+            ("""{"low":{"value":-1}}""", false),
+            ("""{"low":{"value":101}}""", false),
+            ("""{"id":"missing-low"}""", false),
+            ("""{"low":{"id":"missing-value"}}""", false),
+            ("""{"low":{"value":1},"extension":[{"url":"urn:example:wrong","valueString":"tag"}]}""", false),
+            ("""{"low":{"value":1},"extension":[{"url":"urn:example:range-marker","valueString":"one"},{"url":"urn:example:range-marker","valueString":"two"}]}""", false),
+        })
+        {
+            ITypedElement instance = UnsafeCodeTestFixture.TargetInstance(targetIndex,
+                """{"resourceType":"Parameters","parameter":[{"name":"range","valueRange":""" + json + "}]}");
+            ITypedElement value = instance.Children("parameter").Single().Children("value").Single();
+            ITypedElement[] lows = [.. value.Children("low")];
+            ITypedElement[] numbers = [.. lows.SelectMany(item => item.Children("value"))];
+            ITypedElement[] extensions = [.. value.Children("extension")];
+            bool conforms = lows.Length >= low.Min && lows.Length <= int.Parse(low.Max) &&
+                numbers.Length >= bound.Min && numbers.Length <= int.Parse(bound.Max) &&
+                numbers.All(number => number.Value is decimal scalar && scalar >= ((FhirDecimal)bound.MinValue).Value &&
+                    scalar <= ((FhirDecimal)bound.MaxValue).Value) &&
+                extensions.Length >= aggregateDefinition.Min && extensions.Length <= int.Parse(aggregateDefinition.Max) &&
+                extensions.All(extension => Equals(extension.Children("url").Single().Value, ((FhirUri)markerUrl.Fixed).Value)) &&
+                extensions.Length <= int.Parse(marker.Max);
+            conforms.ShouldBe(valid, json);
+        }
+        built.Profiles.ShouldNotContain(item => item.Definition.Type == "Range");
+        DbStructureOutcome.SelectList(fixture.Connection).ShouldNotContain(row => row.SourceStructureKey ==
+            fixture.Structure(pair.SourcePackage, "BoundedRange").Key);
     }
 
     private const string MixedCodingExpression = "($this.parameter.value.ofType(Coding).where($this.code.where($this = 'unsafe').exists() and " +

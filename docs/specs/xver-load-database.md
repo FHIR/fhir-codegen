@@ -4,7 +4,7 @@
 
 `LoadDatabase` either reuses a named SQLite comparison database or creates a fresh comparison database and loads all configured FHIR core package definitions into it. The fresh-load path seeds content tables such as `DbFhirPackage`, `DbCodeSystem`, `DbValueSet`, `DbStructureDefinition`, `DbElement`, and `DbElementType` from the configured `DefinitionCollection` instances. This is the foundational step for the remaining cross-version pipeline: maps, substitutions, FHIR-type value sets, comparison, outcome generation, and export all require `_db`.
 
-**Current revised behavior (2026-11-13):** The default full pipeline initializes a missing named database. Reuse-only commands instead reject missing named files, and existing files without the package table are rejected without automatic rebuilding. The line references below retain the historical source snapshot cited at the end of this document.
+**Current behavior (2026-11-17):** Fresh import persists the full retained normalized profile catalog, with a separate processing boundary described below. The default full pipeline initializes a missing named database. Reuse-only commands instead reject missing named files, and existing files without the package table are rejected without automatic rebuilding. Opening a named database does not reload it or certify its catalog. Unchanged line references below retain the historical source snapshot cited at the end of this document.
 
 ## Invocation & Preconditions
 
@@ -41,7 +41,7 @@ Preconditions:
   - FHIR package payloads loaded by `loadDefinitionCollections` through the standard `PackageLoader` (`XVerProcessor.cs:224-239`).
 - Prior in-memory / database state:
   - `_definitions`, lazily populated by `loadDefinitionCollections` when empty (`XVerProcessor.cs:521-525`).
-  - `_exclusionSet`, the static URL set skipped during content import (`XVerProcessor.cs:113-128`).
+  - `_exclusionSet`, the static processing/vocabulary exclusion set; it does not remove retained profiles or their available projections from the catalog (`XVerProcessor._exclusionSet`, `ComparisonDatabase.addStructuresToDb`).
   - `_escapeValveCodes`, the static code set passed into value-set loading and post-processing (`XVerProcessor.cs:130-143`, `ComparisonDatabase.cs:652-686`).
   - `_dbPath` and `_dbName`, derived in the constructor (`XVerProcessor.cs:167-180`).
 - Method signature:
@@ -60,6 +60,100 @@ Preconditions:
 - `_dbName` is updated from the database instance after fresh construction (`XVerProcessor.cs:528-529`).
 - Fresh creation is seeded by `_db.TryLoadFromDefinitionCollections(_exclusionSet, _escapeValveCodes)` (`XVerProcessor.cs:531-535`). That method loads code systems, value sets, and structures, then runs value-set, element, and code-system post-processing (`ComparisonDatabase.cs:652-696`).
 - Comparison pair / outcome / mapping tables are not created by `LoadDatabase` itself; they are created by later comparison, outcome, and map-loading steps. This is a source-level surprise because the method comment only says it "loads or creates the comparison database" (`XVerProcessor.cs:499-503`), while `initNewDb` delegates only to `DbContentClasses.CreateTables` (`ComparisonDatabase.cs:593-607`).
+
+### Normalized inventory and processing boundary
+
+The public `ComparisonDatabase.TryLoadFromDefinitionCollections` imports
+`GetStructureInventories`: existing primitives, complex types and resources,
+plus **every retained `ProfilesByUrl` definition**, including processing-excluded
+profiles and their available elements/types/additional bindings. ArtifactClass
+follows normalized collection membership. DSTU2 Quantity derivatives routed by
+`DefinitionCollection.AddComplexType` to `AddProfile` are therefore Profiles;
+they are not assumed to be native complex types.
+
+| Definition inventory | Standalone processing |
+|-|-|
+| Existing primitives, complex types, resources | Existing behavior/exclusions; primitive outcomes remain suppressed. |
+| Profile with ordinal declared `Type == "Quantity"` | Eligible only with a unique, acyclic, same-package base chain reaching the actual native complex-type Quantity; existing exclusions still apply. |
+| Other profiles, including profiles on Age, Coding or resources | Passive definitions; constraints remain authoritative at legitimate uses, not standalone maps/comparisons/outcomes/artifacts. |
+| Separately classified extensions/logical models | No additional import. |
+
+This is not archival of original package bytes or discarded duplicate/history
+entries, nor an additional import of separately classified extensions/logical models.
+Each imported definition, including native
+owners, has an internal `StructureDefinitionFacts` row containing Type, Kind,
+Derivation, BaseDefinition, snapshot availability and Firely-serialized normalized
+FHIR JSON. The JSON retains snapshot/differential restrictions omitted from the
+relational traversal projection; it is not naive POCO JSON or byte-lossless storage.
+
+`GetAvailableProjection` uses a nonempty snapshot, otherwise the available
+differential. Missing/empty snapshots remain distinguished in facts. Differential
+rows are not effective snapshots: required operational/use-site facts without a
+usable snapshot fail contextually. No snapshot, missing declared Type, root or
+alias is invented. A root type projection may use the definition's **declared**
+Type only for a uniquely identified available snapshot root.
+
+`XVerStructureCatalog` identifies a definition by package key + exact URL +
+definition version, and an element by package + structure key + exact ElementId.
+Canonical `|version` means definition version, never package release; unversioned
+references must resolve uniquely and stored foreign keys must agree. Native-name
+lookup excludes profiles. A missing declared profile cannot fall back to its base
+`TypeStructureKey`. Needed roots have one owner-scoped field-order-zero element,
+no parent and a valid top-level Path. Exact sliced IDs survive, notably R3
+`Quantity:simplequantity` / Path `Quantity`, with children and parents in that
+same owner graph.
+
+### Inventory completion, reuse and costs
+
+`DefinitionInventoryStore` uses **FormatVersion 1 / PolicyVersion 2**.
+`BeginInventory` records independent expected counts from the normalized source
+collections per package (classes, elements, types and additional bindings), not
+queried row counts presented as independent evidence. Import invalidates completion
+before replacement. After all packages, owner/key resolution and existing
+post-processing, `CompleteInventory` validates counts, payload/projection/owner
+consistency and stored links, then publishes `CompletedRevision` last through the
+generated update helper. There is no unsupported outer transaction around helpers.
+
+`RequireReady` is read-only and does not create missing schema. Maps must bind their
+completed input snapshot to this exact inventory revision. Preparatory native-only
+PolicyVersion 1, missing, old or incomplete catalogs are rejected before destructive
+map/comparison/outcome consumer resets, even if ordinary package tables exist.
+Opening the file or reloading only maps cannot repair such a catalog. Recovery is
+an explicitly authorized destructive content reload, then maps → comparisons →
+outcomes → export. Content reset invalidates inventory and downstream stamps;
+map reset clears map-owner facts/input bindings, not the catalog itself.
+
+Full relational profile projections and normalized payloads for all definitions
+intentionally increase storage, serialization/import work, indexes and eager
+relational memory. Pair-local lazy payload/fact caches are not a bounded-eager-memory
+guarantee. Release tests report observed profile/element/type/facts counts, isolated
+database size, import elapsed time and per-pair time/process memory; these are
+observations, not numerical acceptance thresholds or a comparable native-only
+timing baseline.
+
+One cached five-core acceptance run observed:
+
+| Core | Profiles | Elements | Type uses | Definition facts |
+|-|-:|-:|-:|-:|
+| R2 | 113 | 9,901 | 11,996 | 249 |
+| R3 | 33 | 7,780 | 9,422 | 205 |
+| R4 | 48 | 10,658 | 13,401 | 257 |
+| R4B | 43 | 10,476 | 13,302 | 249 |
+| R5 | 66 | 15,431 | 19,483 | 295 |
+
+`AllConfiguredPairsRespectQuantityProfileProcessingBoundary` recorded 33,340 ms
+for public import and a 291,733,504-byte isolated SQLite file. Its per-pair
+membership/canonical/FK checks took 13–47 ms, with process-private memory around
+9.31–10.05 GB including prior test allocations. These are not whole-comparer
+throughput or incremental per-pair memory measurements. The 952 native definitions
+retain their normalized membership; 303 retained profiles are additional owners.
+There is no comparable earlier database-size/import-time baseline.
+
+R5 terminology pruning uses bindings from operational owners and their legitimate
+ancestor/base/content-reference/profile dependency closure
+(`GetTerminologyOwnerClosure`). Unrelated passive binding additions do not retain
+previously pruned terminology. Necessary terminology for an eligible/referenced use
+may intentionally survive; this does not change vocabulary selection policy.
 
 ### DSTU2 constraint XPath retention
 
@@ -82,10 +176,10 @@ known corresponding datatype contexts; for example, the XML element-existence
 rule is considered only at a proven Quantity-family complex-type root with the
 actual closed child vocabulary and XML-attribute `id`, not arbitrary elements.
 Required bindings and their qualified domains remain obligations: a native
-target or an owner projection cannot widen a target required binding. These
-internal facilities do not activate the full-catalog production consumers.
+target or an owner projection cannot widen a target required binding. Retention
+and downstream bounded proof are separate responsibilities.
 
-### Internal occurrence decisions (pre-activation)
+### Occurrence decisions
 
 The pair-local interpreter returns typed native reuse, legal emitted-owner
 projection, or explicit unrepresentable decisions. Unrepresentable means that
@@ -95,7 +189,7 @@ use/type/profile alternative and slice context, definition canonical/version,
 complete required/native effective facts and their origins, and typed reasons.
 It never preserves restrictions, establishes equivalence, or supplies a usable
 target canonical or projection. Binding differences do not manufacture unsafe
-code rules; qualified policy and executable guards remain a later integration.
+code rules; the existing qualified policy and executable guards remain required.
 
 Both effective fact graphs are classified before a negative decision is
 accepted. Binding names/descriptions and common-binding annotations are metadata;
@@ -104,8 +198,12 @@ Cardinality, type alternatives, slicing, representation, invariant parameters,
 fixed/pattern values, bounds, lengths and modifier obligations cannot disappear
 behind another known failure. Missing/malformed facts, unknown semantic fields
 or extensions, invalid ownership and comparison-only results remain unresolved.
-The offline five-core gate keeps all 3,604 cases across all 20 directed pairs,
-including positive R5-to-R4B native SimpleQuantity reuse at both Range bounds
+The offline five-core proof census classifies all 3,604 cases across all 20
+directed pairs: 284 native reuses, zero owner projections and 3,320 structured
+unrepresentable decisions, with zero unresolved cases. These negatives are not
+preserved restrictions, Equivalent results, usable targets or universal
+impossibility claims. The census includes positive R5-to-R4B native SimpleQuantity
+reuse at both Range bounds
 and executable non-equivalence witnesses for DSTU2 Age zero and R5 comparator
 `http://hl7.org/fhir/quantity-comparator|5.0.0#ad`.
 
@@ -130,7 +228,7 @@ and executable non-equivalence witnesses for DSTU2 Age zero and R5 comparator
   **Rationale:** The code path explicitly requests `ensureDeleted: true` and recreates a clean content schema before loading definitions, so a forced/fresh load is designed to replace the prior content snapshot rather than merge into it.
 
 - **`_exclusionSet` URLs skipped at load time.**  
-  **Rule:** `ucum-units`, `all-languages`, `mimetypes`, `timezones`, plus the DSTU2 BCP47 / BCP13 URLs for the latter two categories, are excluded from import.  
+  **Rule:** `ucum-units`, `all-languages`, `mimetypes`, `timezones`, plus the DSTU2 BCP47 / BCP13 URLs for the latter two categories, retain their vocabulary exclusions. Structure exclusions still prevent processing; all retained profiles and their available projections are stored even when excluded.\
   **Source:** `XVerProcessor.cs:113-128` defines the set and comments it as "ValueSet and CodeSystem URLs to exclude from processing"; `XVerProcessor.cs:532` passes it into `_db.TryLoadFromDefinitionCollections`; `ComparisonDatabase.cs:670-677` passes it to code-system, value-set, and structure import helpers.  
   **Rationale:** AI Guess: these are externally maintained or broad infrastructure vocabularies whose codes change too frequently, or whose content is too large/ambient, to serve as useful cross-version anchors.
 
@@ -155,7 +253,7 @@ and executable non-equivalence witnesses for DSTU2 Age zero and R5 comparator
   **Rationale:** The constructor branches directly on the path extension and assigns `_dbPath` / `_dbName` from the resulting directory/file split or directory-only path.
 
 - **`artifactFilter` is accepted but unused.**  
-  **Rule:** `LoadDatabase` exposes `FhirArtifactClassEnum? artifactFilter = null`, but the method body never reads it; fresh loads import all package content classes.  
+  **Rule:** `LoadDatabase` exposes `FhirArtifactClassEnum? artifactFilter = null`, but the method body never reads it; fresh loads import the inventories described above, not separately classified extensions/logical models.\
   **Source:** Signature at `XVerProcessor.cs:505-507`; body at `XVerProcessor.cs:509-538`; full-content import at `ComparisonDatabase.cs:670-677`.  
   **Rationale:** AI Guess: this is a leftover or future extension point from an earlier design where database loading might have supported partial artifact loading.
 
@@ -187,6 +285,7 @@ Decisions: 8 total — cited: 2 — AI Guess: 5 — unresolved: 1
 - [x] Implicit `LoadDatabase(false)` callers in other public step methods
 - [x] `ComparisonDatabase` constructors and `TryLoadFromDefinitionCollections` signature (`ComparisonDatabase.cs:80-190`, `ComparisonDatabase.cs:652-654`)
 - [x] Content table creation/drop helper (`DbContentClasses.cs:31-109`)
+- [x] Full normalized profile inventory, exact identity/roots, independent completion and passive binding isolation
 
 ## References
 
@@ -194,6 +293,11 @@ Decisions: 8 total — cited: 2 — AI Guess: 5 — unresolved: 1
   - `src/Fhir.CodeGen.Comparison/XVer/XVerProcessor.cs` (lines 104-143, 161-250, 256-431, 505-538, 557-566, 614-622, 668-676, 749-798)
   - `src/Fhir.CodeGen.Comparison/Models/ComparisonDatabase.cs` (lines 80-190, 593-696; `TryLoadFromDefinitionCollections` signature at lines 652-654)
   - `src/Fhir.CodeGen.Comparison/Models/DbContentClasses.cs` (lines 31-109)
+  - `src/Fhir.CodeGen.Comparison/Models/DbStructureDefinitionFacts.cs` — normalized facts, inventory format/policy/counts and read-only readiness
+  - `src/Fhir.CodeGen.Comparison/Models/XVerStructureCatalog.cs` — definition/processing views and exact owner resolution
+  - `src/Fhir.CodeGen.Comparison/Models/ProfileUseFacts.cs` — effective-use classification and bounded proof
+  - `src/Fhir.CodeGen.Common/Extensions/CommonDefinitions.cs` / `src/Fhir.CodeGen.CrossVersionLoader/Convert_20_50/ElementDefinition_20_50.cs` — approved runtime XPath retention
+  - `src/Fhir.CodeGen.Lib.Tests/XVerQuantityProfileTests.cs` / `XVerProfileCatalogTests.cs` — actual normalized cores and catalog regressions
   - `src/Fhir.CodeGen.Lib/Configuration/ConfigXVer.cs` (lines 16-92, 459-472)
   - `src/Fhir.CodeGen.Lib/Configuration/ConfigRoot.cs` (lines 30-32)
   - `src/fhir-codegen/Program.cs` (`DoXVer`, revised failure stream and exit code)
@@ -208,3 +312,5 @@ Decisions: 8 total — cited: 2 — AI Guess: 5 — unresolved: 1
 *Verified against commit `d02100974b2dc1b05ecf1af69c29095e6973f4c8` on `2026-06-04`.*
 
 *Database lifecycle and xver failure behavior revised on `2026-11-13`; historical references retained.*
+
+*Active catalog/processing contract checked by method against `64d48bb993c6eef207e9b8ca03d593a277068746` on `2026-11-17`; unchanged historical line references retained.*

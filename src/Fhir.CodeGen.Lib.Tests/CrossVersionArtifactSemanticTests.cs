@@ -14,11 +14,12 @@ using Fhir.CodeGen.Lib.Configuration;
 using Hl7.Fhir.Model;
 using Microsoft.Data.Sqlite;
 using Shouldly;
+using Xunit.Abstractions;
 
 namespace Fhir.CodeGen.Lib.Tests;
 
 [Collection(UnsafeCodeProfileCollection.Name)]
-public class CrossVersionArtifactSemanticTests
+public class CrossVersionArtifactSemanticTests(ITestOutputHelper output)
 {
     [Theory]
     [InlineData(false)]
@@ -70,6 +71,9 @@ public class CrossVersionArtifactSemanticTests
         JsonElement mapped = FindConceptMapSourceElement(typeMap, "SimpleQuantity");
         mapped.GetProperty("target").EnumerateArray().Select(element => element.GetProperty("code").GetString())
             .ShouldBe(["SimpleQuantity"]);
+        mapped.GetProperty("target")[0].GetProperty(reverse ? "relationship" : "equivalence").GetString()
+            .ShouldBe(reverse ? "source-is-broader-than-target" : "wider");
+        output.WriteLine($"{pair.SourcePackageShortName}->{pair.TargetPackageShortName} added datatype-map entry: {JsonSerializer.Serialize(mapped)}");
         JsonElement unmapped = FindConceptMapSourceElement(typeMap, "OrphanQuantity");
         unmapped.TryGetProperty("target", out _).ShouldBeFalse();
         string resourceMapPath = Path.Combine(resources,
@@ -79,7 +83,11 @@ public class CrossVersionArtifactSemanticTests
         string typeIndex = File.ReadAllText(Path.Combine(pages, "index-types.md"));
         string quantityRow = typeIndex.Split('\n')
             .Single(line => line.StartsWith($"| [{pair.SourceFhirSequence} SimpleQuantity](", StringComparison.Ordinal));
-        quantityRow.ShouldContain("datatypes.html#SimpleQuantity");
+        quantityRow.TrimEnd('\r').ShouldBe(
+            $"| [{pair.SourceFhirSequence} SimpleQuantity](https://hl7.org/fhir/{pair.SourcePackageShortName}/datatypes.html#SimpleQuantity)" +
+            $" | [{pair.TargetFhirSequence} SimpleQuantity](https://hl7.org/fhir/{pair.TargetPackageShortName}/datatypes.html#SimpleQuantity)" +
+            " | [XVer Lookup: SimpleQuantity](lookup-sd-SimpleQuantity.html) |");
+        output.WriteLine("Added type-lookup row: " + quantityRow.TrimEnd('\r'));
         string orphanRow = typeIndex.Split('\n')
             .Single(line => line.StartsWith($"| [{pair.SourceFhirSequence} OrphanQuantity](", StringComparison.Ordinal));
         orphanRow.ShouldContain("Extension");
@@ -90,6 +98,57 @@ public class CrossVersionArtifactSemanticTests
         string orphanLookup = ReadLookupPage(pages, orphanRow);
         orphanLookup.ShouldContain("Extension");
         orphanLookup.ShouldNotContain("Basic");
+        HashSet<string> emittedHtml = [.. Directory.GetFiles(pages, "*.md").Select(path => Path.GetFileNameWithoutExtension(path))];
+        HashSet<string> emittedCanonicals = [];
+        foreach (string file in Directory.GetFiles(resources, "*.json"))
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(file));
+            JsonElement root = document.RootElement;
+            emittedHtml.Add(Path.GetFileNameWithoutExtension(file));
+            emittedHtml.Add(root.GetProperty("resourceType").GetString() + "-" + root.GetProperty("id").GetString());
+            if (root.TryGetProperty("url", out JsonElement url))
+            {
+                emittedCanonicals.Add(url.GetString()!);
+                if (root.TryGetProperty("version", out JsonElement version))
+                {
+                    emittedCanonicals.Add(url.GetString() + "|" + version.GetString());
+                }
+            }
+        }
+        int checkedLinks = 0;
+        foreach (string content in new[] { typeIndex, lookup, orphanLookup })
+        {
+            foreach (Match link in Regex.Matches(content, @"\]\((?<file>[^:/#)]+)\.html(?:#[^)]*)?\)"))
+            {
+                emittedHtml.ShouldContain(link.Groups["file"].Value);
+                checkedLinks++;
+            }
+        }
+        checkedLinks.ShouldBeGreaterThan(0);
+        XVerStructureCatalog catalog = new(fixture.Connection);
+        foreach (string file in Directory.GetFiles(resources, "StructureDefinition-*.json"))
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(file));
+            foreach (string component in new[] { "snapshot", "differential" })
+            {
+                if (!document.RootElement.TryGetProperty(component, out JsonElement elements))
+                {
+                    continue;
+                }
+                foreach (JsonElement element in elements.GetProperty("element").EnumerateArray().Where(element => element.TryGetProperty("type", out _)))
+                {
+                    foreach (JsonElement type in element.GetProperty("type").EnumerateArray().Where(type => type.TryGetProperty("profile", out _)))
+                    {
+                        foreach (JsonElement canonical in type.GetProperty("profile").EnumerateArray())
+                        {
+                            string reference = canonical.GetString()!;
+                            (emittedCanonicals.Contains(reference) || catalog.ResolveDefinition(pair.TargetPackageKey, reference, required: false) is not null)
+                                .ShouldBeTrue(reference + " must resolve to an emitted artifact or exact persisted target definition");
+                        }
+                    }
+                }
+            }
+        }
         string elementMap = File.ReadAllText(Path.Combine(resources, quantity.ElementConceptMapFileName + ".json"));
         elementMap.ShouldContain("Quantity:simplequantity.code");
         elementMap.ShouldNotContain("Basic");

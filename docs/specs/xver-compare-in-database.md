@@ -41,7 +41,7 @@ Prior state expected by this phase includes `_db` and the database rows loaded b
 
 ## Outputs
 
-`CompareInDatabase` returns `void` and does not itself materialize rows. Its delegated `FhirDbComparer.Compare` call drops and recreates comparison tables before running requested comparison domains (`FhirDbComparer.cs:117-119`), so this phase is destructive rather than incremental.
+`CompareInDatabase` returns `void` and does not itself materialize rows. When structures are requested, its delegated `FhirDbComparer.Compare` first calls the read-only `UnsafeCodeInputStore.RequireInputs`, then drops and recreates requested comparison tables. The accepted path is destructive rather than incremental; a readiness failure occurs before either requested family's reset.
 
 When value-set comparison is requested, the affected tables are:
 
@@ -58,9 +58,17 @@ The table set comes from `DbComparisonClasses.DropTables` / `CreateTables`, whic
 
 ## Safety Comparison Revisions and Provenance
 
-The comparison algorithm, relationships, and target selection are unchanged.
-Safety classification is a separate outcome pass; annotations and configured
-rules do not change comparison decisions.
+Safety code classification remains a separate outcome pass; annotations and
+configured rules do not change comparison decisions. Structure/type comparison
+now uses the catalog's operational boundary and effective constrained-use facts
+below rather than profile-blind Quantity equivalence.
+
+`RequireInputs` validates completed inventory **format 1 / policy 2**, completed
+unsafe inputs **format 2**, and the input snapshot's exact inventory-revision
+binding. Missing/old/incomplete snapshots (including preparatory native-only
+policy 1) fail before destructive reset; readiness creates no missing schema.
+Opening the named database, maps-only loading or comparison cannot repair an
+incomplete catalog. Vocabulary-only comparison remains independent.
 
 `StructureComparer.CompareStructures` calls
 `UnsafeCodeInputStore.BeginComparison` before each directed pair, clearing
@@ -68,8 +76,9 @@ its old comparison/outcome certification. Only after the pair's final
 structure/element/type cache flush does `CompleteComparison` assign a new
 comparison revision against the **completed input revision** captured at
 the start. Missing/incomplete/incompatible inputs, changed dependencies,
-and failed flushes cannot certify the pair. Ordinary comparison can still
-run without a safety snapshot, but it does not manufacture one.
+and failed flushes cannot certify the pair. Structure comparison cannot run
+without compatible completed inputs, including for direct `StructureComparer`
+entry; an explicitly loaded source-free snapshot is valid, absent metadata is not.
 Vocabulary-only comparison neither requires nor certifies structure safety.
 
 `DbUnsafeCodePairState.InputRevision` and `ComparisonRevision` bind later
@@ -89,17 +98,47 @@ pair is not current just because it has no rows. Outcome resets retain
 comparison revisions; vocabulary-only resets retain structure revisions.
 See [reset bookkeeping](./fhirdb-comparer-compare.md#safety-state-at-reset-and-pair-boundaries).
 
-Recovery is load maps → compare → outcomes → export. Persisted caches from
-before this feature or the explicit-primary-key insertion correction must
-be regenerated; there is no inferred migration or export-time repair.
+Recovery from incompatible catalog state is explicit destructive content reload →
+maps → compare → outcomes → export. If only maps changed on a compatible catalog,
+rerun maps → compare → outcomes → export. There is no inferred migration or
+consumer/export-time repair.
+
+## Processing and Constrained Uses
+
+`StructureComparer` selects `XVerStructureCatalog.GetProcessedStructures` on both
+sides. Existing native primitives/complex types/resources retain their behavior
+and exclusions. Profiles require ordinal declared `Type == "Quantity"` and unique,
+acyclic ancestry to the actual same-package native Quantity. Profiles on Age,
+Coding and resources stay passive; missing comparisons do not promote them.
+Target selection and each transitive intermediate edge must pass the same
+both-endpoint gate, including old persisted comparison rows.
+
+Passive definitions can still constrain legitimate type/profile/targetProfile
+occurrences inside processed owners. `ElementTypeComparer.EffectiveTypes` prefers
+local declarations, consulting exact base correspondence only when absent.
+`ProfileUseFacts.AtUse` combines inherited and local restrictions per type/profile
+alternative and slice context, including cardinality, fixed/pattern values,
+bindings, bounds, slicing, opaque invariants and known primitive bridge obligations.
+Local restrictions cannot loosen the base; alternatives form a permitted union,
+not a conjunction. One prohibited branch does not prohibit the whole occurrence.
+Canonical versions are definition versions, and native-name lookup excludes profiles.
+
+Constrained and Quantity-family uses require complete typed proofs. A supported
+native reuse preserves the mapping authority's relationship; a structured
+`Unrepresentable` comparison is not mapped/Equivalent and retains exact facts
+and reasons in `TechnicalMessage`. Unknown/malformed/unclassified required semantics
+fail rather than becoming an accepted negative or default Equivalent. Missing
+profiles never fall back to unprofiled Quantity. The actual-core proof census
+(3,604 uses: 284 native reuses, zero projections, 3,320 negatives, zero unresolved)
+is classification evidence, not proof that all artifacts can be scheduled/exported.
 
 ## Owning-Root Correspondence
 
 `ElementComparer.DoElementComparisons` applies explicit element mappings
 first. Its fallback resolves one root within each exact package/owning
 structure, then substitutes the target root's path for the source root's
-Id prefix. Structure names need not equal root element IDs: a profile
-named `SelectedCoding` can legitimately have root Id/Path `Coding`.
+Id prefix. Structure names need not equal root element IDs: R3 SimpleQuantity
+has root Id `Quantity:simplequantity` and Path `Quantity`.
 Required roots must be unique and well formed, and source IDs must have
 the exact root, member or slice boundary; invalid facts raise a contextual
 error. An ordinary absent target member remains a no-map comparison.
@@ -133,7 +172,7 @@ error. An ordinary absent target member remains a no-map comparison.
 
 - If `_db` is initially `null`, `CompareInDatabase` attempts `LoadDatabase(false)`; if that still leaves `_db` null, it throws `Cannot compare without a loaded database!` (`XVerProcessor.cs:673-681`).
 - The `FhirDbComparer.Compare` delegation returns no result; exceptions from table reset, `ValueSetComparer.CompareValueSets`, or `StructureComparer.CompareStructures` propagate to the caller (`FhirDbComparer.cs:117-140`).
-- Re-running `compare`, `compare-vs`, `compare-sd`, or the default pipeline wipes the tables for whichever comparison domains are requested before writing fresh comparison rows (`FhirDbComparer.cs:117-119`, `DbComparisonClasses.cs:32-70`).
+- After readiness succeeds, re-running comparison wipes the tables for whichever domains are requested before writing fresh rows. A structure readiness failure leaves previous rows/stamps intact; pair-time failures after reset do not complete certification (`FhirDbComparer.Compare`, `DbComparisonClasses.DropTables`).
 - Passing `artifactFilter: null` runs both domains through default parameters; passing an unhandled enum value also falls into the default arm and runs both domains (`XVerProcessor.cs:710-714`, `FhirDbComparer.cs:111-115`).
 
 ## Coverage Checklist
@@ -154,6 +193,9 @@ error. An ordinary absent target member remains a no-map comparison.
   - `src/Fhir.CodeGen.Comparison/CompareTool/ValueSetComparer.cs:100-145`
   - `src/Fhir.CodeGen.Comparison/XVer/ComparisonAnnotation.cs:17` (`ComparisonDirection`)
   - `src/Fhir.CodeGen.Comparison/Models/DbComparisonClasses.cs:32-70` (`DropTables` / `CreateTables`)
+  - `src/Fhir.CodeGen.Comparison/Models/XVerStructureCatalog.cs` / `ProfileUseFacts.cs` — processing boundary, exact roots and effective-use proofs
+  - `src/Fhir.CodeGen.Comparison/CompareTool/ElementTypeComparer.cs` — local type precedence and constrained comparisons
+  - `src/Fhir.CodeGen.Comparison/Models/DbUnsafeCodeClasses.cs` — pre-reset input readiness and pair revisions
 - Related specs:
   - [`xver-load-database.md`](./xver-load-database.md)
   - [`xver-load-fhir-cross-version-maps.md`](./xver-load-fhir-cross-version-maps.md)
@@ -165,3 +207,5 @@ error. An ordinary absent target member remains a no-map comparison.
 
 ---
 *Legacy comparison references verified at `d02100974b2dc1b05ecf1af69c29095e6973f4c8`; safety revisions and command routing rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*
+
+*Active catalog/constrained-comparison contract checked by method against `64d48bb993c6eef207e9b8ca03d593a277068746` on `2026-11-17`; unchanged historical line references retained.*

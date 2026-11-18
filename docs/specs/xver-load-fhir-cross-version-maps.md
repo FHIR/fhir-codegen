@@ -14,7 +14,7 @@
 - Preconditions:
   - A comparison database must be available. If `_db` is null, this method calls `LoadDatabase(false)` and throws if the database is still null (`XVerProcessor.cs:792-799`).
   - `_config.CrossVersionMapSourcePath` must be non-empty for actual map loading. If absent, `UnsafeCodeInputStore.ReplaceWithEmptyInputs` explicitly publishes a completed, source-free safety snapshot (`SourceMode = "none"`); it clears safety facts/rules without resetting unrelated legacy maps. Missing metadata is never interpreted as an empty policy.
-  - The loaded database is expected to already contain the FHIR packages and definitions that map files reference; loaders select packages, structures, elements, value sets, and concepts from `_db.DbConnection` while processing (`ConceptMapLoader.cs:435-454`, `FmlLoader.cs:238-319`).
+  - The database must have a completed compatible full definition inventory before map replacement, including the source-free path. `DefinitionInventoryStore.RequireReady` rejects missing/incomplete catalogs and preparatory native-only PolicyVersion 1; maps-only loading cannot repair them.
 
 ## Inputs
 
@@ -41,15 +41,45 @@
 
 ## Outputs
 
-- The loader recreates the mapping tables before loading: `DbMappingClasses.DropTables(_db)` then `DbMappingClasses.CreateTables(_db)` (`MappingLoader.cs:82-84`). The table set is defined in `DbMappingClasses` (`DbMappingClasses.cs:19-35`):
+- After configuration and catalog preflight, the loader recreates the mapping tables: `DbMappingClasses.DropTables(_db)` then `DbMappingClasses.CreateTables(_db)` (`MappingLoader.TryLoadCrossVersionSourceMaps`). The legacy table set is defined in `DbMappingClasses`:
   - `MappingSourceFiles` / `DbMappingSourceFile`: one record per source ConceptMap or FML file, with relative filename, file type flags, and URL (`DbMappingClasses.cs:38-48`, `MappingLoader.cs:164-191`).
   - `ValueSetMappings` / `DbValueSetMapping`: value-set-level mappings from `input\codes` ConceptMaps (`DbMappingClasses.cs:86-103`, `ConceptMapLoader.cs:1032-1066`, `ConceptMapLoader.cs:1210-1217`).
   - `ValueSetConceptMappings` / `DbValueSetConceptMapping`: source concept to target concept or explicit no-map rows from `input\codes` ConceptMaps (`DbMappingClasses.cs:105-132`, `ConceptMapLoader.cs:1068-1217`).
   - `StructureMappings` / `DbStructureMapping`: type, resource, fallback, internal primitive, and FML-created structure mappings (`DbMappingClasses.cs:135-157`, `ConceptMapLoader.cs:127-231`, `ConceptMapLoader.cs:782-920`, `ConceptMapLoader.cs:1221-1555`, `FmlLoader.cs:1227-1306`, `FmlLoader.cs:1399-1405`).
   - `ElementMappings` / `DbElementMapping`: element mappings from `input\elements` ConceptMaps and FML-derived path relationships (`DbMappingClasses.cs:160-195`, `ConceptMapLoader.cs:545-779`, `FmlLoader.cs:1308-1405`).
 - Safety input rows are `DbUnsafeCodeElementAnnotation`, `DbUnsafeCodeMapEvidence`, and `DbUnsafeCodeRule`. `DbMappingClasses` also owns the input/pair state tables; it does not own the outcome trigger table.
+- Internal `ProfileMapOwnerFacts` rows supplement raw annotations with exact owners, input snapshot and positional mapping-edge provenance. Map reset clears these rows and inventory/input bindings, not the definition inventory.
 - The entry method throws when a configured source cannot be loaded; it does not discard the loader's `false` result (`XVerProcessor.LoadFhirCrossVersionMaps`).
 - No files are written by this step.
+
+## Operational Endpoints and Exact Owners
+
+`XVerStructureCatalog` supplies the definition and processing views. Native
+owners retain existing behavior/exclusions. A Profile is operational only when
+its ordinal declared Type is exactly `Quantity` and its unique acyclic ancestry
+reaches the actual same-package native Quantity. Profiles on Age, Coding or
+resources remain passive even when referenced elsewhere.
+
+ConceptMap type/resource/fallback maps and FML require **both** operational
+endpoints; a passive endpoint is not converted into an explicit no-map. Quantity
+counterparts may move between Profile and ComplexType without becoming resources.
+Canonical owner resolution uses exact package/URL/definition version, not package
+release or basename. Native-name resolution excludes profiles. FML `uses` aliases,
+root parameters and elements are bound to their declared owners, not a package-wide
+first matching Id. Element maps preserve exact roots/IDs, including R3
+`Quantity:simplequantity` with Path `Quantity`.
+
+Authored raw evidence survives passive or unresolved normalization. It is not
+thereby an operational mapping authority. `UnsafeCodeSourceReader` captures each
+annotation's original file, input snapshot, ConceptMap id/URL, group/source/target
+indices, group canonical literals/versions and source/target owner context.
+`ConceptMapLoader` associates the positional annotation with the real
+`ElementMappingKey`; `ResolveOwners` retains resolved, passive, unresolved or
+explicitly unnormalized state. Shared `Quantity.code` strings, owner keys alone,
+or later FML file-level provenance cannot substitute for that authored edge.
+At consumption, applicable ambiguous owner/authority facts fail; only contributing
+annotation keys enter `AnnotationKeysJson`, not all annotations with the same
+element tuple. Primary mappings remain authoritative before fallback mappings.
 
 ## Optional Unsafe-Code Configuration
 
@@ -125,12 +155,14 @@ before legacy normalization can skip unresolved concepts or elements:
   [outcomes](./xver-generate-outcomes.md#unsafe-code-safety-outcomes), not
   by changing comparisons.
 
-Configuration preflight precedes any destructive map reset. A bad or
-unreadable configuration retains the preceding completed snapshot,
-including old mappings and completion revisions. Once an accepted load
+Configuration and completed-inventory preflight precede any destructive map
+reset. A bad/unreadable configuration or incompatible catalog retains preceding
+mapping rows and completion revisions. Once an accepted load
 starts, completion is invalidated before replacement. The new completed
-input revision is published **last**, after the relevant map capture and
-existing loading stages finish. A mid-load source/database failure may
+input revision (unsafe input format **2**) is published **last**, after the relevant map capture,
+owner resolution and existing loading stages finish. `BeginMapInputs` /
+`CompleteMapInputs` bind the input snapshot to the exact completed inventory
+revision (inventory format **1**, policy **2**). A mid-load source/database failure may
 leave partial rows but never a completed snapshot. This is explicit marker
 invalidation and last-write completion, **not** a transaction around the
 entire loader: generated insert/update helpers already open transactions.
@@ -145,18 +177,18 @@ certify outcomes over old element-mapping provenance.
 ## Algorithm
 
 1. `LoadFhirCrossVersionMaps` ensures `_db` exists. If not, it calls `LoadDatabase(false)` and fails fast only if the database remains null (`XVerProcessor.cs:792-799`).
-2. With no source path, publish the explicit empty safety snapshot described above and return. Otherwise construct `MappingLoader`.
+2. With no source path, `ReplaceWithEmptyInputs` first requires the completed catalog, then publishes the explicit empty, inventory-bound safety snapshot described above and returns. Otherwise construct `MappingLoader`.
 3. `MappingLoader.TryLoadCrossVersionSourceMaps` validates that the source path exists. Invalid or missing directories log an error and return `false` before any table reset (`MappingLoader.cs:53-64`).
-4. `MappingLoader` verifies database access, creates a `PackageLoader` configured not to auto-load expansions or resolve dependencies, and preflights optional unsafe-code configuration. Only then does it invalidate/drop/recreate mapping state, begin the new input snapshot, and insert normalized rules (`MappingLoader.TryLoadCrossVersionSourceMaps`).
+4. `MappingLoader` verifies database access, creates a `PackageLoader` configured not to auto-load expansions or resolve dependencies, preflights optional unsafe-code configuration, and calls `DefinitionInventoryStore.RequireReady`. Only then does it invalidate/drop/recreate mapping state, begin the inventory-bound input snapshot, and insert normalized rules (`MappingLoader.TryLoadCrossVersionSourceMaps`).
 5. `ConceptMapLoader` loads source ConceptMaps in this order: `input\codes`, type maps / internal type maps, `input\resources`, and `input\elements` (`MappingLoader.cs:86-132`). For each relative path, it requires `<root>\input` and the specific subdirectory, otherwise it logs a warning and returns for that category (`ConceptMapLoader.cs:359-373`).
 6. `ConceptMapLoader.LoadSourceMaps` enumerates matching top-level files only, parses source/target versions from filenames, skips maps whose source or target package is not in the loaded database, parses the JSON as `ConceptMap`, dispatches by category, and logs category totals (`ConceptMapLoader.cs:392-541`).
 7. Code ConceptMaps create or reuse `ValueSetMappings`, then add `ValueSetConceptMappings` for mapped concepts or explicit no-map concepts. Invalid source/target concept literals are logged and skipped, while unresolved source or target value sets throw unless they are in the processor exclusion set or are non-expandable (`ConceptMapLoader.cs:925-1217`).
 8. Type ConceptMaps create `StructureMappings` for non-primitive data types and explicit no-map rows. Primitive source types in these external type ConceptMaps are skipped even when `UseInternalTypeMaps` is false (`ConceptMapLoader.cs:1221-1367`). The fallback type ConceptMap is applied across every ordered pair of loaded packages, marks rows `IsFallback = true`, and skips pairs/types not present in the package pair (`ConceptMapLoader.cs:1369-1555`).
-9. Resource ConceptMaps create `StructureMappings` for resource mappings or explicit no-map rows (`ConceptMapLoader.cs:782-920`). Element ConceptMaps locate a relevant structure map, then create `ElementMappings` for target elements or explicit no-map rows; unresolved element paths often log and continue rather than throwing (`ConceptMapLoader.cs:545-779`).
+9. Resource ConceptMaps create operational `StructureMappings` for resource mappings or authored no-map rows. Element ConceptMaps resolve exact owners on both sides, locate a relevant structure map, then create owner-qualified `ElementMappings` and positional annotation associations. Ordinary absent paths can log and continue; required canonical/owner ambiguity is not repaired by choosing another profile with the same element Id (`ConceptMapLoader.loadSourceElementMap`).
 10. If `UseInternalTypeMaps` is true, `ConceptMapLoader.LoadInternalTypeMaps(loadPrimitives: true, loadComplex: false)` adds built-in primitive type `StructureMappings` for both directions of each loaded package pair before external type ConceptMaps are loaded (`MappingLoader.cs:109-124`, `ConceptMapLoader.cs:54-124`, `ConceptMapLoader.cs:127-231`). The mapping data comes from `FhirTypeMappings.PrimitiveMappings` (`FhirTypeMappings.cs:112-120`).
 11. `FmlLoader.LoadSourceFml` scans `<root>\input` for package-pair directories named `{source.ShortName}to{target.ShortName}` and the reverse direction for every loaded package pair. Each top-level `.fml` file is parsed; names ending in the no-`R` source-to-target suffix are normalized, and maps named `primitives` are skipped (`FmlLoader.cs:77-119`, `FmlLoader.cs:122-187`).
 12. For each parsed FML map, `FmlLoader` records a `MappingSourceFiles` row, resolves source/target structures and root group parameters against the database, walks simple-copy and complex mapping expressions to collect source-to-target element path relationships, and then reconciles those paths into `StructureMappings`/`ElementMappings` by adding missing rows or updating FML source metadata on existing rows (`FmlLoader.cs:189-403`, `FmlLoader.cs:575-895`, `FmlLoader.cs:1128-1408`).
-13. After all categories and FML, publish completed inputs and return `true`; `LoadFhirCrossVersionMaps` propagates failure instead of ignoring `false`.
+13. After all categories and FML, call `UnsafeCodeSourceReader.ResolveOwners`, publish completed inputs and their inventory binding last, and return `true`; `LoadFhirCrossVersionMaps` propagates failure instead of ignoring `false`.
 
 ## Decision Points
 
@@ -199,6 +231,7 @@ The remaining `AI Guess:` concerns legacy duplicate-row tolerance, not the stric
 - [x] `FmlLoader.LoadSourceFml` and FML processing/reconciliation (`FmlLoader.cs:77-1408`)
 - [x] Mapping table definitions (`DbMappingClasses.cs:19-195`)
 - [x] `ConfigXVer` options referenced by this step (`ConfigXVer.cs:39-57`, `ConfigXVer.cs:437-448`)
+- [x] Both-endpoint operational gates, exact annotation owner/edge provenance and inventory-bound inputs
 
 ## References
 
@@ -212,6 +245,9 @@ The remaining `AI Guess:` concerns legacy duplicate-row tolerance, not the stric
   - `src/Fhir.CodeGen.Comparison/CrossVersionSource/ConceptMapLoader.cs:350-1558`
   - `src/Fhir.CodeGen.Comparison/CrossVersionSource/FmlLoader.cs:77-1408`
   - `src/Fhir.CodeGen.Comparison/Models/DbMappingClasses.cs:19-195`
+  - `src/Fhir.CodeGen.Comparison/CrossVersionSource/UnsafeCodeSourceReader.cs` — raw positional capture and owner resolution
+  - `src/Fhir.CodeGen.Comparison/Models/DbStructureDefinitionFacts.cs` — map-owner rows and inventory/input bindings
+  - `src/Fhir.CodeGen.Comparison/Models/XVerStructureCatalog.cs` — eligibility and exact owner/canonical resolution
   - `src/Fhir.CodeGen.Comparison/CompareTool/FhirTypeMappings.cs:112-120`
   - `src/Fhir.CodeGen.Lib/Configuration/ConfigXVer.cs:39-57`
   - `src/Fhir.CodeGen.Lib/Configuration/ConfigXVer.cs:437-448`
@@ -225,3 +261,5 @@ The remaining `AI Guess:` concerns legacy duplicate-row tolerance, not the stric
 
 ---
 *Legacy loader references verified at `d02100974b2dc1b05ecf1af69c29095e6973f4c8`; safety snapshot/configuration contracts rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*
+
+*Active catalog/owner/revision contract checked by method against `64d48bb993c6eef207e9b8ca03d593a277068746` on `2026-11-17`; unchanged historical line references retained.*

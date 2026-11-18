@@ -30,7 +30,7 @@ public void GenerateOutcomes(
 ## Outputs
 
 - Tables written: `ValueSetOutcomes`, `ValueSetConceptOutcomes`, `StructureOutcomes`, `ElementOutcomes`, and `ElementOutcomeTargets` (`DbOutcomeClasses.cs:292-395,397-832`).
-- `OutcomeGenerator.GenerateOutcomes` drops and recreates requested outcome tables on every run (`OutcomeGenerator.cs:38-40`; `DbOutcomeClasses.cs:157-193`). This is a destructive reset for the selected output family.
+- When structures are requested, `OutcomeGenerator.GenerateOutcomes` calls the read-only `UnsafeCodeInputStore.RequireInputs` before dropping/recreating any requested tables. It requires completed inventory format 1 / policy 2, unsafe inputs format 2 and their exact inventory binding; old/incomplete/native-only policy 1 catalogs fail without destructive reset. Accepted runs remain destructive for the selected output family.
 - Structure generation writes both source-element summary rows (`DbElementOutcome`) and per-target/context rows (`DbElementOutcomeTarget`) (`ElementOutcomeGenerator.cs:613-651,693-731,893-932,1572-1687`).
 - Structure generation also records cross-version **cardinality-only** extension needs alongside data-type extensions: the `DbElementOutcome.RequiresCardinalityDefinition` / `RequiresCardinalitySlice` flags (`DbOutcomeClasses.cs:438-439`), the parsed `CardinalityExtensionContexts` list (`DbOutcomeClasses.cs:582-600`), `GetCombinedContexts()` which unions extension and cardinality contexts (`DbOutcomeClasses.cs:602-630`), and the per-target `DbElementOutcomeTarget.CardinalityContext*` fields (`DbOutcomeClasses.cs:825-828`).
 - The enum declarations are documentation/vocabulary for now; the row classes do not have an `OutcomeAction` column and generation does not assign the enum constants (`DbOutcomeClasses.cs:7-144,292-832`).
@@ -43,7 +43,63 @@ by `DbElement.StructureKey` and resolves them with the owning
 root element Id `Coding`; these remain separate owners and must not
 collide in a package-wide Id dictionary. Multiple roots within the same
 owner remain invalid and fail rather than selecting an arbitrary root.
-Existing missing-root/null behavior is unchanged.
+Needed roots require an available snapshot and exact owner graph; differential-only
+projection is not an effective snapshot. R3 SimpleQuantity retains Id
+`Quantity:simplequantity` and Path `Quantity`, not a synthetic profile-name root.
+
+## Profile Processing and Representation Decisions
+
+`StructureOutcomeGenerator.buildOutcomes` selects the catalog's processed owners
+on **both** sides, including unmatched-source handling. Existing native behavior
+and exclusions remain, including primitive standalone-outcome suppression.
+New Profile owners require ordinal declared `Type == "Quantity"` and unique
+acyclic ancestry to the actual same-package native Quantity. Profiles on Age,
+Coding and resources remain passive; no comparison does not imply a new passive
+outcome. Operational Quantity profiles use datatype/extension handling, never
+resource/Basic fallback.
+
+At legitimate occurrences, `ProfileUseFacts` combines inherited/local constraints
+per type/profile/targetProfile alternative and slice context. Local declarations
+cannot loosen inherited restrictions. Alternatives form a permitted union:
+prohibiting one branch does not prohibit the occurrence. Cardinality, slicing,
+fixed/pattern, bindings, bounds, opaque invariants and known primitive bridge
+obligations remain required facts. Neither a Quantity name nor a missing comparison
+supplies default Equivalent; missing declared profiles cannot use their unprofiled
+base as a substitute.
+
+`UnsafeCodeOutcomeGenerator.GenerateForPair` calls `ProfileUseFacts.ClassifyPair`
+**before** checking `HasCandidates`. Required facts are classified even when
+there are zero unsafe-code candidates/triggers. Complete typed decisions are
+`NativeReuse`, legal `OwnerProjection`, or structured `Unrepresentable`.
+The last means no faithful representation supported by this bounded implementation,
+not universal mathematical impossibility. Unknown/malformed/missing facts,
+conflicting ownership or unclassified required semantics still fail the gate;
+an arbitrary Unsupported result/diagnostic is not an accepted negative.
+
+`PersistNegativeDecisions` uses existing
+`DbElementOutcome.ExtensionDefinitionIsProhibited` / `ExtensionProhibitionReason`
+fields for versioned structured envelopes, retaining prior prohibition reasons.
+Each envelope preserves the directed pair, exact use/type/profile alternative,
+slice/owner roots, required/native facts and typed reasons. Negative element,
+target and structure summaries lose equivalent/identical/full-map claims and
+usable generated/substitution/target canonicals. They do not set
+`PreservesRestrictions`, create unsafe-code qualification, or authorize scheduling
+an unsupported artifact. `RequirePersistedDecisions` recomputes classifications
+from current facts and compares exact envelopes on reopened consumer readiness;
+rows/stamps alone cannot hide missing or changed decisions.
+
+The actual five-core proof census is **3,604 = 284 native reuses + 0 owner
+projections + 3,320 structured negatives**, zero unresolved. This classifies uses
+across 20 directed pairs, not a successful whole-core comparer/export run or
+universal representability. Committed persisted actual-core ad/Age negatives and
+the earlier positive Range consumer use manually arranged conservative ordinary
+rows. A separate persisted Range regression runs actual element/type comparison
+and element outcome generation across four reopens, with explicitly authored
+structure envelopes and artifact schedule, not a whole-core structure-comparer
+claim. Both Range cases prove exact R4B SimpleQuantity reuse without projecting
+either bound. Export separately re-proves any owner projection only inside an
+already-scheduled resource profile, preserving its complete permitted-alternative
+union; extension-only projection remains unsupported.
 
 ## Unsafe-Code Safety Outcomes
 
@@ -136,7 +192,8 @@ inserted triggers** and all outcome completion stamps unset. A complete
 authoritative nonmember or version nonmatch removes only that primitive
 use, leaving typed Coding classification independent. Context element IDs
 remain those of the original contributing map, never the endpoint root.
-No public API, JSON fields, columns or format constants change.
+Selected endpoints retain the existing `SourcePathJson` schema. The active catalog
+contract uses unsafe input/outcome format 2; old format stamps are not compatible.
 
 `DbUnsafeCodeTrigger` stores owning structure outcome, directed context,
 semantic source/type-use path (`SourcePathJson`), qualified identity,
@@ -153,8 +210,9 @@ completed compatible input and a successful comparison revision against
 that input. Old element-map provenance is rejected. After triggers flush,
 `CompleteOutcomes` rechecks dependencies and writes
 `OutcomeInputRevision`, `OutcomeComparisonRevision`, and
-`OutcomeFormatVersion` **last**. A successful evaluation with **zero
-triggers** writes the same completion stamp; it is different from never
+`OutcomeFormatVersion` (**2**) **last**. A successful evaluation with **zero
+triggers** writes the same completion stamp only after required profile facts
+and any structured negatives are classified/persisted; it is different from never
 evaluated, failed, stale, or incompatible state.
 
 Structure outcome reset invalidates all pair outcome stamps and recreates
@@ -164,17 +222,26 @@ mid-pass dependency changes propagate without completion; partial rows
 cannot certify readiness. Vocabulary-only outcomes neither require safety
 prerequisites nor reset existing structure triggers/stamps.
 
+Only exact contributing annotation keys are selected through the original
+input snapshot, positional group/source/target provenance, owner and actual
+mapping-edge association. Passive annotations remain evidence without becoming
+authority; an applicable ambiguous/unresolved authority fails rather than bleeding
+across shared element IDs. Transitive contexts retain only contributing owners
+and edges, with primary authority before fallback.
+
 `PairFacts` loads rules, evidence, annotations, elements, types, comparisons,
 outcomes, and binding data once per pair into dictionaries/lookups
 (`UnsafeCodeOutcomeGenerator.cs:241-283`); binding/context/evidence
 resolution is memoized. The rule/element classifier loops use these
 in-memory collections rather than issuing a query for every rule at every
-element. This is a query-placement inspection, not a timing claim.
+element. Pair-local lazy payload/effective-fact caching does not bound the eager
+relational memory added by full catalog import. This is query-placement
+inspection, not a timing or fixed-memory claim.
 
 ## Algorithm
 
 1. **Dispatch in `XVerProcessor.GenerateOutcomes`** (`XVerProcessor.cs:619-660`): lazy-load DB, throw if absent, construct `OutcomeGenerator`, and dispatch by `artifactFilter` into vocabulary, structures, or both.
-2. **Inside `OutcomeGenerator.GenerateOutcomes`** (`OutcomeGenerator.cs:32-53`): drop/create selected tables, instantiate `ValueSetOutcomeGenerator` when `processValueSets`, and instantiate `StructureOutcomeGenerator` when `processStructures`.
+2. **Inside `OutcomeGenerator.GenerateOutcomes`**: if `processStructures`, require compatible inventory-bound inputs before reset; then drop/create selected tables, instantiate `ValueSetOutcomeGenerator` when `processValueSets`, and instantiate `StructureOutcomeGenerator` when `processStructures`.
 3. **`ValueSetOutcomeGenerator.CreateOutcomesForValueSets`** (`ValueSetOutcomeGenerator.cs:42-77`): load packages ordered by version, build closer-first stepped pairs in both directions, apply `specificPairs`, then per pair run `buildOutcomes(packagePair)` and `applyCachedChanges(packagePair)`.
 4. **ValueSet `buildOutcomes`** (`ValueSetOutcomeGenerator.cs:112-735`): load source/target ValueSets, concepts, comparisons, and concept comparisons; skip non-expandable/excluded URLs; create no-map outcomes for source ValueSets with no usable target; otherwise compute concept coverage across all targets, determine whether a generated cross-version definition is needed, and emit ValueSet plus concept outcomes.
 5. **`StructureOutcomeGenerator.CreateOutcomesForStructures`**: use the same closer-first pair schedule, validate/begin safety dependencies, create an `ElementOutcomeGenerator` per pair, run structure `buildOutcomes`, flush caches, run `elementOutcomeGenerator.DoPostProcessing(packagePair)`, flush again, then classify/persist safety triggers and complete the pair.
@@ -185,12 +252,12 @@ element. This is a query-placement inspection, not a timing claim.
 
 ## Decision Points
 
-- **Rule:** Standalone `outcomes*` commands reuse existing DB state unless `ReloadDatabase` is true; the default command always reloads, compares, generates, and exports. **Source:** `XVerProcessor.cs:372-405,421-428`. **Rationale:** AI Guess: this supports fast outcome iteration while keeping the default path reproducible.
+- **Rule:** Standalone `outcomes*` commands reuse existing DB state unless `ReloadDatabase` is true; the default pipeline opens an existing named DB without reloading (or initializes a missing one), then loads maps, compares, generates and exports. **Source:** `XVerProcessor.ProcessCommand` / `LoadDatabase`. **Rationale:** Reuse is distinct from explicit destructive reload.
 - **Rule:** A null `_db` triggers `LoadDatabase(false)`, then a hard exception. **Source:** `XVerProcessor.cs:619-627`. **Rationale:** All generators are database-backed and cannot run from source packages alone.
 - **Rule:** `artifactFilter` is a family switch: vocabulary, structures, or both. **Source:** `XVerProcessor.cs:629-660`. **Rationale:** It aligns generation with the two exporter domains.
 - **Rule:** Selected outcome tables are dropped and recreated before generation. **Source:** `OutcomeGenerator.cs:38-40`; `DbOutcomeClasses.cs:157-193`. **Rationale:** AI Guess: destructive reset avoids stale rows after comparison or generator changes.
 - **Rule:** Package pairs are generated closer-first and both directions; `specificPairs` filters directed pairs exactly. **Source:** `ValueSetOutcomeGenerator.cs:49-76`; `StructureOutcomeGenerator.cs:71-110`. **Rationale:** AI Guess: nearby FHIR versions are easiest to inspect first, and directed filtering lets callers request only `R5 -> R4`, for example.
-- **Rule:** Per-pair caches are flushed and cleared after each package pair; structure generation flushes again after element post-processing. **Source:** `ValueSetOutcomeGenerator.cs:79-110`; `StructureOutcomeGenerator.cs:104-156`. **Rationale:** This bounds memory and makes inserted rows available before post-processing.
+- **Rule:** Per-pair caches are flushed and cleared after each package pair; structure generation flushes again after element post-processing. **Source:** `ValueSetOutcomeGenerator.cs:79-110`; `StructureOutcomeGenerator.cs:104-156`. **Rationale:** This releases pair-local working state and makes inserted rows available before post-processing, not a bound on all eager relational memory.
 
 ### ValueSet and concept outcomes
 
@@ -220,7 +287,7 @@ element. This is a query-placement inspection, not a timing claim.
 ### Element outcomes
 
 - **Rule:** `ProcessSourceStructure` filters out id/extension/modifierExtension elements, determines type/relationship completeness, checks required ValueSet bindings, then calls `createOutcomes`. **Source:** `ElementOutcomeGenerator.cs:347-357,403-432`. **Rationale:** The final row needs structural, type, terminology, and context state.
-- **Rule:** Mapping-compatible relationships are `null`, `Equivalent`, and `SourceIsNarrowerThanTarget`. **Source:** `ElementOutcomeGenerator.cs:387-390`. **Rationale:** AI Guess: null is treated permissively for identity/default comparison paths; equivalent and source-narrower preserve source meaning.
+- **Rule:** Ordinary mapping-compatible relationships are `null`, `Equivalent`, and `SourceIsNarrowerThanTarget`; constrained/Quantity-family uses additionally require complete effective-fact proof. **Source:** `ElementOutcomeGenerator.ProcessSourceStructure` / `determineMappingCompleteness`, `ProfileUseFacts`. **Rationale:** A null/missing comparison is not proof that profile restrictions survive.
 - **Rule:** An element initially requires xver when it is non-root, not fully mapped across all targets, and leaf; no-target rows and parent requirements can also force xver. **Source:** `ElementOutcomeGenerator.cs:493-496,936-954`. **Rationale:** Leaf source data with no complete native target needs representation, and children of generated definitions must stay inside that definition.
 - **Rule:** `UseElementSameName` means a mapped target/context name matches and no extension/slice is required. **Source:** enum `DbOutcomeClasses.cs:102-111`; target selection and fields `ElementOutcomeGenerator.cs:1343-1349,1654-1662`. **Rationale:** AI Guess: inferred from target rows, `IsRenamed == false`, and no xver requirement because the enum is not assigned.
 - **Rule:** `UseElementRenamed` means the selected target/context name differs. **Source:** enum `DbOutcomeClasses.cs:108-111`; `IsRenamed = sourceEd.Name != targetEd.Name` in `ElementOutcomeGenerator.cs:1654`. **Rationale:** Rename is tracked separately from mapping completeness.
@@ -233,7 +300,7 @@ element. This is a query-placement inspection, not a timing claim.
 - **Rule:** A matching extension substitution prevents generating a new extension by making `extSubstitute` non-null and storing substitution fields. **Source:** lookup `ElementOutcomeGenerator.cs:1185-1208`; `requiresExtensionDefinition` condition `ElementOutcomeGenerator.cs:1369-1374`; fields `ElementOutcomeGenerator.cs:1651-1652`. **Rationale:** AI Guess: curated external extensions should be reused rather than duplicated. Caveat: later alternate-reference/canonical logic can overwrite `extSubstitute` (`ElementOutcomeGenerator.cs:1260-1265,1301-1306`).
 - **Rule:** Standard `alternate-reference` and `alternate-canonical` substitutions can absorb unmapped Reference/CodeableReference/canonical target-profile gaps; if they remove all unmapped types, xver is cleared. **Source:** `ElementOutcomeGenerator.cs:1210-1335`. **Rationale:** AI Guess: these standard extensions preserve narrower target profile/canonical allowances without generating a full element extension.
 - **Rule:** Required ValueSet bindings can make an element incomplete even when structural mapping exists. **Source:** `ElementOutcomeGenerator.cs:1706-1775`. **Rationale:** Required bindings constrain legal codes, so target binding relationship matters.
-- **Rule:** Quantity-like unmapped types can be considered mapped by normalized quantity type equivalence, structure comparisons, or structure mappings. **Source:** `ElementOutcomeGenerator.cs:1968-2177`. **Rationale:** AI Guess: Quantity profile names vary while remaining semantically representable.
+- **Rule:** `determineMappingCompleteness` uses branch-aware `ProfileUseFacts` proofs for profiled and Quantity-family occurrences. A normalized Quantity name, structure mapping or comparison alone cannot establish constraint preservation. **Source:** `ElementOutcomeGenerator.determineMappingCompleteness`. **Rationale:** Required profile and local restrictions must survive the actual target occurrence.
 - **Rule:** A leaf type can map by distributing its child elements across target elements when all meaningful children map. **Source:** `ElementOutcomeGenerator.cs:2181-2218,2339-2637`. **Rationale:** AI Guess: some version changes flatten/expand complex source values across target fields.
 - **Rule:** Choice-type and modifier-extension contexts may be promoted to parent contexts to find legal extension placement. **Source:** modifier context `ElementOutcomeGenerator.cs:1079-1181`; choice context `ElementOutcomeGenerator.cs:1433-1517`. **Rationale:** FHIR extensions must be placed on legal containing elements.
 - **Rule:** If xver is still needed and no context target exists, context falls back to the sole target structure root or generic `Element`. **Source:** `ElementOutcomeGenerator.cs:1519-1545`. **Rationale:** AI Guess: this prevents dropping extension definitions solely because no precise context was found.
@@ -253,7 +320,7 @@ Every rule above has a source citation. `cited` means the rationale is directly 
 
 - `GenerateOutcomes` throws when `LoadDatabase(false)` fails to populate `_db` (`XVerProcessor.cs:619-627`).
 - Structure safety requires current completed input/comparison revisions before evaluation; an empty table is not proof of readiness. Vocabulary-only generation retains its existing comparison behavior and has no structure-safety prerequisite.
-- Re-running `outcomes*` always wipes the selected outcome tables first (`OutcomeGenerator.cs:38-40`).
+- Accepted outcome runs wipe the selected tables after structure input readiness; incompatible catalog/input failures are read-only and precede reset. Later pair failures cannot certify completion.
 - Extension-substitution conflicts are silent; the last dictionary write for a key wins (`ElementOutcomeGenerator.cs:269-301`).
 - Source id/extension/modifierExtension elements are skipped, not written as explicit `IsElementId` / `IsExtension` rows (`ElementOutcomeGenerator.cs:347-357,412-414`).
 - Context promotion can throw instead of producing an unresolved row if a required parent context cannot be found (`ElementOutcomeGenerator.cs:1144-1150,1479-1486`).
@@ -284,6 +351,9 @@ Every rule above has a source citation. `cited` means the rationale is directly 
   - `src/Fhir.CodeGen.Comparison/Outcomes/StructureOutcomeGenerator.cs`
   - `src/Fhir.CodeGen.Comparison/Outcomes/ElementOutcomeGenerator.cs`
   - `src/Fhir.CodeGen.Comparison/Models/DbOutcomeClasses.cs` (enums + row classes)
+  - `src/Fhir.CodeGen.Comparison/Models/ProfileUseFacts.cs` — `ClassifyPair`, `PersistNegativeDecisions`, `RequirePersistedDecisions`
+  - `src/Fhir.CodeGen.Comparison/Outcomes/UnsafeCodeOutcomeGenerator.cs` — zero-candidate classification and selected annotation provenance
+  - `src/Fhir.CodeGen.Comparison/Models/DbUnsafeCodeClasses.cs` — inventory-bound input/comparison/outcome readiness
 - Related specs:
   - [`xver-load-extension-substitutions.md`](./xver-load-extension-substitutions.md) — feeds `_extensionSubstitutionsByElementId`
   - [`xver-load-fhir-cross-version-maps.md`](./xver-load-fhir-cross-version-maps.md) — feeds the algorithmic mappings
@@ -294,3 +364,5 @@ Every rule above has a source citation. `cited` means the rationale is directly 
 
 ---
 *Legacy outcome references verified at `e36315a1c9d16450ba81457e4f888eff78d4ae42`; safety outcomes and reload routing rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*
+
+*Active catalog/typed-decision contract checked by method against `64d48bb993c6eef207e9b8ca03d593a277068746` on `2026-11-17`; unchanged historical line references retained.*

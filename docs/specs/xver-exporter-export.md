@@ -11,13 +11,12 @@ already-computed `DbStructureOutcome` / `DbValueSetOutcome` /
 `DbValueSetConceptOutcome` rows and emits the FHIR JSON and IG markdown
 for each one.
 
-`XVerExporter.Export` is a thin orchestrator. It instantiates an
-`IgExporter`, computes its side-effect-free schedule, and validates every
-scheduled structure pair's persisted safety completion before materializing
-IG package skeletons (one cross-version IG per package pair, plus one
-validation IG per allowed package), then dispatches
-to four content exporters that fill those skeletons with FHIR resources
-and page content:
+`XVerExporter.Export` instantiates an `IgExporter`, computes its write-free
+schedule, validates every scheduled structure pair's persisted completion and
+decisions, and prepares/builds all requested vocabulary and structure definitions
+**before** materializing any IG/output directories. It then emits the prepared
+content (one cross-version IG per pair plus validation IGs per allowed package)
+and dispatches the page exporters:
 
 - `VocabularyFhirExporter` — writes CodeSystem, ValueSet, and ConceptMap
   JSON for each cross-version IG.
@@ -34,8 +33,8 @@ and page content:
 
 **File:** `src/Fhir.CodeGen.Comparison/Exporter/XVerExporter.cs:63`
 **Class:** `XVerExporter` (in `Fhir.CodeGen.Comparison.Exporter`)
-**Complexity:** Low for `XVerExporter.Export` itself (~55 lines); the
-delegated component exporters together total ~8,300 lines of code.
+Representation and serialization work lives in the delegated builders/exporters;
+the orchestration retains all prepared plans until preflight succeeds.
 
 ## Architecture Overview
 
@@ -64,17 +63,16 @@ comparison or outcome generation.
 ```text
 XVerExporter (orchestrator)
 ├── IgExporter
-│   ├── CreateInitialXVerIgs  → builds package pair list, creates
-│   │                            per-pair XVer IGs and per-package
-│   │                            validation IGs, returns tracking record
+│   ├── BuildExportSchedule  → exact pair/validation schedule, no writes
+│   ├── PrepareXVerIgs       → shared paths/trackers/allocator, no writes
+│   ├── MaterializeXVerIgs   → creates/resets directories after all builds
 │   └── FinalizeXVerIgs        → writes ig.ini, ig.json, menu.xml
-├── VocabularyFhirExporter.Export(tr)
-│       → per-IG: CodeSystem JSON, ValueSet JSON, ConceptMap JSON
+├── VocabularyFhirExporter.Build(tr) / Emit(files)
+│       → prepare JSON first, then write the same CodeSystem/ValueSet/ConceptMap files
 ├── VocabularyPageExporter.Export(tr)
 │       → per-IG: index-vs.md, lookup-vs-*.md
-├── StructureFhirExporter.Export(tr)
-│       → per-IG: Extension/Profile StructureDefinitions, structure
-│         ConceptMaps (resource/type/element maps)
+├── StructureFhirExporter.BuildDefinitions(igTr) / Emit(igTr, definitions)
+│       → prepare all pairs first; emit those definitions and resource/type/element maps
 └── StructurePageExporter.Export(tr)
         → per-IG: resource and type lookup index pages,
           per-resource/per-type lookup pages
@@ -108,11 +106,11 @@ public void Export(
 
 | Parameter | Default | Purpose |
 |---|---|---|
-| `includeIgScripts` | `true` | Whether `IgExporter` should emit publisher batch/shell scripts alongside the IG sources. Forwarded to `IgExporter.CreateInitialXVerIgs`. |
+| `includeIgScripts` | `true` | Whether `IgExporter.MaterializeXVerIgs` emits publisher batch/shell scripts alongside the IG sources. |
 | `processVocabulary` | `true` | When `true`, run `VocabularyFhirExporter.Export` and `VocabularyPageExporter.Export`. |
 | `processStructures` | `true` | When `true`, run `StructureFhirExporter.Export` and `StructurePageExporter.Export`. |
-| `maxStepSize` | `null` (= all) | Forwarded to `IgExporter.CreateInitialXVerIgs`. Limits how far apart (in package-list index) two FHIR versions may be while still producing a cross-version IG. Defaults to `_packages.Count - 1` (i.e. every pair). |
-| `specificPairs` | `null` (= all) | Forwarded to `IgExporter.CreateInitialXVerIgs`. When non-null, only the listed `(source, target)` sequence pairs are emitted. |
+| `maxStepSize` | `null` (= all) | Forwarded to `IgExporter.BuildExportSchedule`. Limits pair distance in package-list index; defaults to package count minus one. |
+| `specificPairs` | `null` (= all) | Forwarded to `IgExporter.BuildExportSchedule`. Only listed directed `(source, target)` sequence pairs are scheduled. |
 
 ### Constructor
 
@@ -137,9 +135,11 @@ public XVerExporter(IDbConnection db, ConfigXVer config)
 
 ### Exceptions
 
-`XVerExporter.Export` rejects missing/incomplete/incompatible/stale safety
-state before any IG writes when structures are requested. Component
-exporters can also throw — see *Error Handling* below.
+`XVerExporter.Export` rejects missing/incomplete/incompatible/stale catalog,
+input, comparison, outcome or persisted-decision state, and unsupported actual
+scheduled representations, before any IG/vocabulary/output writes when structures
+are requested. Later materialization/emission/finalization can still fail; this
+is preflight, not transactional rollback of all possible export errors.
 
 ## Detailed Algorithm
 
@@ -149,91 +149,89 @@ The orchestration in `XVerExporter.Export` is:
    `_crossVersionSourcePath`, `this` (the `XVerExporter` instance, so the
    child exporters can read its `_crossDefinitionVersion` and version
    knobs), and `_config`.
-2. **Build schedule, preflight, then materialize.** Call
+2. **Build schedule and validate persisted prerequisites.** Call
    `igExporter.BuildExportSchedule(maxStepSize, specificPairs)`. If
    `processStructures`, call `UnsafeCodeInputStore.RequireExportReady` on
-   **all** `schedule.PackagePairs`. Only then call the internal
-   `CreateInitialXVerIgs(schedule, includeIgScripts)` overload. This emits
-   one `XVerIgExportTrackingRecord` per cross-version
-   pair plus one `ValidationIgExportTrackingRecord` per allowed package,
-   wrapped in an `XVerExportTrackingRecord`.
-3. **Vocabulary phase (if `processVocabulary`):**
-   1. Construct `VocabularyFhirExporter(this, _db, _loggerFactory)` and
-      call `Export(tr)` (`VocabularyFhirExporter.cs:43`). For each
-      cross-version IG: emit CodeSystems, ValueSets, and ConceptMaps.
-   2. Construct `VocabularyPageExporter(this, _db, _loggerFactory)` and
-      call `Export(tr)` (`VocabularyPageExporter.cs:46`). For each
-      cross-version IG: emit `index-vs.md` and per-ValueSet
-      `lookup-vs-*.md` pages.
-4. **Structure phase (if `processStructures`):**
-   1. Construct `StructureFhirExporter(this, _db, _loggerFactory)` and
-      call `Export(tr)` (`StructureFhirExporter.cs:144`). For each
-      cross-version IG: cache target-side Extension `value[x]` types and
-      target-side canonical resource names; build a per-pair
-      `PackagePairStructureMappingTracker` from `DbStructureOutcome`
-      rows; then emit Extension and Profile StructureDefinitions plus
-      the ConceptMaps that capture the structure/type/element mappings.
-      When a non-`Basic` source maps onto the target `Basic.code` element,
-      it also profiles `Basic.code` by emitting `Basic.code.coding` slices
-      (`StructureFhirExporter.cs:1409-1499`).
-   2. Construct `StructurePageExporter(this, _db, _loggerFactory)` and
-      call `Export(tr)` (`StructurePageExporter.cs:100`). For each
-      cross-version IG: emit `index-resources.md`, `index-types.md`,
-      per-resource lookup pages, and per-type lookup pages.
-5. **Call `igExporter.FinalizeXVerIgs(tr)`** (`IgExporter.cs:686`). For
+   **all** `schedule.PackagePairs`.
+3. **Prepare/build without writes.** `PrepareXVerIgs(schedule)` returns the
+   shared `XVerExportTrackingRecord` with per-pair and validation trackers
+   and planned paths. When requested, `VocabularyFhirExporter.Build(tr)` runs
+   **first**, preserving vocabulary-first `GetName` allocation and selections.
+   Then one `StructureFhirExporter` calls `BuildDefinitions(igTr)` for **every**
+   scheduled pair, caching target Extension value types/reference inventories,
+   constructing extensions/resource profiles and checking actual representations.
+   Retain these exact definitions, trackers, allocator state and
+   `EdOutcomeMapTargets`; do not allocate/build them again on emission.
+4. **Materialize and emit only after all builds succeed.**
+   `MaterializeXVerIgs(tr, includeIgScripts)` creates/resets directories and copies
+   support content. If vocabulary is requested, emit the prepared JSON with
+   `VocabularyFhirExporter.Emit`, then run `VocabularyPageExporter.Export(tr)`.
+   If structures are requested, call `StructureFhirExporter.Emit` with each
+   prepared pair/definition plan (extensions, profiles and resource/type/element
+   maps), then `StructurePageExporter.Export(tr)` for resource/type indexes and
+   lookup pages. Resource-to-Basic handling still emits `Basic.code.coding` slices
+   where applicable; eligible Quantity profiles do not enter that resource path.
+5. **Call `igExporter.FinalizeXVerIgs(tr)`**. For
    each tracked XVer IG, write `ig.ini`, `ig.json`, and `menu.xml`. For
    each tracked validation IG, write the validation-example bundle plus
    `ig.ini`, `ig.json`, and `menu.xml`.
 
-The four content exporters all take the same `XVerExportTrackingRecord`
-argument and iterate `tr.XVerIgs`. They never iterate validation IGs.
+The public content-export wrappers/page exporters consume the shared
+`XVerExportTrackingRecord`; orchestration instead passes each prepared structure
+tracker/definition plan to `Emit`. Content work covers `tr.XVerIgs`, not validation
+IGs.
 
 ### `IgExporter.BuildExportSchedule` package-pair generation
 
 This is the only non-trivial scheduling decision in the pipeline and
 worth surfacing here because every downstream exporter walks the
-resulting pair list. The public `CreateInitialXVerIgs` signature is retained
-as a delegating wrapper; orchestration uses the schedule overload:
+resulting pair list. The public `CreateInitialXVerIgs` signature remains a
+prepare/materialize wrapper; `XVerExporter.Export` instead uses the explicit
+split so all definition builds precede materialization:
 
-1. Load `_packages` via `DbFhirPackage.SelectList(..., orderByProperties: [nameof(DbFhirPackage.PackageVersion)])`.
-2. `maxStepSize ??= _packages.Count - 1`.
+1. Load local `packages` via `DbFhirPackage.SelectList(..., orderByProperties: [nameof(DbFhirPackage.PackageVersion)])`.
+2. `maxStepSize ??= packages.Count - 1`.
 3. For `stepSize` in `1..maxStepSize`:
-   - For each `i` in `0..(_packages.Count - stepSize - 1)`:
-     - `sourcePackage = _packages[i]`, `targetPackage = _packages[i + stepSize]`.
+   - For each `i` in `0..(packages.Count - stepSize - 1)`:
+     - `sourcePackage = packages[i]`, `targetPackage = packages[i + stepSize]`.
      - If `_allowedExportVersions` contains `targetPackage.DefinitionFhirSequence`
        *and* (`specificPairs` is null or contains the forward pair):
        append `FhirPackageComparisonPair(sourcePackage, targetPackage)`.
      - If `_allowedExportVersions` contains `sourcePackage.DefinitionFhirSequence`
        *and* (`specificPairs` is null or contains the reverse pair):
        append `FhirPackageComparisonPair(targetPackage, sourcePackage)`.
-4. Record the resulting pair list in the schedule. At materialization,
-   for each pair call `createInitialXVerIg(pair, includeScripts)`.
-   Each `createInitialXVerIg` (`IgExporter.cs:1830`) also seeds a per-IG
+4. Record the resulting pair list in the schedule. `PrepareXVerIgs` uses
+   `prepareXVerIg` per pair; `MaterializeXVerIgs` later creates directories and seeds a per-IG
    `.gitignore` at the IG root, copied from
    `<crossVersionSourcePath>/input/ig-support/gitignore.txt` when that file
-   exists and the destination has none (`IgExporter.cs:1869-1880`).
+   exists and the destination has none.
 5. Build `targetFhirVersions` from `specificPairs.t` (filtered by
    `_allowedExportVersions`) if `specificPairs` is non-null.
-6. For each package in `_packages`: skip unless it's in
+6. For each package in `packages`: skip unless it's in
    `_allowedExportVersions` (and in `targetFhirVersions` when filtering);
-   otherwise add it to the validation schedule and, at materialization,
-   call `createInitialValidationIg(package, includeScripts)`.
+   otherwise add it to the validation schedule, prepare it with
+   `prepareValidationIg`, and materialize its directories/support files later.
 
 The stepped algorithm means closer-version pairs are emitted first
 within the tracking record's `XVerIgs` list. Downstream exporters
 preserve that order.
 
-Scheduling and `IgExporter` construction create no output directory.
+Scheduling, preparation and definition building create no output directory.
 Preflight uses exactly this schedule, not a second approximation of
 version flags, pair filters, or step windows. It checks compatible feature
-schema/format, completed input revision, comparison revision against that
-input, and safety-outcome input/comparison/format stamps. A completed
-zero-trigger result is valid; absent rows/stamps are not proof of safety.
+schema/format, completed full inventory (format **1**, policy **2**), completed
+input revision (format **2**) bound to that inventory, comparison revision against
+that input, safety-outcome stamps (format **2**) and recomputed persisted negative
+decisions. A completed zero-trigger result is valid only after classifying all
+required profile facts; absent rows/stamps are not proof of safety.
 Failure is read-only and protects existing IG sentinel content from the
 materializer's destructive directory reset as well as preventing fresh
 output creation. A later invalid pair blocks the entire scheduled structure
-export before even vocabulary output in a combined run. Vocabulary-only
-export bypasses this prerequisite and never creates missing safety state.
+export before even vocabulary output in a combined run. Definition construction
+preflights the actual all-pair schedule too, so a later-pair representation failure
+also precedes writes. Vocabulary-only export bypasses structure prerequisites,
+does not construct `StructureFhirExporter`/the structure catalog and never creates
+missing safety state.
 
 Old caches are not migrated or automatically recomputed. Diagnostics name
 the existing load → compare → outcomes → export recovery sequence.
@@ -269,28 +267,23 @@ flowchart TD
     Start([XVerExporter.Export]) --> NewIg[new IgExporter]
     NewIg --> Schedule[BuildExportSchedule<br/>no writes]
     Schedule --> Preflight[If structures: validate ALL scheduled pairs]
-    Preflight --> CreateIgs[CreateInitialXVerIgs schedule overload<br/>builds tr.XVerIgs and tr.ValidationIgs]
-
-    CreateIgs --> Vocab{processVocabulary?}
-    Vocab -->|yes| VFhir[VocabularyFhirExporter.Export<br/>CodeSystem + ValueSet + ConceptMap JSON]
-    VFhir --> VPage[VocabularyPageExporter.Export<br/>index-vs.md + lookup-vs-*.md]
-    Vocab -->|no| Struct{processStructures?}
-    VPage --> Struct
-
-    Struct -->|yes| SFhir[StructureFhirExporter.Export<br/>Extension + Profile SDs + structure ConceptMaps]
-    SFhir --> SPage[StructurePageExporter.Export<br/>index-resources.md + index-types.md + per-resource/type lookups]
-    Struct -->|no| Final[igExporter.FinalizeXVerIgs<br/>ig.ini + ig.json + menu.xml per IG]
-    SPage --> Final
+    Preflight --> Prepare[PrepareXVerIgs<br/>shared trackers and allocator, no writes]
+    Prepare --> VBuild[If vocabulary: Build JSON first<br/>no writes]
+    VBuild --> SBuild[If structures: BuildDefinitions for ALL pairs<br/>prove actual representations, no writes]
+    SBuild --> Materialize[MaterializeXVerIgs<br/>first directory writes]
+    Materialize --> VEmit[If vocabulary: Emit prepared JSON and pages]
+    VEmit --> SEmit[If structures: Emit prepared definitions/maps and pages]
+    SEmit --> Final[FinalizeXVerIgs<br/>IG configuration and validation content]
     Final --> End([Done])
 ```
 
 ## Typed Construction and Instance Invariants
 
 `StructureFhirExporter.BuildDefinitions` constructs definitions in memory:
-extensions first, then profiles. `BuildExtensions`/`BuildProfiles` share
+extensions first, then already-scheduled resource profiles. `BuildExtensions`/`BuildProfiles` share
 `ProfileRepresentationIndex` decisions with the actual differential
-builder. Serialization, directory writes, file records, and logging remain
-in the public export shell. Construction order, `GetName` allocation,
+builder. Definition writes and logging remain in the emission shell; vocabulary JSON
+serialization is write-free build work. Construction order, `GetName` allocation,
 generated IDs/URLs, and `EdOutcomeMapTargets` mapping provenance are
 preserved.
 
@@ -382,8 +375,9 @@ facts and malformed selected endpoints fail contextually. Diagnostics keep
 the original path, qualified identity and provenance and end:
 `Regenerate load, compare, outcomes, and export after resolving the source-value representation.`
 Single-use/unaffected paths and empty plan input retain their behavior.
-No export-side writes, migration, global format invalidation, policy
-reclassification or rewrite-on-read is introduced.
+Selected-endpoint compatibility handling itself introduces no export-side writes,
+migration, policy reclassification or rewrite-on-read. The active catalog contract
+separately requires compatible input/outcome format 2.
 
 New selected paths round-trip through existing `SourcePathJson` and
 `ReadConstraintPlans`, while context element IDs remain the original map
@@ -451,9 +445,9 @@ as well as direct maps; distinct outer/imported ValueSet identities alone
 do not justify rejection of an identity-preserving map. No target-code
 predicate substitution, runtime conversion or trigger omission repairs an
 identity change.
-State preflight happens before all IG writes; projection diagnostics occur
-during definition construction and are not a promise of transactional
-rollback for every later export failure.
+State preflight and all scheduled definition-construction/projection checks happen
+before IG/vocabulary/output writes. Later I/O, map/page emission or finalization
+errors are not covered by transactional rollback.
 
 The StructureDefinition's own `implicitRules` remains **unset**. Passing
 this new invariant does not assert that all bindings/cardinalities or
@@ -462,6 +456,99 @@ four R4B minima below are the sole characterized cardinality exception.
 R4/R4B tests evaluate expressions recovered from serialized profiles
 against target-release typed instances; the existing R3 conversion branch
 also preserves constraint key/severity/human/expression/source.
+
+## Quantity Profile Membership and Bounded Representation
+
+The catalog stores all retained normalized profiles, but standalone export uses
+operational owners on both sides: existing native behavior/exclusions plus Profiles
+with ordinal declared `Type == "Quantity"` and unique acyclic ancestry to the
+actual same-package native Quantity. Profiles on Age, Coding and resources remain
+passive. They may constrain legitimate uses without receiving standalone files,
+map membership or lookup pages.
+
+Eligible Quantity profiles use **datatype-style** type/element maps, type indexes,
+lookup pages and per-element extensions when scheduled. They are not resources,
+do not enter resource maps/indexes or Basic fallback, and do not automatically
+receive standalone datatype profiles. `BuildProfiles` deliberately skips datatypes.
+No imported or negative profile is permission to advertise a nonexistent generated
+URL. Native references verify exact target definition/version and effective facts;
+a missing profile cannot fall back to unprofiled Quantity or basename matching.
+Vocabulary build/emission preserves selection policy and semantics. Import-time
+R5 pruning isolates unrelated passive bindings; terminology retained for an
+operational/referenced constraint is an intentional possible output change
+([inventory contract](./xver-load-database.md#inventory-completion-reuse-and-costs)).
+
+`prepareDefinitions` recomputes pair-local `ProfileUseFacts.ClassifyPair` decisions.
+`RequireScheduledUse` checks actual scheduled owners/uses, not every stored
+definition indiscriminately. A complete `Unrepresentable` outcome is retained as
+negative evidence, never Equivalent, preserved restrictions, fake unsafe-code
+qualification or a usable target. It blocks an unsupported scheduled use, while
+unrelated unscheduled negatives need not block a proven Range consumer. Missing,
+malformed and unclassified required semantics remain errors, not accepted negatives.
+
+`ProjectScheduledUses` can re-prove a negative as `OwnerProjection` only inside an
+already-scheduled resource profile, with exact target owner/occurrence and complete
+permitted-alternative-union safety. `ApplyProjection` then carries the proved
+restrictions into that differential without mutating native definitions or
+persisted negative envelopes. Extension-only projection remains unsupported;
+extension values require proven native reuse and legal target Extension value
+types. This is not a general projection promise.
+
+The actual-core bounded census is 3,604 decisions: 284 native reuses, zero owner
+projections, 3,320 structured negatives and zero unresolved. It is not a whole-core
+comparer/export success or universal impossibility claim. In particular R5 Range
+bounds reuse exact `SimpleQuantity|4.3.0` with comparator max 0 and native `sqty-1`;
+R5 comparator `ad` and DSTU2 Age zero-value differences have persisted negative
+consumer tests with conservative manually arranged ordinary rows.
+`PersistedRangePipelineRetainsQuantityRestrictionsAndNoPassiveArtifacts` separately
+runs the real element/type comparer and element outcome generator for actual Range
+and its local carrier, with four physical database reopens. Its structure envelopes
+and artifact schedule are authored; it is not a whole-core structure-comparer run.
+
+### Representative stable output diff (fixture-based)
+
+These are **selected-field/text additions**, not a captured real-core byte diff.
+`CrossVersionArtifactSemanticTests.OperationalQuantityMapsAndPagesRemainDatatypesAcrossProfileClassMovement`
+uses `CreateProcessingEligibilityInputs` and authored local maps to exercise
+Profile ↔ ComplexType movement. In its R5 → R4B direction, the emitted type map
+and linked type-lookup page contain:
+
+```diff
+ input/resources/R5-type-map-to-R4B.json — selected group.element fields
++ {"code":"SimpleQuantity","target":[{"code":"SimpleQuantity","equivalence":"wider"}]}
+ input/pagecontent/index-types.md
++| [R5 SimpleQuantity](https://hl7.org/fhir/R5/datatypes.html#SimpleQuantity) | [R4B SimpleQuantity](https://hl7.org/fhir/R4B/datatypes.html#SimpleQuantity) | [XVer Lookup: SimpleQuantity](lookup-sd-SimpleQuantity.html) |
+```
+
+The same real artifact assertions require SimpleQuantity's `index-types.md` row
+to use `datatypes.html#SimpleQuantity`, preserve
+`Quantity:simplequantity.code` in its element map, and forbid SimpleQuantity and
+OrphanQuantity in the resource map/index. OrphanQuantity is a fixture-only eligible
+profile without a direct target: its type lookup points to Extension, not Basic.
+No standalone datatype profile is built; PassiveAge/PassiveCoding/PassiveValueSet
+and the fixture's passive MoneyQuantity appear in no emitted JSON/markdown.
+
+Separately, `UnsafeCodeProfileTests.PassiveProfileAlternativesRetainTheirOwnConstraintsAndExactNativeReferences`
+asserts these selected **normalized construction JSON** fields for a constructed
+Extension value in its R5 → R4 fixture (not a claimed target-file byte diff):
+
+```diff
+ Extension.value[x].type — exact target-native alternative references
++ [{"code":"Coding","profile":["http://example.org/StructureDefinition/Coding-a|4.0.1","http://example.org/StructureDefinition/Coding-b|4.0.1"]}]
+```
+
+Both referenced passive target definitions retain their own fixed code (`a` or
+`b`); neither is exported as a new profile. The versions are definition versions,
+not inferred release suffixes. The actual-core Range proof above independently
+verifies native SimpleQuantity facts; it is not fabricated output from this fixture.
+
+Intentional constrained-output changes also include restrictions projected into
+already-generated resource profiles. Committed
+`ScheduledResourceOwnerEmitsProjectedTypedRestrictionsInTheTargetVersion` checks
+serialized R4/R4B occurrence cardinality, fixed code, pattern system, required
+versioned binding and the `selected-1` invariant at `Parameters.parameter.value[x]`,
+with focused valid/invalid target-instance checks. These are not merely recovered
+`xv-unsafe-code-*` expression assertions or full-validator acceptance claims.
 
 ## Measured Imported Native Mapping Contract
 
@@ -651,8 +738,14 @@ Six additive row/helper families are **public**, not internal-only:
 
 They expose scalar/serialized persisted data and generated SQLite
 create/drop/select/insert/update helpers under the existing generator
-visibility contract. Policy, selector, construction, and lifecycle
-services remain internal; no existing public member is removed.
+visibility contract. The catalog's three supplementary rows
+(`DbStructureDefinitionFacts`, `DbDefinitionInventoryState`,
+`DbProfileMapOwnerFacts`) and their generated containers remain **internal**.
+The accessibility-aware generator preserves existing public containers.
+Policy, selector, construction, and lifecycle services remain internal; no existing
+public signature is changed. The approved shared
+`CommonDefinitions.ExtUrlEdConstraintXPath` URL constant is additive, not a public
+facts/catalog DTO.
 These are accepted additive NuGet API/schema additions, while the
 conditional validation invariant and the four approved R4B minima are
 observable generated-output changes requiring release notes/consumer
@@ -662,7 +755,9 @@ Regenerate content → maps → comparisons → outcomes → exports with the
 new binary. In particular databases produced before the explicit-key fix
 can contain detached references even if tables exist; they require
 regeneration, not automatic migration. Old/missing/incompatible safety
-schema is rejected on structure export.
+schema is rejected on structure export. Preparatory native-only inventory policy 1
+is also incompatible with active policy 2; maps-only loading, reopening and consumers
+do not repair it. Readiness is read-only and never creates missing schema.
 
 For rollback, restore the previous binary and its matching pre-change
 database/artifacts together, or regenerate with that binary. Do not mix
@@ -766,8 +861,9 @@ class ValidationIgExportTrackingRecord {
 }
 ```
 
-The content exporters add file records to these lists as they write
-files; `FinalizeXVerIgs` later turns the lists into `package.json`
+Builders/emitters populate these same tracking lists; prepared allocation and
+`EdOutcomeMapTargets` survive materialization without a second build.
+`FinalizeXVerIgs` later turns the lists into `package.json`
 entries via `XVerIgExportTrackingRecord.AsPackageContents()`.
 
 ### `FhirPackageComparisonPair`
@@ -800,19 +896,10 @@ roughly of the form:
 │   │   │   ├── index-resources.md            # StructurePageExporter
 │   │   │   ├── index-types.md                # StructurePageExporter
 │   │   │   └── lookup-{resource|type}-*.md   # StructurePageExporter
-│   │   ├── vocabulary/
-│   │   │   ├── CodeSystem-*.json             # VocabularyFhirExporter
-│   │   │   └── ValueSet-*.json               # VocabularyFhirExporter
-│   │   ├── vocab-maps/
-│   │   │   └── ConceptMap-*.json             # VocabularyFhirExporter
-│   │   ├── extensions/
-│   │   │   └── StructureDefinition-ext-*.json # StructureFhirExporter
-│   │   ├── profiles/
-│   │   │   └── StructureDefinition-*.json    # StructureFhirExporter
-│   │   ├── resource-maps/
-│   │   │   └── ConceptMap-*.json             # StructureFhirExporter
-│   │   └── element-maps/
-│   │       └── ConceptMap-*.json             # StructureFhirExporter
+│   │   ├── vocabulary/                      # shared VocabularyDir / VocabMapDir
+│   │   │   └── *.json                       # CodeSystems, ValueSets, ConceptMaps
+│   │   └── resources/                       # shared structure output directory
+│   │       └── *.json                       # extensions, resource profiles, resource/type/element maps
 │   └── package.json
 ├── hl7.fhir.uv.xver-r5.r4/                   # reverse direction
 └── hl7.fhir.uv.xver-validation-r5/           # per-version validation IG
@@ -851,15 +938,15 @@ produced by `GenerateOutcomes` (see
 [`xver-generate-outcomes.md`](./xver-generate-outcomes.md) for how those rows
 are computed).
 
-- **Extension emission.** `StructureFhirExporter.exportExtensions`
-  (`StructureFhirExporter.cs:2245-2428`) runs a pass that selects
+- **Extension construction/emission.** `StructureFhirExporter.BuildExtensions`
+  selects
   `DbElementOutcome` rows with `RequiresCardinalityDefinition == true`
-  (`StructureFhirExporter.cs:2317-2325`) and emits an Extension
+  and constructs an Extension
   StructureDefinition for each, in addition to the `RequiresExtensionDefinition`
   (data-type) pass. The extension's legal `Context` is built from
   `DbElementOutcome.GetCombinedContexts()`, which unions the data-type and
-  cardinality contexts (`StructureFhirExporter.cs:2364-2370`;
-  `DbOutcomeClasses.cs:602-630`).
+  cardinality contexts. `exportExtensions` later writes the prepared definitions
+  without rebuilding or reallocating them.
 - **Profile-side constraint.** When an element needs a cardinality extension
   but *not* a data-type extension
   (`RequiresCardinalityDefinition && !RequiresExtensionDefinition`), the
@@ -886,15 +973,15 @@ are computed).
 the component exporters also raise exceptions on missing tracking-record state. Notable
 sites:
 
-- `StructureFhirExporter.Export` throws if the target package's
+- `StructureFhirExporter.prepareDefinitions` throws if the target package's
   `Extension` complex type, or the `Extension.value[x]` element, cannot
   be located in the database (`StructureFhirExporter.cs:159, 170`). This
   effectively prevents extension generation for any target package that
   was not loaded as a FHIR core package.
 - `VocabularyFhirExporter.exportConceptMaps` throws when
   `igTr.VocabMapDir is null` (`VocabularyFhirExporter.cs:73`); the
-  directory should have been populated by `IgExporter.createInitialXVerIg`
-  prior to dispatch.
+  path should have been populated by `IgExporter.PrepareXVerIgs` before
+  write-free vocabulary building.
 - `VocabularyPageExporter.exportVsLookupPages` /
   `exportVsIndexPage` throw when `igTr.PageContentDir is null`
   (`VocabularyPageExporter.cs:63, 196`).
@@ -919,6 +1006,13 @@ sites:
   `ucum-units`, `all-languages`, `mimetypes`, `timezones`). See
   `VocabularyFhirExporter.cs:94-95, 117-118`,
   `VocabularyPageExporter.cs:89-93, 240-244`.
+- Combined IG export in the Quantity artifact fixture is not acceptance of
+  structure-only full IG export to R5. The R5 `writeIgJsonR5` finalizer requires both
+  structure and ValueSet page records even when one family is disabled. Source
+  inspection confirms that entire finalizer and the unconditional finalization
+  call already had this limitation at pre-catalog commit `514ce121d`. It is not
+  changed here; write-free construction and combined emission assertions do not
+  establish single-family R5 full-export success.
 
 ## Integration Points
 
@@ -944,9 +1038,9 @@ artifact-filter dispatch table.
 
 ### Generated package ecosystem
 
-Each cross-version IG produced by this pipeline targets the HL7
-Implementation Guide format and is publishable by the standard FHIR IG
-publisher. The trio of default IG dependencies
+Each cross-version IG targets the HL7 Implementation Guide format for use with
+the standard FHIR IG publisher; this is not publisher acceptance of every schedule
+or a claim of structure-only full-export validation. The trio of default IG dependencies
 (`hl7.terminology@7.1.0`, `hl7.fhir.uv.extensions@5.3.0`,
 `hl7.fhir.uv.tools@1.1.2`) is hard-coded as a fallback in
 `IgExporter.cs:515-543` but is overridden by
@@ -957,18 +1051,21 @@ when that file is present.
 
 ### Order of magnitude
 
-- `XVerExporter.Export` does a fixed amount of work itself (object
-  construction + five method dispatches); all real cost is in the
-  component exporters.
-- `IgExporter.CreateInitialXVerIgs` is `O(_packages.Count ^ 2)` in the
+- `XVerExporter.Export` builds requested vocabulary and structure plans for the
+  complete schedule before writing, retaining those plans through preflight. This
+  intentionally costs more memory than emitting one pair immediately.
+- `IgExporter.BuildExportSchedule` is `O(package count ^ 2)` in the
   worst case (default `maxStepSize`), bounded in practice by
   `_allowedExportVersions` and `specificPairs`.
 - `VocabularyFhirExporter.Export` and `VocabularyPageExporter.Export`
   are linear in the number of `DbValueSetOutcome` rows per IG.
-- `StructureFhirExporter.Export` and `StructurePageExporter.Export` are
-  linear in the number of `DbStructureOutcome` rows per IG, with an
-  extra pass per IG to cache target-side Extension `value[x]` types and
-  canonical resource names (`StructureFhirExporter.cs:182-201`).
+- Structure build/emission reads outcomes plus effective dependency graphs,
+  alternatives and representation proofs; row count alone is not a bound on that
+  semantic work. Target Extension value types/reference inventories are cached.
+- Full relational profile import and normalized payload storage increase database
+  size/import/eager fact costs. Lazy pair-local caches do not guarantee bounded
+  eager memory. Release observations report counts/size/import and pair time/process
+  memory without inventing numerical thresholds or a native-only timing baseline.
 
 ### Caching
 
@@ -1003,16 +1100,15 @@ Pieces of the export pipeline this spec claims to cover:
   (`XVerExporter.cs:32-61`)
 - [x] `IgExporter` constructor (allowed versions, config files, default
   dependencies) (`IgExporter.cs:437-546`)
-- [x] `IgExporter.CreateInitialXVerIgs` (pair generation + tracking
-  record construction) (`IgExporter.cs:610-684`)
+- [x] `IgExporter.BuildExportSchedule`, `PrepareXVerIgs`, `MaterializeXVerIgs`
+  (exact schedule, shared tracking/allocation, deferred directory writes)
 - [x] `IgExporter.FinalizeXVerIgs` (ig.ini / ig.json / menu.xml writes)
   (`IgExporter.cs:686-704`)
-- [x] `VocabularyFhirExporter.Export` entry shape
-  (`VocabularyFhirExporter.cs:43-57`)
+- [x] `VocabularyFhirExporter.Build` / `Emit` and retained public `Export` wrapper
 - [x] `VocabularyPageExporter.Export` entry shape
   (`VocabularyPageExporter.cs:46-57`)
-- [x] `StructureFhirExporter.Export` entry shape and per-IG caches
-  (`StructureFhirExporter.cs:144-220`)
+- [x] `StructureFhirExporter.BuildDefinitions` / `Emit`, retained public `Export`
+  wrapper and per-IG caches
 - [x] `StructurePageExporter.Export` entry shape and exclusion list
   (`StructurePageExporter.cs:100-129`)
 - [x] Cross-version cardinality-extension emission
@@ -1023,6 +1119,8 @@ Pieces of the export pipeline this spec claims to cover:
 - [x] `Basic.code` profiling (`StructureFhirExporter.cs:1409-1499`)
 - [x] Per-IG `.gitignore` seeding (`IgExporter.cs:1869-1880`)
 - [x] Per-IG output directory layout
+- [x] Operational Quantity datatype membership, bounded native reuse/owner projection and fixture-based stable output excerpts
+- [x] Write-free all-pair builds, vocabulary-first shared allocation and prepared `EdOutcomeMapTargets` reuse
 - [x] Error sites and known limitations
 - [x] CLI / API entry path
 
@@ -1044,6 +1142,11 @@ Pieces of the export pipeline this spec claims to cover:
   resource / type lookup markdown emission (~931 lines)
 - `src/Fhir.CodeGen.Comparison/XVer/XVerProcessor.cs:557-612` —
   `ExportOutcomes` (constructs and dispatches `XVerExporter`)
+- `src/Fhir.CodeGen.Comparison/Models/ProfileUseFacts.cs` /
+  `DbUnsafeCodeClasses.cs` — recomputed decisions and read-only export readiness
+- `src/Fhir.CodeGen.Lib.Tests/CrossVersionArtifactSemanticTests.cs`,
+  `UnsafeCodeProfileTests.cs`, `UnsafeCodePipelineTests.cs`,
+  `XVerQuantityProfileTests.cs` — artifact/example and bounded representation evidence
 
 ### Related specs
 
@@ -1071,6 +1174,10 @@ Pieces of the export pipeline this spec claims to cover:
 
 ---
 *Legacy exporter references verified at `e36315a1c9d16450ba81457e4f888eff78d4ae42`; safety construction/preflight contracts and measured artifact deltas rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*
+
+*Active catalog/representation/build-emission contract and fixture-based Quantity
+excerpts checked by method against `64d48bb993c6eef207e9b8ca03d593a277068746` on
+`2026-11-17`; unchanged historical evidence and line references retained below.*
 *Shared imported applicability, responsible-map diagnostics and the measured R4/R4B matrix checked against `f7c00a6b4c96c092e0912e29610dddca16e46d4f` and its committed assertions on `2026-11-06`.*
 
 ## Measured H2 Mixed-Choice Baseline (Evidence Only)

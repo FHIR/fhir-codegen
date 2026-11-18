@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The `FhirDbComparer.Compare` method is now a compact orchestration entry point for rebuilding comparison output tables and delegating comparison work. It does not walk source packages, build package-pair records, or perform artifact-level comparison loops itself. Instead, it drops and recreates the requested comparison tables, then invokes `ValueSetComparer.CompareValueSets` and/or `StructureComparer.CompareStructures` with the same pair-window options supplied by the caller (`src\Fhir.CodeGen.Comparison\CompareTool\FhirDbComparer.cs:111-142`).
+The `FhirDbComparer.Compare` method is a compact orchestration entry point for rebuilding comparison output tables and delegating comparison work. It does not walk source packages, build package-pair records, or perform artifact-level comparison loops itself. When structures are requested it first validates completed catalog/map inputs, then drops and recreates the requested comparison tables and invokes `ValueSetComparer.CompareValueSets` and/or `StructureComparer.CompareStructures` with the supplied pair-window options (`FhirDbComparer.Compare`).
 
 ## Architecture Overview
 
@@ -40,8 +40,9 @@ public void Compare(
 
 ### Algorithm Steps
 
-1. **Drop requested comparison tables**
-   - `Compare` first calls `DbComparisonClasses.DropTables(_db, forValueSets: processValueSets, forStructures: processStructures)` (`FhirDbComparer.cs:117-119`).
+1. **Validate structure prerequisites, then drop requested comparison tables**
+   - If `processStructures`, `Compare` first calls `UnsafeCodeInputStore.RequireInputs`. This read-only gate requires completed inventory format 1 / policy 2, unsafe input format 2, and the snapshot's exact inventory-revision binding. It creates no missing schema and rejects preparatory native-only policy 1, missing, old or incomplete catalogs before any requested table reset.
+   - After acceptance, `Compare` calls `DbComparisonClasses.DropTables(_db, forValueSets: processValueSets, forStructures: processStructures)`.
    - The drop helper removes `DbValueSetComparison` and `DbValueSetConceptComparison` when value sets are requested, and removes `DbStructureComparison`, `DbElementComparison`, and `DbElementTypeComparison` when structures are requested (`DbComparisonClasses.cs:32-50`).
 
 2. **Create requested comparison tables**
@@ -54,13 +55,14 @@ public void Compare(
 
 4. **Run structure comparisons when requested**
    - If `processStructures` is `true`, `Compare` constructs `StructureComparer` with the shared database connection and logger factory, then calls `CompareStructures(maxStepSize, specificPairs)` (`FhirDbComparer.cs:132-140`).
-   - `CompareStructures` loads packages ordered by package version, builds a directional package-pair list by step size and `specificPairs`, initializes `ElementComparer`, then processes each package pair in built order and applies cached structure/element/type changes after each pair (`StructureComparer.cs:85-131`). The per-pair pass processes artifact classes in dependency order (`PrimitiveType`, `ComplexType`, `Resource`, `Profile`), selects source structures by class, skips excluded URLs, and chooses direct neighbor or transitive paths based on step size and primitive handling (`StructureComparer.cs:180-246`).
+   - `CompareStructures` also requires compatible completed inputs for direct callers, loads packages ordered by package version, builds a directional package-pair list by step size and `specificPairs`, initializes `ElementComparer`, then processes pairs and flushes caches. Its per-pair pass retains class dependency order (`PrimitiveType`, `ComplexType`, `Resource`, `Profile`) but selects only `GetProcessedStructures`; direct targets and every transitive intermediate edge must also be operational (`StructureComparer.CompareStructures`, `doComparison`, `discoverTransitivePaths`, `buildNeighborComparisonPaths`).
 
 ## Mermaid Workflow Diagram
 
 ```mermaid
 flowchart TD
-    Start([Compare start]) --> Drop[Drop requested comparison tables]
+    Start([Compare start]) --> Ready[If structures: RequireInputs<br/>read-only catalog and map binding gate]
+    Ready --> Drop[Drop requested comparison tables]
     Drop --> Create[Create requested comparison tables]
     Create --> CheckVS{processValueSets?}
     CheckVS -->|Yes| RunVS[ValueSetComparer.CompareValueSets\nmaxStepSize, specificPairs]
@@ -82,7 +84,7 @@ never synthesize completed input or outcome metadata.
 |-|-|
 | Content reset | Invalidate inputs, comparisons, and safety outcomes before deleting package/terminology/structure/support content. |
 | Structure comparison reset | `DbComparisonClasses.DropTables` invalidates every pair's comparison and safety-outcome revisions before the first destructive operation. |
-| Pair starts | `StructureComparer` calls `BeginComparison` and captures the completed input revision if available. |
+| Pair starts | `StructureComparer` calls `BeginComparison`, requiring and capturing the completed inventory-bound input revision. |
 | Pair finishes | After `applyCachedChanges`, `CompleteComparison` records a fresh comparison revision only if the input dependency is still current. |
 | Failed comparison/flush | No new comparison or outcome completion; errors propagate. |
 | Structure outcome reset | `DbOutcomeClasses.DropTables` invalidates all safety-outcome stamps and recreates triggers, retaining valid comparison revisions for the next evaluation. |
@@ -100,13 +102,47 @@ The narrow comparison stamp protects actual element-map provenance:
 `DbElementComparison.ElementMappingKey` → authored `DbElementMapping.Key`.
 No structure-map key is substituted for that last link. Requiring the
 current input revision prevents outcomes from being certified over
-comparisons made before map reload. This bookkeeping does not change
-comparison relationships, transitive selection, or terminology semantics.
+comparisons made before map reload. This bookkeeping does not itself classify
+codes or change terminology semantics; the operational and constrained-use
+comparison changes are described below.
 
 Tests cover failed inserts and invalidation even when the first drop fails;
 last-write completion is not a promise of an all-or-nothing transaction.
 See `UnsafeCodeOutcomeTests` and
 `UnsafeCodePipelineTests.ActualFilteredRegenerationInvalidatesOtherPersistedPairs`.
+
+## Profiled Type Facts and Comparison Authorities
+
+The catalog's definition view includes all retained normalized profiles, but the
+processing view adds only Profiles whose ordinal declared Type is exactly
+`Quantity`, with unique acyclic ancestry to the actual same-package native Quantity.
+Existing exclusions still apply; profiles on Age, Coding and resources remain
+passive. A passive source, target or intermediate cannot supply a standalone
+comparison authority. It may supply constraints at a legitimate occurrence.
+
+Identity is package + exact URL + definition version, never package release or
+profile basename. `ResolveNativeType` excludes profiles. `ResolveRoot` requires one
+owner-scoped field-order-zero snapshot root, no parent, valid top-level Path and
+exact descendant parentage. R3 `Quantity:simplequantity` / Path `Quantity` is
+preserved. `ElementComparer.DoElementComparisons` applies explicit element mappings
+first; fallback replaces the exact source-root Id prefix with the target-root Path,
+without globally stripping slices or choosing a package-wide first root.
+
+`ElementTypeComparer.EffectiveTypes` uses local type rows before inherited rows.
+`ProfileUseFacts.AtUse` computes branch-aware inherited/local profile constraints,
+profile/targetProfile alternatives and slice contexts. Cardinality, fixed/pattern,
+bindings, bounds, slicing, opaque invariants and primitive bridge obligations
+remain proof obligations; differential-only data is not a synthetic snapshot.
+The Quantity shortcut cannot erase them. Primary mapping authorities precede
+fallback authorities, and actual `DbElementMapping.Key` provenance is retained.
+
+For a complete constrained proof, native reuse retains the supplied structure
+mapping relationship, rather than inventing Equivalent. A typed `Unrepresentable`
+decision records facts/reasons in the type comparison's `TechnicalMessage`, marks
+it `NotMapped` and uses `SourceIsBroaderThanTarget`, not Equivalent. Missing,
+malformed or unclassified required semantics throw; no comparison/profile-base
+fallback certifies them. Legal owner projection is a separate bounded export
+decision inside an already-scheduled resource profile, not a comparison shortcut.
 
 ## Dependencies & Interactions
 
@@ -173,7 +209,11 @@ The active `FhirDbComparer` fields are limited to the database and logging depen
 
 ### Explicit Error Conditions
 
-`Compare` does not contain explicit `throw` statements or local exception handling (`FhirDbComparer.cs:111-142`). Its first observable failures are provider/model exceptions propagated from `DbComparisonClasses.DropTables` and `DbComparisonClasses.CreateTables`, such as failures to drop or create the requested comparison tables (`DbComparisonClasses.cs:32-70`).
+`Compare` has no local exception handling. For structure work, its first possible
+failure is the read-only `RequireInputs` gate, before destructive reset. Missing
+or incompatible catalog state requires explicit content reload → maps → comparisons
+→ outcomes → export; reopening, maps-only loading and consumers do not repair it.
+After preflight, table/provider and delegated comparison failures propagate.
 
 ### Implicit Error Handling
 
@@ -212,6 +252,7 @@ The active `FhirDbComparer` fields are limited to the database and logging depen
 - Smaller `maxStepSize` values reduce cross-version traversal breadth.
 - `specificPairs` is the most direct way to constrain work to known release directions.
 - Cache size depends on the delegated comparer and the number of comparison rows produced before each per-pair flush.
+- Full profile import increases eager relational facts. Lazy pair-local payload/effective-fact caches and release between pairs are not a fixed memory bound; release observations report counts, database size, import and pair time/process memory, not invented performance guarantees.
 
 ## Usage Example
 
@@ -247,3 +288,9 @@ comparer.Compare(
 
 ---
 *Legacy comparer references verified at `d02100974b2dc1b05ecf1af69c29095e6973f4c8`; reset/revision bookkeeping rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*
+
+*Active `FhirDbComparer`, `StructureComparer`, `ElementComparer`,
+`ElementTypeComparer`, `XVerStructureCatalog`, `ProfileUseFacts` and
+`UnsafeCodeInputStore` contracts checked by method against
+`64d48bb993c6eef207e9b8ca03d593a277068746` on `2026-11-17`;
+unchanged historical line references retained.*

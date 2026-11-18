@@ -3,13 +3,19 @@
 //     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // </copyright>
 
+extern alias r4;
+extern alias r4b;
+
 using System.Data;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 using System.Xml;
 using System.Xml.Linq;
 using System.Xml.XPath;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
+using Fhir.CodeGen.Comparison.CompareTool;
 using Fhir.CodeGen.Comparison.CrossVersionSource;
 using Fhir.CodeGen.Comparison.Exporter;
 using Fhir.CodeGen.Comparison.Models;
@@ -149,6 +155,107 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         DbDefinitionInventoryState state = DefinitionInventoryStore.ReadState(imported.Connection)!;
         state.CompletedRevision.ShouldNotBeNullOrEmpty();
         state.CompletedRevision.ShouldBe(state.StartedRevision);
+    }
+
+    [Fact]
+    public async Task AllConfiguredPairsRespectQuantityProfileProcessingBoundary()
+    {
+        List<DefinitionCollection> definitions = [];
+        foreach (string core in _cores)
+        {
+            definitions.Add(await LoadCore(core));
+        }
+        using CoreCatalog imported = new(definitions);
+        imported.Reopen();
+        XVerStructureCatalog catalog = imported.Catalog;
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(imported.Connection);
+        List<DbElementType> types = DbElementType.SelectList(imported.Connection);
+        List<DbStructureDefinitionFacts> facts = DbStructureDefinitionFacts.SelectList(imported.Connection);
+        foreach (DbFhirPackage package in packages)
+        {
+            DefinitionCollection normalized = definitions.Single(collection => collection.FhirSequence == package.DefinitionFhirSequence);
+            DbStructureDefinition[] owners = [.. catalog.GetDefinitions(package.Key)];
+            owners.Count(owner => owner.ArtifactClass == FhirArtifactClassEnum.Profile).ShouldBe(normalized.ProfilesByUrl.Count);
+            owners.Length.ShouldBe(normalized.PrimitiveTypesByName.Count + normalized.ComplexTypesByName.Count +
+                normalized.ResourcesByName.Count + normalized.ProfilesByUrl.Count);
+            facts.Count(row => row.FhirPackageKey == package.Key).ShouldBe(owners.Length);
+            output.WriteLine($"{package.Name}: native definitions={owners.Length - normalized.ProfilesByUrl.Count}, " +
+                $"profiles={normalized.ProfilesByUrl.Count}, definitions={owners.Length}, " +
+                $"elements={owners.Sum(owner => catalog.GetOwnedElements(owner).Count)}, " +
+                $"types={types.Count(type => type.FhirPackageKey == package.Key)}, facts={facts.Count(row => row.FhirPackageKey == package.Key)}.");
+        }
+        output.WriteLine($"Public full import: elapsed={imported.ImportElapsed.TotalMilliseconds:F0} ms, isolated SQLite={imported.FileSize} bytes.");
+        output.WriteLine("Earlier preparatory native-only inventory membership remains unchanged; added rows are the retained ProfilesByUrl inventory. " +
+            "The native-only API is removed. No comparable earlier SQLite-size, process-memory or import-timing baseline is available here.");
+        int pairs = 0;
+        foreach (DbFhirPackage source in packages)
+        {
+            foreach (DbFhirPackage target in packages.Where(package => package.Key != source.Key))
+            {
+                Stopwatch elapsed = Stopwatch.StartNew();
+                using Process process = Process.GetCurrentProcess();
+                process.Refresh();
+                long before = process.PrivateMemorySize64;
+                foreach (DbFhirPackage endpoint in new[] { source, target })
+                {
+                    DefinitionCollection normalized = definitions.Single(collection => collection.FhirSequence == endpoint.DefinitionFhirSequence);
+                    HashSet<int> processed = [.. catalog.GetProcessedStructures(endpoint.Key).Select(owner => owner.Key)];
+                    DbStructureDefinition quantity = catalog.ResolveNativeType(endpoint.Key, "Quantity")!;
+                    foreach (DbStructureDefinition owner in catalog.GetDefinitions(endpoint.Key))
+                    {
+                        catalog.ResolveDefinition(endpoint.Key, owner.VersionedUrl)!.Key.ShouldBe(owner.Key);
+                        catalog.ResolveDefinition(endpoint.Key, owner.UnversionedUrl)!.Key.ShouldBe(owner.Key);
+                        bool excluded = XVerProcessor._exclusionSet.Contains(owner.UnversionedUrl) || owner.Message == "Manually excluded";
+                        bool eligible = owner.ArtifactClass != FhirArtifactClassEnum.Profile;
+                        if (owner.ArtifactClass == FhirArtifactClassEnum.Profile)
+                        {
+                            StructureDefinition profile = normalized.ProfilesByUrl[owner.UnversionedUrl];
+                            catalog.GetDeclaredType(owner).ShouldBe(profile.Type);
+                            eligible = string.Equals(profile.Type, "Quantity", StringComparison.Ordinal);
+                            if (eligible)
+                            {
+                                IReadOnlyList<DbStructureDefinition> ancestors = catalog.GetAncestors(owner);
+                                ancestors.ShouldContain(ancestor => ancestor.Key == quantity.Key);
+                                ancestors.ShouldAllBe(ancestor => ancestor.FhirPackageKey == endpoint.Key);
+                                ancestors.Select(ancestor => ancestor.Key).Distinct().Count().ShouldBe(ancestors.Count);
+                                catalog.ResolveRoot(owner).Id.ShouldBe(profile.Snapshot.Element[0].ElementId);
+                            }
+                            catalog.ResolveNativeType(endpoint.Key, owner.Id, required: false)?.ArtifactClass
+                                .ShouldNotBe(FhirArtifactClassEnum.Profile);
+                        }
+                        processed.Contains(owner.Key).ShouldBe(!excluded && eligible, $"{source.Name}->{target.Name}: {owner.VersionedUrl}");
+                    }
+                    DbStructureDefinition simple = catalog.ResolveDefinition(endpoint.Key, QuantityUrl.Replace("Quantity", "SimpleQuantity"))!;
+                    catalog.ResolveRoot(simple).Path.ShouldBe("Quantity");
+                    if (endpoint.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.STU3)
+                    {
+                        catalog.ResolveRoot(simple).Id.ShouldBe("Quantity:simplequantity");
+                    }
+                    HashSet<string> quantityProfiles = [.. normalized.ProfilesByUrl.Values.Where(profile => profile.Type == "Quantity")
+                        .Select(profile => profile.Url)];
+                    foreach (DbElementType type in types.Where(type => type.FhirPackageKey == endpoint.Key &&
+                        type.TypeProfile is not null && quantityProfiles.Contains(UnsafeCodeCanonical.Parse(type.TypeProfile).Url!)))
+                    {
+                        type.TypeProfileStructureKey.ShouldNotBeNull();
+                        DbStructureDefinition profile = catalog.ResolveDefinition(endpoint.Key, type.TypeProfile, type.TypeProfileStructureKey)!;
+                        catalog.ResolveTypeUse(type).Key.ShouldBe(profile.Key);
+                        profile.FhirPackageKey.ShouldBe(endpoint.Key);
+                        type.TypeStructureKey.ShouldBe(quantity.Key);
+                    }
+                }
+                DbStructureDefinition sourceSimple = catalog.ResolveDefinition(source.Key, QuantityUrl.Replace("Quantity", "SimpleQuantity"))!;
+                DbStructureDefinition targetSimple = catalog.ResolveDefinition(target.Key, sourceSimple.UnversionedUrl)!;
+                catalog.ResolveDefinition(target.Key, sourceSimple.VersionedUrl, required: false).ShouldBeNull();
+                targetSimple.Version.ShouldBe(definitions.Single(collection => collection.FhirSequence == target.DefinitionFhirSequence)
+                    .ProfilesByUrl[targetSimple.UnversionedUrl].Version);
+                elapsed.Stop();
+                process.Refresh();
+                output.WriteLine($"{source.Name}->{target.Name}: membership/canonical/FK checks {elapsed.ElapsedMilliseconds} ms; " +
+                    $"process private bytes before/after={before}/{process.PrivateMemorySize64}, working set={process.WorkingSet64}.");
+                pairs++;
+            }
+        }
+        pairs.ShouldBe(20);
     }
 
     [Fact]
@@ -403,6 +510,62 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
             compiler.Compile(rule.Expression!)(valid.ToTypedElement(), new EvaluationContext()).ShouldHaveSingleItem().Value.ShouldBe(false);
             output.WriteLine($"R5 Range.{bound} -> {proof.TargetCanonical}: NativeReuse; comparator max=0 and native sqty-1 retained.");
         }
+    }
+
+    [Fact]
+    public async Task R4MoneyQuantityCurrencyInvariantRemainsExecutableWithoutUnprovenNativeReuse()
+    {
+        using CoreCatalog imported = new([await LoadCore(_cores[3]), await LoadCore(_cores[2])]);
+        imported.Reopen();
+        XVerStructureCatalog catalog = imported.Catalog;
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(imported.Connection);
+        DbFhirPackage sourcePackage = packages.Single(package => package.PackageVersion == "4.3.0");
+        DbFhirPackage targetPackage = packages.Single(package => package.PackageVersion == "4.0.1");
+        DbStructureDefinition source = catalog.ResolveDefinition(sourcePackage.Key, QuantityUrl.Replace("Quantity", "MoneyQuantity") + "|4.3.0")!;
+        DbStructureDefinition target = catalog.ResolveDefinition(targetPackage.Key, source.UnversionedUrl + "|4.0.1")!;
+        using ProfileUseFacts facts = new(catalog, sourcePackage.Key, targetPackage.Key);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), target);
+        proof.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        proof.IsAcceptedDecision.ShouldBeTrue();
+        proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.Binding);
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+        proof.TargetRoot!.OwnerKey.ShouldBe(target.Key);
+        AssertRequiredBinding(proof.RequiredFacts[".comparator"], "http://hl7.org/fhir/ValueSet/quantity-comparator|4.3.0");
+        AssertRequiredBinding(proof.NativeFacts[".comparator"], "http://hl7.org/fhir/ValueSet/quantity-comparator|4.0.1");
+        StructureDefinition native = new r4::Hl7.Fhir.Serialization.FhirJsonParser().Parse<StructureDefinition>(
+            new r4::Hl7.Fhir.Serialization.FhirJsonSerializer().SerializeToString(catalog.ReadPayload(target)));
+        native.Url.ShouldBe(target.UnversionedUrl);
+        native.Version.ShouldBe(target.Version);
+        native.Type.ShouldBe("Quantity");
+        ElementDefinition root = native.Snapshot.Element.Single(element => element.ElementId == catalog.ResolveRoot(target).Id);
+        root.Path.ShouldBe("Quantity");
+        ElementDefinition.ConstraintComponent invariant = root.Constraint.Single(constraint => constraint.Key == "mqty-1");
+        invariant.Expression.ShouldBe("(code.exists() or value.empty()) and (system.empty() or system = 'urn:iso:std:iso:4217')");
+        proof.NativeFacts[""].Invariants.ShouldContain(rule => rule.Key == invariant.Key && rule.Expression == invariant.Expression);
+        native.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max.ShouldBe("1");
+        FhirPathCompiler compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+        CompiledExpression expression = compiler.Compile(invariant.Expression);
+        foreach ((string json, bool valid) in new[]
+        {
+            ("""{"value":12,"system":"urn:iso:std:iso:4217","code":"USD"}""", true),
+            ("""{"value":0,"code":"EUR"}""", true),
+            ("""{"system":"urn:iso:std:iso:4217"}""", true),
+            ("""{"value":12,"system":"urn:iso:std:iso:4217"}""", false),
+            ("""{"value":12,"system":"http://unitsofmeasure.org","code":"USD"}""", false),
+            ("""{"system":"urn:example:wrong"}""", false),
+        })
+        {
+            ITypedElement instance = new r4::Hl7.Fhir.Serialization.FhirJsonParser().Parse<Hl7.Fhir.Model.Parameters>(
+                """{"resourceType":"Parameters","parameter":[{"name":"currency","valueQuantity":""" + json + "}]}")
+                .ToTypedElement(r4::Hl7.Fhir.Model.ModelInfo.ModelInspector);
+            ITypedElement occurrence = instance.Children("parameter").Single().Children("value").Single();
+            expression(occurrence, new EvaluationContext()).ShouldHaveSingleItem().Value.ShouldBe(valid, json);
+        }
+        output.WriteLine($"{source.VersionedUrl} -> {target.VersionedUrl}: explicit Binding negative, no usable canonical or projection. " +
+            "The exact persisted target still retains executable mqty-1 at Quantity (six target-R4 evaluations); its currency condition " +
+            "does not prove cross-version binding equivalence, ISO currency membership or full instance validity.");
     }
 
     [Fact]
@@ -702,6 +865,131 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         output.WriteLine("R5->R4B: the actual scheduled Range carrier builds without projecting either bound; exact SimpleQuantity|4.3.0/sqty-1 reuse survives unrelated persisted core negatives.");
     }
 
+    [Fact]
+    public async Task PersistedRangePipelineRetainsQuantityRestrictionsAndNoPassiveArtifacts()
+    {
+        DefinitionCollection sourceDefinitions = await LoadCore(_cores[4]);
+        DefinitionCollection targetDefinitions = await LoadCore(_cores[3]);
+        AddConsumerCarrier(sourceDefinitions, "Range");
+        AddConsumerCarrier(targetDefinitions, "Range");
+        using CoreCatalog imported = new([sourceDefinitions, targetDefinitions]);
+        imported.Reopen();
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(imported.Connection);
+        FhirPackageComparisonPair pair = new(packages.Single(package => package.PackageVersion == "5.0.0"),
+            packages.Single(package => package.PackageVersion == "4.3.0"));
+        pair.SourceFhirSequence.ShouldBe(FhirReleases.FhirSequenceCodes.R5);
+        pair.TargetFhirSequence.ShouldBe(FhirReleases.FhirSequenceCodes.R4B);
+        string inventoryRevision = DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision!;
+        imported.LoadConsumerMaps(pair, includeRange: true);
+        imported.Reopen();
+        DbUnsafeCodeInputState input = DbUnsafeCodeInputState.SelectSingle(imported.Connection, Key: 1)!;
+        input.FormatVersion.ShouldBe(2);
+        input.CompletedInputRevision.ShouldNotBeNullOrEmpty();
+        JsonSerializer.Deserialize<Dictionary<string, string>>(DefinitionInventoryStore.ReadState(imported.Connection)!
+            .CompletedMapInventoryBindingsJson)![input.SnapshotId].ShouldBe(inventoryRevision);
+
+        imported.CompareRangeElements(pair);
+        imported.Reopen();
+        DbUnsafeCodePairState compared = DbUnsafeCodePairState.SelectSingle(imported.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)!;
+        compared.InputRevision.ShouldBe(input.CompletedInputRevision);
+        compared.ComparisonRevision.ShouldNotBeNullOrEmpty();
+        compared.OutcomeComparisonRevision.ShouldBeNull();
+        XVerStructureCatalog catalog = imported.Catalog;
+        DbStructureDefinition range = catalog.ResolveNativeType(pair.SourcePackageKey, "Range")!;
+        DbStructureDefinition simple = catalog.ResolveDefinition(pair.TargetPackageKey, QuantityUrl.Replace("Quantity", "SimpleQuantity") + "|4.3.0")!;
+        foreach (string bound in new[] { "low", "high" })
+        {
+            DbElement element = catalog.ResolveOwnedElement(range, "Range." + bound)!;
+            DbElementComparison comparison = DbElementComparison.SelectList(imported.Connection, SourceElementKey: element.Key).ShouldHaveSingleItem();
+            comparison.TargetElementId.ShouldBe(element.Id);
+            DbElementMapping mapping = DbElementMapping.SelectSingle(imported.Connection, Key: comparison.ElementMappingKey!.Value)!;
+            mapping.SourceElementKey.ShouldBe(element.Key);
+            mapping.TargetElementKey.ShouldBe(comparison.TargetElementKey);
+            mapping.ConceptMapSourceKey.ShouldNotBeNull();
+            DbElementTypeComparison type = DbElementTypeComparison.SelectList(imported.Connection,
+                ElementComparisonKey: comparison.Key).ShouldHaveSingleItem();
+            type.NotMapped.ShouldBeFalse();
+            type.Relationship.ShouldBe(ConceptMap.ConceptMapRelationship.Equivalent);
+            ProfileDecisionDocument document = JsonSerializer.Deserialize<ProfileDecisionDocument>(type.TechnicalMessage!)!;
+            document.ProfileDecisionFormat.ShouldBe(1);
+            PersistedProfileDecision decision = document.Decisions.ShouldHaveSingleItem();
+            decision.Kind.ShouldBe(ProfileProofKind.NativeReuse);
+            decision.TargetCanonical.ShouldBe(simple.VersionedUrl);
+            decision.RequiredFacts[".comparator"].Maximum.ShouldBe(0);
+            decision.NativeFacts[".comparator"].Maximum.ShouldBe(0);
+        }
+        imported.GenerateRangeElementOutcomes(pair);
+        imported.Reopen();
+        UnsafeCodeInputStore.RequireExportReady(imported.Connection, [pair]);
+        DbUnsafeCodePairState completed = DbUnsafeCodePairState.SelectSingle(imported.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)!;
+        completed.OutcomeInputRevision.ShouldBe(input.CompletedInputRevision);
+        completed.OutcomeComparisonRevision.ShouldBe(compared.ComparisonRevision);
+        completed.OutcomeFormatVersion.ShouldBe(2);
+        DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision.ShouldBe(inventoryRevision);
+        catalog = imported.Catalog;
+        foreach (DbStructureMapping map in DbStructureMapping.SelectList(imported.Connection))
+        {
+            catalog.IsProcessed(map.SourceStructureKey).ShouldBeTrue();
+            if (map.TargetStructureKey is int targetKey)
+            {
+                catalog.IsProcessed(targetKey).ShouldBeTrue();
+            }
+        }
+        DbStructureOutcome.SelectList(imported.Connection).ShouldAllBe(outcome =>
+            catalog.IsProcessed(outcome.SourceStructureKey) && catalog.IsProcessed(outcome.TargetStructureKey!.Value));
+        DbElementOutcome.SelectList(imported.Connection).ShouldAllBe(outcome => catalog.IsProcessed(outcome.SourceStructureKey));
+        catalog.GetDefinitions(pair.SourcePackageKey).ShouldContain(owner =>
+            owner.ArtifactClass == FhirArtifactClassEnum.Profile && catalog.GetDeclaredType(owner) != "Quantity" && !catalog.IsProcessed(owner));
+        ConfigXVer config = imported.ConsumerExportConfig();
+        XVerExporter exporter = new(imported.Connection, config);
+        IgExporter ig = new(imported.Connection, NullLoggerFactory.Instance, config.OutputDirectory, null, exporter, config);
+        StructureFhirExporter.BuiltDefinitions built = new StructureFhirExporter(exporter, imported.Connection, NullLoggerFactory.Instance)
+            .BuildDefinitions(ig.PrepareXVerIgs(ig.BuildExportSchedule(specificPairs: [pair.SequencePair])).XVerIgs.ShouldHaveSingleItem());
+        built.Profiles.ShouldHaveSingleItem().Definition.BaseDefinition.ShouldBe(ConsumerUrl);
+        built.Profiles.ShouldAllBe(item => item.Definition.Type == ConsumerName);
+        built.Extensions.ShouldBeEmpty();
+        StructureDefinition nativeRange = new r4b::Hl7.Fhir.Serialization.FhirJsonParser().Parse<StructureDefinition>(
+            new r4b::Hl7.Fhir.Serialization.FhirJsonSerializer().SerializeToString(
+                catalog.ReadPayload(catalog.ResolveNativeType(pair.TargetPackageKey, "Range")!)));
+        foreach (string bound in new[] { "low", "high" })
+        {
+            nativeRange.Snapshot.Element.Single(element => element.Path == "Range." + bound)
+                .Type.ShouldHaveSingleItem().Profile.ShouldHaveSingleItem().ShouldBe(simple.UnversionedUrl);
+        }
+        StructureDefinition nativeSimple = new r4b::Hl7.Fhir.Serialization.FhirJsonParser().Parse<StructureDefinition>(
+            new r4b::Hl7.Fhir.Serialization.FhirJsonSerializer().SerializeToString(catalog.ReadPayload(simple)));
+        nativeSimple.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max.ShouldBe("0");
+        ElementDefinition.ConstraintComponent invariant = nativeSimple.Snapshot.Element.Single(element => element.Path == "Quantity")
+            .Constraint.Single(constraint => constraint.Key == "sqty-1");
+        FhirPathCompiler compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+        CompiledExpression expression = compiler.Compile(invariant.Expression);
+        foreach ((string json, bool valid) in new[]
+        {
+            ("""{"resourceType":"Parameters","parameter":[{"name":"range","valueRange":{"low":{"value":1},"high":{"value":2}}}]}""", true),
+            ("""{"resourceType":"Parameters","parameter":[{"name":"range","valueRange":{"low":{"value":1,"comparator":"<"},"high":{"value":2,"comparator":">"}}}]}""", false),
+        })
+        {
+            ITypedElement instance = new r4b::Hl7.Fhir.Serialization.FhirJsonParser().Parse<Hl7.Fhir.Model.Parameters>(json)
+                .ToTypedElement(r4b::Hl7.Fhir.Model.ModelInfo.ModelInspector);
+            ITypedElement value = instance.Children("parameter").Single().Children("value").Single();
+            foreach (string bound in new[] { "low", "high" })
+            {
+                ITypedElement occurrence = value.Children(bound).Single();
+                expression(occurrence, new EvaluationContext()).ShouldHaveSingleItem().Value.ShouldBe(valid);
+                (occurrence.Children("comparator").Count() <= int.Parse(nativeSimple.Snapshot.Element
+                    .Single(element => element.Path == "Quantity.comparator").Max)).ShouldBe(valid);
+            }
+        }
+        Directory.Exists(config.OutputDirectory).ShouldBeFalse();
+        imported.ConnectionReopens.ShouldBe(4);
+        output.WriteLine("R5->R4B: full actual core import; local mapping authority; real ElementComparer/ElementTypeComparer for Range and its resource carrier; " +
+            "real ElementOutcomeGenerator for those owners, full-pair safety classification, and write-free definition build. " +
+            "Structure comparison envelopes and the single carrier artifact schedule are explicitly authored, not a whole-core StructureComparer run. " +
+            "Four physical close/reopens separate import/maps/comparisons/outcomes/build; exact target sqty-1 rejects comparators at both native Range bounds.");
+    }
+
     private static void AssertRequiredBinding(EffectiveProfileElement comparator, string canonical)
     {
         comparator.Restrictions.ShouldContain(restriction => restriction.Kind == ProfileRestrictionKind.Binding &&
@@ -847,9 +1135,14 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         internal CoreCatalog(IReadOnlyList<DefinitionCollection> definitions)
         {
             Database = new([.. definitions], _directory, "quantity.sqlite", NullLoggerFactory.Instance);
+            Stopwatch elapsed = Stopwatch.StartNew();
             Database.TryLoadFromDefinitionCollections(XVerProcessor._exclusionSet, XVerProcessor._escapeValveCodes).ShouldBeTrue();
+            elapsed.Stop();
+            ImportElapsed = elapsed.Elapsed;
         }
 
+        internal TimeSpan ImportElapsed { get; }
+        internal long FileSize => new FileInfo(Path.Combine(_directory, "quantity.sqlite")).Length;
         internal ComparisonDatabase Database { get; private set; }
         internal IDbConnection Connection => Database.DbConnection;
         internal XVerStructureCatalog Catalog => new(Connection, XVerProcessor._exclusionSet);
@@ -880,31 +1173,9 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
                 packages.Single(package => package.DefinitionFhirSequence == targetSequence));
             DbStructureDefinition source = Catalog.ResolveDefinition(pair.SourcePackageKey, ConsumerUrl)!;
             DbStructureDefinition target = Catalog.ResolveDefinition(pair.TargetPackageKey, ConsumerUrl)!;
-            string sourceRoot = Path.Combine(_directory, "local-maps");
-            string suffix = pair.SourcePackage.FhirVersionShort + "to" + pair.TargetPackage.FhirVersionShort;
-            WriteMap("resources", new()
-            {
-                Source = $"http://hl7.org/fhir/{pair.SourcePackage.FhirVersionShort}/resource-types",
-                Target = $"http://hl7.org/fhir/{pair.TargetPackage.FhirVersionShort}/resource-types",
-                Element = [new()
-                {
-                    Code = ConsumerName,
-                    Target = [new() { Code = ConsumerName, Relationship = ConceptMap.ConceptMapRelationship.RelatedTo }],
-                }],
-            });
-            WriteMap("elements", new()
-            {
-                Source = source.VersionedUrl, Target = target.VersionedUrl,
-                Element = [.. Catalog.GetOwnedElements(source).Select(element => new ConceptMap.SourceElementComponent
-                {
-                    Code = element.Id,
-                    Target = [new() { Code = element.Id, Relationship = ConceptMap.ConceptMapRelationship.RelatedTo }],
-                })],
-            });
+            LoadConsumerMaps(pair);
             // Only the local carrier has a scheduled outcome. The complete actual core catalog,
             // including every retained profile and every negative decision, remains present.
-            new MappingLoader(Connection, NullLoggerFactory.Instance)
-                .TryLoadCrossVersionSourceMaps(sourceRoot, useInternalTypeMaps: false).ShouldBeTrue();
             Reopen();
             UnsafeCodeInputStore.RequireInputs(Connection);
             DbStructureMapping map = DbStructureMapping.SelectList(Connection,
@@ -930,8 +1201,57 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
             outcome.Key = DbStructureOutcome.Insert(Connection, outcome);
             new UnsafeCodeOutcomeGenerator(Connection).GenerateForPair(pair, dependency);
             return pair;
+        }
 
-            void WriteMap(string category, ConceptMap.GroupComponent group)
+        internal void LoadConsumerMaps(FhirPackageComparisonPair pair, bool includeRange = false)
+        {
+            XVerStructureCatalog catalog = Catalog;
+            string sourceRoot = Path.Combine(_directory, "local-maps");
+            string suffix = pair.SourcePackage.FhirVersionShort + "to" + pair.TargetPackage.FhirVersionShort;
+            WriteMap("resources", new ConceptMap.GroupComponent
+            {
+                Source = $"http://hl7.org/fhir/{pair.SourcePackage.FhirVersionShort}/resource-types",
+                Target = $"http://hl7.org/fhir/{pair.TargetPackage.FhirVersionShort}/resource-types",
+                Element = [new()
+                {
+                    Code = ConsumerName,
+                    Target = [new() { Code = ConsumerName, Relationship = ConceptMap.ConceptMapRelationship.RelatedTo }],
+                }],
+            });
+            List<ConceptMap.GroupComponent> elementGroups = [];
+            foreach (string canonical in includeRange ? new[] { ConsumerUrl, QuantityUrl.Replace("Quantity", "Range") } : [ConsumerUrl])
+            {
+                DbStructureDefinition sourceOwner = catalog.ResolveDefinition(pair.SourcePackageKey, canonical)!;
+                DbStructureDefinition targetOwner = catalog.ResolveDefinition(pair.TargetPackageKey, canonical)!;
+                elementGroups.Add(new()
+                {
+                    Source = sourceOwner.VersionedUrl, Target = targetOwner.VersionedUrl,
+                    Element = [.. catalog.GetOwnedElements(sourceOwner).Select(element => new ConceptMap.SourceElementComponent
+                    {
+                        Code = element.Id,
+                        Target = [new() { Code = element.Id, Relationship = includeRange
+                            ? ConceptMap.ConceptMapRelationship.Equivalent : ConceptMap.ConceptMapRelationship.RelatedTo }],
+                    })],
+                });
+            }
+            WriteMap("elements", [.. elementGroups]);
+            if (includeRange)
+            {
+                WriteMap("types", new ConceptMap.GroupComponent
+                {
+                    Source = $"http://hl7.org/fhir/{pair.SourcePackage.FhirVersionShort}/data-types",
+                    Target = $"http://hl7.org/fhir/{pair.TargetPackage.FhirVersionShort}/data-types",
+                    Element = [.. new[] { "Range", "Quantity", "SimpleQuantity", "Meta", "Narrative" }
+                        .Select(name => new ConceptMap.SourceElementComponent
+                        {
+                            Code = name, Target = [new() { Code = name, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                        })],
+                });
+            }
+            new MappingLoader(Connection, NullLoggerFactory.Instance)
+                .TryLoadCrossVersionSourceMaps(sourceRoot, useInternalTypeMaps: includeRange).ShouldBeTrue();
+
+            void WriteMap(string category, params ConceptMap.GroupComponent[] groups)
             {
                 string directory = Path.Combine(sourceRoot, "input", category);
                 Directory.CreateDirectory(directory);
@@ -940,10 +1260,74 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
                     Id = category + "-" + suffix,
                     Url = "http://example.org/ConceptMap/consumer-" + category + "-" + suffix,
                     Status = Hl7.Fhir.Model.PublicationStatus.Active,
-                    Group = [group],
+                    Group = [.. groups],
                 };
                 File.WriteAllText(Path.Combine(directory, "ConceptMap-" + category + "-" + suffix + ".json"), authored.ToJson());
             }
+        }
+
+        internal void CompareRangeElements(FhirPackageComparisonPair pair)
+        {
+            DbComparisonClasses.CreateTables(Connection);
+            string? revision = UnsafeCodeInputStore.BeginComparison(Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+            DbComparisonCache<DbElementComparison> elements = new();
+            DbComparisonCache<DbElementTypeComparison> types = new();
+            ElementComparer comparer = new(Connection, NullLoggerFactory.Instance, elements, types, DbFhirPackage.SelectList(Connection));
+            XVerStructureCatalog catalog = Catalog;
+            foreach (string canonical in new[] { ConsumerUrl, QuantityUrl.Replace("Quantity", "Range") })
+            {
+                DbStructureDefinition source = catalog.ResolveDefinition(pair.SourcePackageKey, canonical)!;
+                DbStructureDefinition target = catalog.ResolveDefinition(pair.TargetPackageKey, canonical)!;
+                DbStructureMapping map = DbStructureMapping.SelectList(Connection, SourceStructureKey: source.Key,
+                    TargetStructureKey: target.Key).ShouldHaveSingleItem();
+                ConsumerStructureComparison envelope = new(pair, source, target, map.Key);
+                envelope.Key = DbStructureComparison.Insert(Connection, envelope);
+                comparer.DoElementComparisons(new StructureComparer.StructureComparisonTrackingRecord
+                {
+                    PackagePair = pair, SourcePackage = pair.SourcePackage, TargetPackage = pair.TargetPackage,
+                    SourceStructure = source, TargetStructure = target, TargetStructureKey = target.Key,
+                    ExplicitMapping = map, ExplicitMappingSource = DbMappingSourceFile.SelectSingle(Connection, Key: map.ConceptMapSourceKey!.Value),
+                    ComparisonRecordKey = envelope.Key,
+                }).ShouldNotBeEmpty();
+            }
+            elements.ToAdd.Insert(Connection, insertPrimaryKey: true);
+            types.ToAdd.Insert(Connection, insertPrimaryKey: true);
+            UnsafeCodeInputStore.CompleteComparison(Connection, pair.SourcePackageKey, pair.TargetPackageKey, revision);
+        }
+
+        internal void GenerateRangeElementOutcomes(FhirPackageComparisonPair pair)
+        {
+            DbOutcomeClasses.CreateTables(Connection);
+            DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+            DbRecordCache<DbElementOutcome> elements = new();
+            DbRecordCache<DbElementOutcomeTarget> targets = new();
+            ElementOutcomeGenerator generator = new(Connection, NullLoggerFactory.Instance, pair, elements, targets);
+            XVerStructureCatalog catalog = Catalog;
+            foreach (DbStructureComparison comparison in DbStructureComparison.SelectList(Connection))
+            {
+                DbStructureDefinition source = catalog.GetStructure(comparison.SourceStructureKey);
+                DbStructureDefinition target = catalog.GetStructure(comparison.TargetStructureKey!.Value);
+                ConsumerStructureOutcome schedule = new(pair, source, target, comparison.Key);
+                // Only the resource carrier is scheduled for an artifact; Range is natively reused.
+                if (source.UnversionedUrl != ConsumerUrl)
+                {
+                    schedule.RequiresXVerDefinition = false;
+                }
+                schedule.Key = DbStructureOutcome.Insert(Connection, schedule);
+                generator.ProcessSourceStructure(source, new()
+                {
+                    [target.Key] = new()
+                    {
+                        SourceStructure = source, TargetStructure = target, StructureComparison = comparison,
+                        SourceRootElement = catalog.ResolveRoot(source), TargetRootElement = catalog.ResolveRoot(target),
+                        StructureOutcomeKey = schedule.Key,
+                        IsFullyMappedAcrossAllTargets = true, IsFullyMappedToThisTarget = true,
+                    },
+                });
+            }
+            elements.ToAdd.Insert(Connection, insertPrimaryKey: true);
+            targets.ToAdd.Insert(Connection, insertPrimaryKey: true);
+            new UnsafeCodeOutcomeGenerator(Connection).GenerateForPair(pair, dependency);
         }
 
         private void Close()
