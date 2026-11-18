@@ -207,6 +207,198 @@ reuse at both Range bounds
 and executable non-equivalence witnesses for DSTU2 Age zero and R5 comparator
 `http://hl7.org/fhir/quantity-comparator|5.0.0#ad`.
 
+### Prepared-operation baseline attempt (2026-11-18; incomplete)
+
+This is **failed-workload diagnostic evidence, not a performance baseline**.
+Production remained at `6033290a2abda35092675917e7fcdec5daba222d` on `dev`;
+only the new test fixture and this document changed. Conventions/commands came
+from root `AGENTS.md`. The caller supplied SDK `11.0.100`; the focused command
+built Debug/net11.0. No production instrumentation, optimization, package
+installation, external database, or external IG tree was used.
+
+`XVerPreparedOperationTests` joins the existing nonparallel unsafe-code profile
+collection. Its two named tests currently enter the same **unfinished W1 gate**;
+they are not completed semantic-equality and W1/W2 measurement tests. Do not use
+them as Phase 1 acceptance, frozen semantic expectations, or a candidate timing
+comparison. No golden expectation was derived from a failed run.
+
+#### Authored W1 inputs and intended schedule
+
+- Each invocation creates a distinct `temp/xver-prepared-<guid>` directory under
+  the repository, containing its own `workload.sqlite`, authored map inputs and
+  prospective `output` tree. Failed fixtures are retained for diagnosis; successful
+  fixtures would be deleted after closing the database and clearing its pool.
+- Five synthetic `DefinitionCollection` instances use core identities
+  `hl7.fhir.r2.core#1.0.2`, `hl7.fhir.r3.core#3.0.2`,
+  `hl7.fhir.r4.core#4.0.1`, `hl7.fhir.r4b.core#4.3.0`,
+  `hl7.fhir.r5.core#5.0.0`. These are **authored inputs, not loaded real cores**.
+  Public `TryLoadFromDefinitionCollections` declares counts from those collections.
+- Each release retains five primitives (`code`, `string`, `uri`, `decimal`, `id`);
+  seven complex types (`Element`, `BackboneElement`, `Coding`, `CodeableConcept`,
+  `Quantity`, `Range`, `Extension`); four resources (`Resource`, `DomainResource`,
+  `Basic`, `PreparedConsumer`); and four profiles. Base definitions are
+  version-qualified and local to the package. Every owner has a snapshot root;
+  root `ElementDefinition.Type` is currently omitted, with the relational root
+  type projected by production import from `StructureDefinition.Type`.
+- `SimpleQuantity|quantity-definition-7` prohibits comparator and carries
+  `sqty-1` / `comparator.empty()`. Its R3 root ID is
+  `Quantity:simplequantity` with Path `Quantity`. `NegativeQuantity` is an
+  eligible, unused datatype profile with a deliberately different R5 invariant
+  (`value.empty() or value >= 0` versus `value.empty() or value > 0`).
+  `PassiveCodingA/B|profile-definition-7` are fully retained passive alternatives
+  with fixed code `selected`, used together by the consumer.
+- Repetition count is **3**: the consumer has three `quantityN` and three
+  `simpleN` Quantity uses constrained to SimpleQuantity, three native Range uses,
+  and three Coding uses with both passive alternatives. Each native Range has
+  low/high constrained to the exact SimpleQuantity definition version.
+  Quantity.comparator has a required binding to the fixture's qualified
+  comparator value set; each release has the corresponding complete two-code
+  code system, compose and expansion.
+- Maps comprise one type fallback plus type/resource/element maps for each of
+  the 20 directed pairs. Primary SimpleQuantity equivalence overrides fallback
+  `NotRelatedTo`. Other types use fallback equivalence. Resource maps relate
+  PreparedConsumer conservatively (`RelatedTo`) to request a generated resource
+  profile. The single explicit element map per pair maps `.renamed` in R5 to
+  `.label` elsewhere (identity for other pairs); other elements exercise root
+  fallback. There is no unsafe-rule configuration or fabricated completion stamp.
+- Intended calls are actual `FhirDbComparer.Compare` and
+  `OutcomeGenerator.GenerateOutcomes`, both with vocabulary/structures enabled,
+  `maxStepSize: 4`, no pair filter (normal 20 directed stepped pairs).
+  Actual `XVerExporter.Export` is configured with scripts disabled,
+  vocabulary/structures enabled, max step 4, and target flags R3/R4/R4B only
+  (12 directed pairs). Outcomes/export were **not reached**, so successful safe
+  resource construction, typed-negative persistence and the export schedule
+  assertion are not yet observed.
+
+The final failed fixture contains 100 structures/facts, 315 elements, 370 type
+rows, zero additional bindings, five code systems, five value sets and ten
+value-set concepts. It has 61 map source files, 380 structure maps and 20 element
+maps. The 61 actual JSON map files total **33,818 bytes**. Their framed SHA-256 is
+`2c9d7955739338c44343ea2746321ad02b51a0b60e565193d2de27b81eec7bff`:
+sort file paths, then feed each repository-fixture-relative POSIX path as UTF-8
+prefixed by its 4-byte big-endian length, followed by exact file bytes prefixed
+by their 8-byte big-endian length, to SHA-256. No map/payload normalization
+was applied.
+
+#### Exact attempts and failure
+
+Only this sanctioned per-test diagnostic form was executed, three times:
+
+```powershell
+dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName=Fhir.CodeGen.Lib.Tests.XVerPreparedOperationTests.CharacterizedPipelineProducesStableSemantics"
+```
+
+| Attempt | Result | Command wall time | Test time / last stage |
+|-|-|-:|-|
+| 1 | Exit 1; fixture compile error CS0117: enum incorrectly qualified as `CodeSystem.CodeSystemContentMode` | Not captured | No test executed |
+| 2 | Exit 1; shared connection closed by fixture's `using MappingLoader` | 25.943 s | Runner reported 3 s; maps completed, subsequent mapping SELECT failed |
+| 3 | Exit 1; native Quantity root effective-type resolution | 23.105 s | Runner reported 3 s; `FhirDbComparer.Compare` failed |
+
+Attempt 1 was corrected to `CodeSystemContentMode`. Attempt 2 was diagnosed
+against `MappingLoader.Dispose`, which closes/disposes the supplied connection;
+the fixture now follows existing fixtures by leaving that connection owned by
+`ComparisonDatabase`. No production behavior was changed.
+
+Attempt 3 fails in the first R2-to-R3 structure direction:
+
+```text
+Profile facts pair 1->2, package 1, owner 10
+'http://hl7.org/fhir/StructureDefinition/Quantity|1.0.2',
+element 'Quantity': missing/ambiguous effective type-use for row 14.
+```
+
+The call chain is `FhirDbComparer.Compare` → `StructureComparer.CompareStructures`
+→ `ElementComparer.DoElementComparisons` (fallback path) →
+`ElementTypeComparer.doElementTypeComparison` → `ProfileUseFacts.AtUse`.
+Import, inventory validation, map loading and vocabulary comparison had succeeded.
+Read-only inspection of the retained database confirms root type row 14 has
+package 1, structure/element 10/14, `TypeName = Quantity`,
+`TypeStructureKey = 10`, and null profile/target-profile fields. The normalized
+payload root is `{"id":"Quantity","path":"Quantity","min":0,"max":"*"}`;
+the definition declares Type Quantity and BaseDefinition
+`Element|1.0.2`. The importer synthesizes that relational root type, whereas
+`ProfileUseFacts.Definition` reads the empty normalized root type list and
+`AtUse` cannot match it.
+
+This diagnoses an input-shape/consumer mismatch, **not proof that W1 cannot be
+made successful solely in the fixture**. Explicitly authoring normalized root
+types, as the shared authored-definition fixture does, remains an untried
+fixture correction. The three-attempt debugging budget was exhausted, so no
+fourth run, production fix, narrowed workload or expectation-changing workaround
+was attempted. All 20 pair-state rows exist from input setup, but all comparison
+completion stamps are null; structure/element/type comparison tables contain
+zero rows. Vocabulary comparison has 20 comparison and 40 concept-comparison
+rows. Pair-state row count is therefore not evidence of executing 20 pairs.
+
+The attempt-3 database/maps remain at repository-local
+`temp/xver-prepared-4a9f4143ebe84bc8966e92b8c7e16db0/`.
+Attempt 2 remains at
+`temp/xver-prepared-19c6e41356bd496fb0af173fdc66f588/`.
+No output tree was materialized.
+
+#### Actual uninstrumented diagnostic measurements
+
+Stopwatch scopes encompass the named action, including constructor/readiness
+work. The import scope currently also includes synthetic definition construction.
+Allocation is the `GC.GetTotalAllocatedBytes(true)` delta. Private bytes use
+`Process.PrivateMemorySize64` after refresh; managed bytes use
+`GC.GetTotalMemory(false)`. These are entry/exit observations, not live retained
+graph measurements. Working-set peak is the process-lifetime
+`PeakWorkingSet64`, not a sampled stage-private peak. DB size is the SQLite file
+length after the action, including partially failed work.
+
+| Attempt/stage | ms | Allocated bytes | Private entry → exit | Managed entry → exit | Process peak working set | DB bytes |
+|-|-:|-:|-:|-:|-:|-:|
+| 2 / definitions + import | 1,295.2146 | 67,996,320 | 57,663,488 → 88,358,912 | 18,506,864 → 46,352,960 | 188,825,600 | 581,632 |
+| 2 / maps (including incorrect disposal) | 2,161.2927 | 89,479,888 | 88,387,584 → 81,829,888 | 47,927,160 → 47,024,232 | 188,825,600 | 921,600 |
+| 2 / database disposal | 3.9001 | 384 | 82,661,376 → 81,178,624 | 47,032,456 → 47,040,680 | 188,825,600 | 921,600 |
+| 3 / definitions + import | 955.5843 | 67,919,632 | 57,458,688 → 88,469,504 | 18,257,120 → 46,121,536 | 187,170,816 | 581,632 |
+| 3 / maps | 1,516.4160 | 89,435,528 | 88,477,696 → 92,016,640 | 47,695,736 → 46,583,496 | 187,170,816 | 921,600 |
+| 3 / failed comparison | 599.2830 | 150,936,072 | 92,180,480 → 89,141,248 | 47,233,192 → 45,271,896 | 187,170,816 | 1,028,096 |
+| 3 / database disposal | 3.4840 | 440 | 89,141,248 → 85,598,208 | 45,271,896 → 45,280,120 | 187,170,816 | 1,028,096 |
+
+Fixture-clock totals including setup/checks/disposal were 3,667.143 ms
+(attempt 2) and 3,150.134 ms (attempt 3). Neither is successful pipeline time.
+The inputs/code differed between attempts; they are not repeated identical
+observations and no median or MAD is meaningful.
+
+#### Counting definitions, seams and remaining acceptance gaps
+
+No expensive-operation instrumentation was added. Catalog/validator/parse,
+effective-definition/use, directional-classification and owner-projection
+execution counts are **unmeasured**, not zero. Row counts above are final
+database cardinalities only. The intended temporary counting points remain
+`DefinitionInventoryStore.ValidateInventory` (whole semantic passes),
+`StructureDefinitionFactsStore.ReadDefinition` (transient inventory parses,
+separated from lazy parse callers), `XVerStructureCatalog` construction and
+`ReadPayload` cache misses, `ProfileUseFacts.Definition` / `AtUse` cache misses,
+`ClassifyRequiredUses` (one direction) and `ProveInOwner` (owner-specific proofs).
+Future raw-audit count/rows/exact JSON bytes/time have no baseline implementation;
+do not fabricate observed values for them.
+
+Relevant existing W1 boundaries are import completion; mapping readiness/input
+completion; comparison readiness before reset, pair begin and post-flush pair
+completion; outcome readiness before reset, pair begin/generation/completion;
+export readiness, write-free construction and materialization. Catalog consumers
+read packages/structures/facts/elements/types; inventory also reads count/state
+and additional bindings; map/proof consumers read normalized map/provenance and
+comparison rows; outcome/export safety independently reads persisted decisions,
+targets, triggers and live pair/input stamps. This is a preliminary source seam
+inventory, **not** the complete operand manifest or a measured dependency audit.
+
+Still outstanding: a successful complete W1; the W2 five-pinned-cached-core
+import and actual Range comparison/outcome/build seams with identified authored
+envelopes and R5-comparator/DSTU2-Age correctness witnesses; frozen logical
+rows/resources, exact negative documents/constraints/provenance/owner/order/
+filename semantics; consistent substitution of only identified runtime
+IDs/timestamps; one discarded warmup plus three identical fresh-process
+observations; separate temporary instrumented counts; uninstrumented full
+operation timing including disposal/emission; sampled memory and retained
+row/JSON/decision sizes; and final correctness verification. Neither the full
+class selector nor `IdenticalWorkloadsReportStageCosts` was run. The real-core
+cache was not probed or skipped, and no W2 data is claimed. Production source
+is untouched, so there are no observation hooks to restore.
+
 ## Algorithm
 
 1. If `forceCreate` is false and `_dbName` is not empty, open the named database with `_db = new(_dbPath, _dbName, _config.LogFactory)` and return (historical location: `XVerProcessor.cs:509-519`). The existing-database constructor rejects a missing file with `FileNotFoundException` and its path, without creating a parent directory. It opens with `SqliteOpenMode.ReadWrite`, checks `sqlite_master` for `DbFhirPackage.DefaultTableName` before loading indices, and throws `InvalidDataException` with the database path and rebuild guidance if the table is absent. Constructor initialization failures dispose the connection and rethrow the original exception; there is no fallback to fresh creation.
