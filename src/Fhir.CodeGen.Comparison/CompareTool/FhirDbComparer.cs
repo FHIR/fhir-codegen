@@ -115,6 +115,11 @@ public partial class FhirDbComparer
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
         // ensure out tables exist and are empty
+        if (processStructures)
+        {
+            UnsafeCodeInputStore.RequireInputs(_db);
+        }
+
         DbComparisonClasses.DropTables(_db, forValueSets: processValueSets, forStructures: processStructures);
         DbComparisonClasses.CreateTables(_db, forValueSets: processValueSets, forStructures: processStructures);
 

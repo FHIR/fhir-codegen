@@ -165,24 +165,19 @@ public class StructureOutcomeGenerator
         _logger.LogInformation($"Generating Structure Outcomes for {packagePair.SourcePackageShortName}->{packagePair.TargetPackageShortName}...");
 
         // just get all the source and target structures and elements now to avoid hitting the db so much
-        Dictionary<int, DbStructureDefinition> allSourceStructures = DbStructureDefinition.SelectDict(_db, FhirPackageKey: packagePair.SourcePackageKey);
-        Dictionary<int, DbStructureDefinition> allTargetStructures = DbStructureDefinition.SelectDict(_db, FhirPackageKey: packagePair.TargetPackageKey);
+        XVerStructureCatalog catalog = new(_db, XVerProcessor._exclusionSet);
+        Dictionary<int, DbStructureDefinition> allSourceStructures = catalog.GetProcessedStructures(packagePair.SourcePackageKey).ToDictionary(owner => owner.Key);
+        Dictionary<int, DbStructureDefinition> allTargetStructures = catalog.GetProcessedStructures(packagePair.TargetPackageKey).ToDictionary(owner => owner.Key);
 
-        Dictionary<int, DbElement> sourceStructureRootElements = DbElement.SelectList(
-            _db,
-            FhirPackageKey: packagePair.SourcePackageKey,
-            ResourceFieldOrder: 0)
-            .ToDictionary(ed => ed.StructureKey);
-        Dictionary<int, DbElement> targetStructureRootElements = DbElement.SelectList(
-            _db,
-            FhirPackageKey: packagePair.TargetPackageKey,
-            ResourceFieldOrder: 0)
-            .ToDictionary(ed => ed.StructureKey);
+        Dictionary<int, DbElement> sourceStructureRootElements = allSourceStructures.Values.ToDictionary(owner => owner.Key, catalog.ResolveRoot);
+        Dictionary<int, DbElement> targetStructureRootElements = allTargetStructures.Values.ToDictionary(owner => owner.Key, catalog.ResolveRoot);
 
         List <DbStructureComparison> sdComparisons = DbStructureComparison.SelectList(
             _db,
             SourceFhirPackageKey: packagePair.SourcePackageKey,
             TargetFhirPackageKey: packagePair.TargetPackageKey);
+        sdComparisons.RemoveAll(comparison => !allSourceStructures.ContainsKey(comparison.SourceStructureKey) ||
+            comparison.TargetStructureKey is int targetKey && !allTargetStructures.ContainsKey(targetKey));
 
         _logger.LogInformation(
             $"Structure comparisons: {sdComparisons.Count}, from" +

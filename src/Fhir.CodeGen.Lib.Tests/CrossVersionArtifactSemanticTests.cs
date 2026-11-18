@@ -5,6 +5,7 @@
 
 using System.Data;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.Exporter;
@@ -16,8 +17,93 @@ using Shouldly;
 
 namespace Fhir.CodeGen.Lib.Tests;
 
+[Collection(UnsafeCodeProfileCollection.Name)]
 public class CrossVersionArtifactSemanticTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OperationalQuantityMapsAndPagesRemainDatatypesAcrossProfileClassMovement(bool reverse)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateProcessingEligibilityInputs();
+        FhirPackageComparisonPair pair = reverse
+            ? new(fixture.Packages[1], fixture.Packages[2]) : new(fixture.Packages[2], fixture.Packages[1]);
+        DbStructureDefinition orphan = fixture.AddStructure(pair.SourcePackage, "OrphanQuantity", FhirArtifactClassEnum.Profile);
+        fixture.DeclareProfile(orphan, fixture.Structure(pair.SourcePackage, "Quantity"));
+        fixture.AddElement(orphan, "Quantity");
+        fixture.AddTypedElement(orphan, "Quantity.code", "code");
+        fixture.PublishAuthoredDefinitions();
+        fixture.WriteProcessingTypeMaps();
+        fixture.LoadProfileMaps();
+        fixture.CompareProfilePairs(pair);
+        fixture.GenerateProfileOutcomes(pair);
+
+        DbStructureDefinition source = fixture.Structure(pair.SourcePackage, "SimpleQuantity");
+        DbStructureDefinition target = fixture.Structure(pair.TargetPackage, "SimpleQuantity");
+        source.ArtifactClass.ShouldBe(reverse ? FhirArtifactClassEnum.ComplexType : FhirArtifactClassEnum.Profile);
+        target.ArtifactClass.ShouldBe(reverse ? FhirArtifactClassEnum.Profile : FhirArtifactClassEnum.ComplexType);
+        DbStructureOutcome[] outcomes = [.. DbStructureOutcome.SelectList(fixture.Connection)];
+        DbStructureOutcome quantity = outcomes.Single(outcome => outcome.SourceStructureKey == source.Key);
+        quantity.TargetStructureKey.ShouldBe(target.Key);
+        outcomes.Single(outcome => outcome.SourceStructureKey == orphan.Key).TargetStructureKey.ShouldBeNull();
+        string[] nativeTypes = ["Age", "Count", "Distance", "Duration", "Money"];
+        foreach (string native in nativeTypes)
+        {
+            outcomes.ShouldContain(outcome => outcome.SourceStructureKey == fixture.Structure(pair.SourcePackage, native).Key &&
+                outcome.TargetStructureKey == fixture.Structure(pair.TargetPackage, native).Key);
+        }
+        outcomes.ShouldNotContain(outcome => outcome.SourceId.StartsWith("Passive", StringComparison.Ordinal) || outcome.SourceId == "MoneyQuantity");
+        StructureFhirExporter.BuiltDefinitions built = fixture.BuildDefinitions(pair);
+        built.Profiles.ShouldNotContain(definition => definition.OutcomeKey == quantity.Key ||
+            outcomes.Any(outcome => outcome.SourceStructureKey == orphan.Key && outcome.Key == definition.OutcomeKey));
+
+        string outputRoot = Path.Combine(fixture.SourceRoot, "generated");
+        DbOutcomeClasses.CreateTables(fixture.Connection, forValueSets: true, forStructures: false);
+        new XVerExporter(fixture.Connection, new ConfigXVer { OutputDirectory = outputRoot, XverArtifactVersion = "0.1.0-test" })
+            .Export(includeIgScripts: false, processVocabulary: true, processStructures: true, specificPairs: [pair.SequencePair]);
+        string packageRoot = Path.Combine(outputRoot,
+            "hl7.fhir.uv.xver-" + pair.SourcePackageShortName.ToLowerInvariant() + "." + pair.TargetPackageShortName.ToLowerInvariant());
+        string resources = Path.Combine(packageRoot, "input", "resources");
+        string pages = Path.Combine(packageRoot, "input", "pagecontent");
+        string direction = pair.SourcePackageShortName + "-type-map-to-" + pair.TargetPackageShortName + ".json";
+        using JsonDocument typeMap = JsonDocument.Parse(File.ReadAllText(Path.Combine(resources, direction)));
+        JsonElement mapped = FindConceptMapSourceElement(typeMap, "SimpleQuantity");
+        mapped.GetProperty("target").EnumerateArray().Select(element => element.GetProperty("code").GetString())
+            .ShouldBe(["SimpleQuantity"]);
+        JsonElement unmapped = FindConceptMapSourceElement(typeMap, "OrphanQuantity");
+        unmapped.TryGetProperty("target", out _).ShouldBeFalse();
+        string resourceMapPath = Path.Combine(resources,
+            pair.SourcePackageShortName + "-resource-map-to-" + pair.TargetPackageShortName + ".json");
+        GetConceptMapSourceCodes(resourceMapPath).ShouldNotContain("SimpleQuantity");
+        GetConceptMapSourceCodes(resourceMapPath).ShouldNotContain("OrphanQuantity");
+        string typeIndex = File.ReadAllText(Path.Combine(pages, "index-types.md"));
+        string quantityRow = typeIndex.Split('\n')
+            .Single(line => line.StartsWith($"| [{pair.SourceFhirSequence} SimpleQuantity](", StringComparison.Ordinal));
+        quantityRow.ShouldContain("datatypes.html#SimpleQuantity");
+        string orphanRow = typeIndex.Split('\n')
+            .Single(line => line.StartsWith($"| [{pair.SourceFhirSequence} OrphanQuantity](", StringComparison.Ordinal));
+        orphanRow.ShouldContain("Extension");
+        File.ReadAllText(Path.Combine(pages, "index-resources.md")).ShouldNotContain("SimpleQuantity");
+        string lookup = ReadLookupPage(pages, quantityRow);
+        lookup.ShouldContain("complex type");
+        lookup.ShouldNotContain("Basic");
+        string orphanLookup = ReadLookupPage(pages, orphanRow);
+        orphanLookup.ShouldContain("Extension");
+        orphanLookup.ShouldNotContain("Basic");
+        string elementMap = File.ReadAllText(Path.Combine(resources, quantity.ElementConceptMapFileName + ".json"));
+        elementMap.ShouldContain("Quantity:simplequantity.code");
+        elementMap.ShouldNotContain("Basic");
+        foreach (string filename in Directory.GetFiles(packageRoot, "*", SearchOption.AllDirectories)
+            .Where(filename => filename.EndsWith(".json", StringComparison.Ordinal) || filename.EndsWith(".md", StringComparison.Ordinal)))
+        {
+            string content = File.ReadAllText(filename);
+            content.ShouldNotContain("PassiveAge");
+            content.ShouldNotContain("PassiveCoding");
+            content.ShouldNotContain("PassiveValueSet");
+            content.ShouldNotContain("MoneyQuantity");
+        }
+    }
+
     [Fact]
     public void XVerResourceAndTypeConceptMapsSeparateArtifactClasses()
     {
@@ -169,6 +255,13 @@ public class CrossVersionArtifactSemanticTests
         unmappedRow.ShouldNotContain("No direct target type");
     }
 
+    private static string ReadLookupPage(string directory, string row)
+    {
+        Match link = Regex.Match(row, @"\((lookup-sd-[^)]+)\.html\)");
+        link.Success.ShouldBeTrue();
+        return File.ReadAllText(Path.Combine(directory, link.Groups[1].Value + ".md"));
+    }
+
     private static List<string> GetConceptMapSourceCodes(string path)
     {
         using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path));
@@ -312,6 +405,8 @@ public class CrossVersionArtifactSemanticTests
             DbStructureDefinition targetBasic = InsertStructure(connection, targetPackage, "Basic", FhirArtifactClassEnum.Resource);
             DbStructureDefinition targetElement = InsertStructure(connection, targetPackage, "Element", FhirArtifactClassEnum.ComplexType);
             DbStructureDefinition targetExtension = InsertStructure(connection, targetPackage, "Extension", FhirArtifactClassEnum.ComplexType);
+            DbStructureDefinition targetString = InsertStructure(connection, targetPackage, "string", FhirArtifactClassEnum.PrimitiveType);
+            DbStructureDefinition targetUri = InsertStructure(connection, targetPackage, "uri", FhirArtifactClassEnum.PrimitiveType);
 
             InsertRootElement(connection, targetPackage, targetPatient);
             InsertUrlElement(connection, targetPackage, targetPatient);
@@ -320,8 +415,50 @@ public class CrossVersionArtifactSemanticTests
             InsertUrlElement(connection, targetPackage, targetBasic);
             InsertRootElement(connection, targetPackage, targetElement);
             InsertRootElement(connection, targetPackage, targetExtension);
+            InsertRootElement(connection, targetPackage, targetString);
+            InsertRootElement(connection, targetPackage, targetUri);
             DbElement extensionValue = InsertElement(connection, targetPackage, targetExtension, "Extension.value[x]", "value[x]", 1, isChoiceType: true);
-            InsertElementType(connection, targetPackage, targetExtension, extensionValue, "string", null);
+            InsertElementType(connection, targetPackage, targetExtension, extensionValue, "string", targetString);
+
+            List<(DbStructureDefinition Owner, StructureDefinition Definition)> definitions = [];
+            foreach (DbStructureDefinition owner in new[] { sourcePatient, sourceAddress, sourceUnmappedType, sourceUnmappedResource,
+                sourceDataType, sourcePrimitiveType, targetPatient, targetAddress, targetBasic, targetElement, targetExtension, targetString, targetUri })
+            {
+                DbFhirPackage package = owner.FhirPackageKey == sourcePackage.Key ? sourcePackage : targetPackage;
+                List<DbElement> elements = DbElement.SelectList(connection, StructureKey: owner.Key,
+                    orderByProperties: [nameof(DbElement.ResourceFieldOrder)]);
+                StructureDefinition definition = new()
+                {
+                    Id = owner.Id, Url = owner.UnversionedUrl, Version = owner.Version, Name = owner.Name,
+                    Status = owner.Status, Type = owner.Id, Abstract = false,
+                    Kind = owner.ArtifactClass == FhirArtifactClassEnum.Resource ? StructureDefinition.StructureDefinitionKind.Resource
+                        : owner.ArtifactClass == FhirArtifactClassEnum.PrimitiveType ? StructureDefinition.StructureDefinitionKind.PrimitiveType
+                            : StructureDefinition.StructureDefinitionKind.ComplexType,
+                    Derivation = StructureDefinition.TypeDerivationRule.Specialization,
+                    Snapshot = new() { Element = [] },
+                };
+                foreach (DbElement element in elements)
+                {
+                    if (element.ResourceFieldOrder == 0)
+                    {
+                        InsertElementType(connection, package, owner, element, owner.Id, owner);
+                    }
+                    else if (element.Name == "url")
+                    {
+                        InsertElementType(connection, package, owner, element, "uri", targetUri);
+                    }
+                    definition.Snapshot.Element.Add(new()
+                    {
+                        ElementId = element.Id, Path = element.Path, Min = element.MinCardinality, Max = element.MaxCardinalityString,
+                        Type = [.. DbElementType.SelectList(connection, ElementKey: element.Key)
+                            .Select(type => new ElementDefinition.TypeRefComponent { Code = type.TypeName })],
+                    });
+                }
+                owner.SnapshotCount = definition.Snapshot.Element.Count;
+                DbStructureDefinition.Update(connection, owner);
+                definitions.Add((owner, definition));
+            }
+            UnsafeCodeTestFixture.PublishAuthoredDefinitions(connection, definitions);
 
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourcePatient, targetPatient);
             InsertStructureOutcome(connection, sourcePackage, targetPackage, sourceAddress, targetAddress);
@@ -482,6 +619,13 @@ public class CrossVersionArtifactSemanticTests
             };
 
             element.Key = DbElement.Insert(connection, element);
+            if (order != 0)
+            {
+                DbElement parent = DbElement.SelectSingle(connection, StructureKey: structure.Key, ResourceFieldOrder: 0)!;
+                element.ParentElementKey = parent.Key;
+                parent.ChildElementCount++;
+                DbElement.Update(connection, [element, parent]);
+            }
             return element;
         }
 

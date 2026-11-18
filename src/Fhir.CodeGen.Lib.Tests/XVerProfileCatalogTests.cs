@@ -14,10 +14,14 @@ using System.Xml.XPath;
 using Fhir.CodeGen.Common.FhirExtensions;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
+using Fhir.CodeGen.Comparison.CompareTool;
+using Fhir.CodeGen.Comparison.CrossVersionSource;
+using Fhir.CodeGen.Comparison.Exporter;
 using Fhir.CodeGen.Comparison.Extensions;
 using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.XVer;
 using Fhir.CodeGen.Lib.Loader;
+using Fhir.CodeGen.Lib.Configuration;
 using Fhir.CodeGen.Lib.Models;
 using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.FhirPath;
@@ -28,6 +32,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Xunit.Abstractions;
+using ConceptMap = Hl7.Fhir.Model.ConceptMap;
 using ElementDefinition = Hl7.Fhir.Model.ElementDefinition;
 using StructureDefinition = Hl7.Fhir.Model.StructureDefinition;
 
@@ -149,6 +154,272 @@ public class XVerProfileCatalogTests
           }
         }
         """;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void QuantityMapsRetainAuthoredProvenanceAndPrecedence(bool fallbackFirst)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateProcessingEligibilityInputs();
+        FhirPackageComparisonPair pair = new(fixture.Packages[2], fixture.Packages[1]);
+        DbStructureDefinition source = fixture.Structure(pair.SourcePackage, "SimpleQuantity");
+        DbStructureDefinition target = fixture.Structure(pair.TargetPackage, "SimpleQuantity");
+        DbElement sourceUse = fixture.AddElement(fixture.Structure(pair.SourcePackage), "ValueSet.measure", "Quantity");
+        fixture.AddType(sourceUse, "Quantity", fixture.Structure(pair.SourcePackage, "Quantity"), source);
+        DbElement targetUse = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.measure", "SimpleQuantity");
+        fixture.PublishAuthoredDefinitions();
+        fixture.WriteProcessingTypeMaps();
+        bool[] fallbackFlags = [false, true];
+        foreach (bool isFallback in fallbackFlags)
+        {
+            string filename = isFallback ? "ConceptMap-types-fallback.json" : "ConceptMap-types-quantity-5to4B.json";
+            ConceptMap map = fixture.ReadMap("types", filename);
+            map.Group[0].Element.Add(new()
+            {
+                Code = "Quantity", Target = [new()
+                {
+                    Code = "SimpleQuantity",
+                    Relationship = isFallback ? ConceptMap.ConceptMapRelationship.NotRelatedTo
+                        : ConceptMap.ConceptMapRelationship.SourceIsNarrowerThanTarget,
+                    Comment = isFallback ? "Conflicting fallback occurrence authority" : "Selected primary occurrence authority",
+                }],
+            });
+            fixture.WriteInputMap(map, "types", filename);
+        }
+        using MappingLoader mappingLoader = new(fixture.Connection, NullLoggerFactory.Instance);
+        mappingLoader.TryLoadCrossVersionSourceMaps(fixture.SourceRoot, false).ShouldBeTrue();
+        using PackageLoader packageLoader = new(new()
+        {
+            OfflineMode = true, AutoLoadExpansions = false, ResolvePackageDependencies = false,
+            LogFactory = NullLoggerFactory.Instance,
+        }, new() { JsonModel = LoaderOptions.JsonDeserializationModel.SystemTextJson });
+        ConceptMapLoader loader = new(mappingLoader, fixture.Connection, packageLoader,
+            DbFhirPackage.SelectList(fixture.Connection), NullLoggerFactory.Instance);
+        DbStructureMapping.Delete(fixture.Connection);
+        loader.LoadInternalTypeMaps(loadPrimitives: false, loadComplex: true);
+        DbStructureMapping internalMap = DbStructureMapping.SelectList(fixture.Connection,
+            SourceStructureKey: source.Key, TargetFhirPackageKey: pair.TargetPackageKey).ShouldHaveSingleItem();
+        internalMap.ExplicitNoMap.ShouldBeFalse();
+        internalMap.TargetStructureKey.ShouldBeNull();
+        internalMap.Relationship.ShouldBeNull();
+        internalMap.ConceptMapSourceKey.ShouldBeNull();
+        internalMap.FmlSourceKey.ShouldBeNull();
+        string[] nativeTypes = ["Age", "Count", "Distance", "Duration", "Money"];
+        foreach (string native in nativeTypes)
+        {
+            DbStructureMapping.SelectList(fixture.Connection, SourceStructureKey: fixture.Structure(pair.SourcePackage, native).Key,
+                TargetFhirPackageKey: pair.TargetPackageKey).ShouldHaveSingleItem().TargetStructureKey
+                .ShouldBe(fixture.Structure(pair.TargetPackage, native).Key);
+        }
+        new XVerStructureCatalog(fixture.Connection).IsQuantityFamily(fixture.Structure(pair.SourcePackage, "Money")).ShouldBeFalse();
+
+        DbStructureMapping.Delete(fixture.Connection);
+        string[] patterns = fallbackFirst
+            ? ["ConceptMap-types-fallback.json", "ConceptMap-types-quantity-*.json"]
+            : ["ConceptMap-types-quantity-*.json", "ConceptMap-types-fallback.json"];
+        foreach (string pattern in patterns)
+        {
+            loader.LoadSourceMaps(fixture.SourceRoot, "types", pattern);
+        }
+        HashSet<int> passiveKeys = [.. DbStructureDefinition.SelectList(fixture.Connection, ArtifactClass: FhirArtifactClassEnum.Profile)
+            .Where(owner => owner.Id != "SimpleQuantity").Select(owner => owner.Key)];
+        DbStructureMapping.SelectList(fixture.Connection).ShouldAllBe(mapping => !passiveKeys.Contains(mapping.SourceStructureKey) &&
+            (mapping.TargetStructureKey == null || !passiveKeys.Contains(mapping.TargetStructureKey.Value)));
+        DbStructureMapping[] authorities = [.. DbStructureMapping.SelectList(fixture.Connection,
+            SourceStructureKey: source.Key, TargetStructureKey: target.Key)];
+        authorities.Length.ShouldBe(2);
+        DbStructureMapping primary = authorities.Single(mapping => !mapping.IsFallback);
+        DbStructureMapping fallback = authorities.Single(mapping => mapping.IsFallback);
+        primary.Relationship.ShouldBe(ConceptMap.ConceptMapRelationship.Equivalent);
+        fallback.Relationship.ShouldBe(ConceptMap.ConceptMapRelationship.NotRelatedTo);
+        primary.Comments.ShouldBe("Authored primary Quantity authority");
+        primary.SourceStructureUrl.ShouldBe(source.UnversionedUrl);
+        primary.TargetStructureUrl.ShouldBe(target.UnversionedUrl);
+        DbMappingSourceFile.SelectSingle(fixture.Connection, Key: primary.ConceptMapSourceKey)!.Url
+            .ShouldBe("http://example.org/ConceptMap/quantity-5to4B");
+        DbMappingSourceFile.SelectSingle(fixture.Connection, Key: fallback.ConceptMapSourceKey)!.Url
+            .ShouldBe("http://example.org/ConceptMap/processing-fallback");
+
+        fixture.CompareProfilePairs(pair);
+        DbStructureComparison comparison = DbStructureComparison.SelectList(fixture.Connection,
+            SourceStructureKey: source.Key, TargetStructureKey: target.Key).ShouldHaveSingleItem();
+        comparison.StructureMappingKey.ShouldBe(primary.Key);
+        comparison.IsBasedOnFallbackMapping.ShouldBeFalse();
+        comparison.SourceCanonicalVersioned.ShouldBe(source.VersionedUrl);
+        comparison.TargetCanonicalVersioned.ShouldBe(target.VersionedUrl);
+        comparison.Relationship.ShouldBe(ConceptMap.ConceptMapRelationship.SourceIsNarrowerThanTarget);
+        DbElement sourceRoot = DbElement.SelectSingle(fixture.Connection, StructureKey: source.Key, ResourceFieldOrder: 0)!;
+        sourceRoot.Id.ShouldBe("Quantity:simplequantity");
+        sourceRoot.Path.ShouldBe("Quantity");
+        DbElementComparison.SelectList(fixture.Connection, StructureComparisonKey: comparison.Key,
+            SourceElementKey: sourceRoot.Key).ShouldHaveSingleItem().SourceElementId.ShouldBe(sourceRoot.Id);
+        DbElement code = DbElement.SelectSingle(fixture.Connection, StructureKey: source.Key, Path: "Quantity.code")!;
+        DbElementTypeComparison.SelectList(fixture.Connection, SourceElementKey: code.Key,
+            TargetFhirPackageKey: pair.TargetPackageKey).ShouldHaveSingleItem().UserMessage.ShouldBe("Authored fallback authority");
+        DbComparisonCache<DbElementTypeComparison> cache = new();
+        new ElementTypeComparer(fixture.Connection, NullLoggerFactory.Instance, cache)
+            .DoTypeComparisons(pair, sourceUse, targetUse, 991);
+        DbElementTypeComparison occurrence = cache.ToAdd.ShouldHaveSingleItem();
+        occurrence.NotMapped.ShouldBeFalse();
+        occurrence.Relationship.ShouldBe(ConceptMap.ConceptMapRelationship.SourceIsNarrowerThanTarget);
+        occurrence.UserMessage.ShouldBe("Selected primary occurrence authority");
+        ProfileDecisionDocument decision = JsonSerializer.Deserialize<ProfileDecisionDocument>(occurrence.TechnicalMessage!)!;
+        decision.ProfileDecisionFormat.ShouldBe(1);
+        decision.Decisions.ShouldHaveSingleItem().Kind.ShouldBe(ProfileProofKind.NativeReuse);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void IncompatibleCatalogIsRejectedBeforeComparisonReset(bool combined)
+    {
+        using CatalogImport imported = new(UseDefinitions());
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        UnsafeCodeInputStore.ReplaceWithEmptyInputs(imported.Connection, DbFhirPackage.SelectList(imported.Connection));
+        using IDbCommand sentinel = imported.Connection.CreateCommand();
+        sentinel.CommandText = $"CREATE TABLE {DbStructureComparison.DefaultTableName} (Key INTEGER PRIMARY KEY); " +
+            $"INSERT INTO {DbStructureComparison.DefaultTableName} VALUES (197);";
+        sentinel.ExecuteNonQuery();
+        DbUnsafeCodeInputState previousInput = DbUnsafeCodeInputState.SelectSingle(imported.Connection, Key: 1)!;
+        string previousRevision = previousInput.CompletedInputRevision!;
+        previousInput.FormatVersion = 1;
+        DbUnsafeCodeInputState.Update(imported.Connection, previousInput);
+
+        InvalidOperationException error = Should.Throw<InvalidOperationException>(() =>
+            new FhirDbComparer(imported.Database, NullLoggerFactory.Instance).Compare(
+                processValueSets: combined, processStructures: true));
+
+        error.Message.ShouldContain("Reload");
+        sentinel.CommandText = $"SELECT Key FROM {DbStructureComparison.DefaultTableName}";
+        Convert.ToInt32(sentinel.ExecuteScalar()).ShouldBe(197);
+        DbUnsafeCodeInputState.SelectSingle(imported.Connection, Key: 1)!.CompletedInputRevision.ShouldBe(previousRevision);
+    }
+
+    [Fact]
+    public void MapReloadCannotRepairAnOldCatalog()
+    {
+        using CatalogImport imported = new(UseDefinitions());
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(imported.Connection);
+        UnsafeCodeInputStore.ReplaceWithEmptyInputs(imported.Connection, packages);
+        DbUnsafeCodeInputState previousInput = DbUnsafeCodeInputState.SelectSingle(imported.Connection, Key: 1)!;
+        DbDefinitionInventoryState state = DefinitionInventoryStore.ReadState(imported.Connection)!;
+        state.FormatVersion = 0;
+        DbDefinitionInventoryState.Update(imported.Connection, state);
+        string source = Path.Combine(Path.GetTempPath(), "fhir-codegen-tests", "map-preflight-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(source);
+        try
+        {
+            using MappingLoader loader = new(imported.Connection, NullLoggerFactory.Instance);
+            Should.Throw<InvalidOperationException>(() => loader.TryLoadCrossVersionSourceMaps(source, false))
+                .Message.ShouldContain("Reload the database");
+            DbUnsafeCodeInputState.SelectSingle(imported.Connection, Key: 1)!.CompletedInputRevision.ShouldBe(previousInput.CompletedInputRevision);
+            DefinitionInventoryStore.ReadState(imported.Connection)!.FormatVersion.ShouldBe(0);
+        }
+        finally
+        {
+            Directory.Delete(source, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PreparatoryNativeOnlyPolicyCannotBindCurrentMapInputsOrResetState()
+    {
+        using CatalogImport imported = new(UseDefinitions());
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(imported.Connection);
+        DbStructureDefinition.SelectList(imported.Connection, ArtifactClass: FhirArtifactClassEnum.Profile).ShouldBeEmpty();
+        DefinitionInventoryPackageCounts[] expected = [new(imported.PackageKey, 0, 1, 1, 0, 10, 10, 0)];
+        DefinitionInventoryStore.ReadState(imported.Connection)!.ExpectedPackageCountsJson
+            .ShouldBe(JsonSerializer.Serialize(expected));
+        DbMappingClasses.CreateTables(imported.Connection);
+        UnsafeCodeInputStore.ReplaceWithEmptyInputs(imported.Connection, packages);
+        DbUnsafeCodeInputState input = DbUnsafeCodeInputState.SelectSingle(imported.Connection, Key: 1)!;
+        input.FormatVersion.ShouldBe(2);
+        DbMappingSourceFile.Insert(imported.Connection, new DbMappingSourceFile
+        {
+            Key = 197, Filename = "preparatory.json", SourceRelativeFilename = "input/elements/preparatory.json",
+            IsConceptMap = true, IsFml = false, Url = "urn:preparatory-map",
+        }, insertPrimaryKey: true);
+        using IDbCommand sentinel = imported.Connection.CreateCommand();
+        sentinel.CommandText = $"CREATE TABLE {DbStructureComparison.DefaultTableName} (Key INTEGER PRIMARY KEY); " +
+            $"INSERT INTO {DbStructureComparison.DefaultTableName} VALUES (197);";
+        sentinel.ExecuteNonQuery();
+        DbDefinitionInventoryState preparatory = new()
+        {
+            Key = 1, FormatVersion = 1, PolicyVersion = 1,
+            StartedRevision = "completed-native-only-preparatory-import",
+            CompletedRevision = "completed-native-only-preparatory-import",
+            ExpectedPackageCountsJson = JsonSerializer.Serialize(expected),
+            CompletedMapInventoryBindingsJson = JsonSerializer.Serialize(new Dictionary<string, string>
+            {
+                [input.SnapshotId] = "completed-native-only-preparatory-import",
+            }),
+        };
+        DbDefinitionInventoryState.Update(imported.Connection, preparatory);
+        string previousInput = JsonSerializer.Serialize(input);
+        string previousInventory = JsonSerializer.Serialize(DefinitionInventoryStore.ReadState(imported.Connection));
+        string previousMappings = JsonSerializer.Serialize(DbMappingSourceFile.SelectList(imported.Connection));
+        string source = Path.Combine(Path.GetTempPath(), "fhir-codegen-tests", "preparatory-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(source);
+        try
+        {
+            MappingLoader loader = new(imported.Connection, NullLoggerFactory.Instance);
+            AssertRefused(() => loader.TryLoadCrossVersionSourceMaps(source, false));
+            AssertRefused(() => UnsafeCodeInputStore.BeginInputs(imported.Connection, "source", source));
+            AssertRefused(() => UnsafeCodeInputStore.RequireInputs(imported.Connection));
+            AssertRefused(() => DefinitionInventoryStore.BeginMapInputs(imported.Connection, "new-input", preparatory.StartedRevision));
+            AssertRefused(() => DefinitionInventoryStore.CompleteInventory(imported.Connection, preparatory.StartedRevision));
+        }
+        finally
+        {
+            Directory.Delete(source, recursive: true);
+        }
+
+        void AssertRefused(Action action)
+        {
+            InvalidOperationException error = Should.Throw<InvalidOperationException>(action);
+            error.Message.ShouldContain("Reload the database, load maps, compare, generate outcomes, then export");
+            JsonSerializer.Serialize(DbUnsafeCodeInputState.SelectSingle(imported.Connection, Key: 1)).ShouldBe(previousInput);
+            JsonSerializer.Serialize(DefinitionInventoryStore.ReadState(imported.Connection)).ShouldBe(previousInventory);
+            JsonSerializer.Serialize(DbMappingSourceFile.SelectList(imported.Connection)).ShouldBe(previousMappings);
+            sentinel.CommandText = $"SELECT Key FROM {DbStructureComparison.DefaultTableName}";
+            Convert.ToInt32(sentinel.ExecuteScalar()).ShouldBe(197);
+        }
+    }
+
+    [Fact]
+    public void IgPreparationIsWriteFreeAndRetainsTrackingState()
+    {
+        using CatalogImport imported = new(UseDefinitions());
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        DbFhirPackage package = DbFhirPackage.SelectList(imported.Connection).ShouldHaveSingleItem();
+        string output = Path.Combine(Path.GetTempPath(), "fhir-codegen-tests", "prepared-" + Guid.NewGuid().ToString("N"));
+        ConfigXVer config = new() { OutputDirectory = output };
+        XVerExporter exporter = new(imported.Connection, config);
+        IgExporter igExporter = new(imported.Connection, NullLoggerFactory.Instance, output, null, exporter, config);
+        IgExporter.ExportSchedule schedule = new([new(package, package)], [package]);
+        IgExporter.XVerExportTrackingRecord tracking = igExporter.PrepareXVerIgs(schedule);
+        IgExporter.XVerIgExportTrackingRecord pair = tracking.XVerIgs.ShouldHaveSingleItem();
+        pair.GetName("Shared", "first").name.ShouldBe("Shared");
+        pair.EdOutcomeMapTargets.Add(197, [new("http://example.org/StructureDefinition/emitted", "Quantity.code")]);
+        Directory.Exists(output).ShouldBeFalse();
+        try
+        {
+            igExporter.MaterializeXVerIgs(tracking, includeScripts: false);
+            tracking.XVerIgs.ShouldHaveSingleItem().ShouldBeSameAs(pair);
+            pair.GetName("Shared", "second").name.ShouldBe("Second");
+            pair.EdOutcomeMapTargets[197].ShouldHaveSingleItem().elementPath.ShouldBe("Quantity.code");
+            Directory.Exists(pair.ProfileDir).ShouldBeTrue();
+        }
+        finally
+        {
+            if (Directory.Exists(output))
+            {
+                Directory.Delete(output, recursive: true);
+            }
+        }
+    }
 
     [Fact]
     public void NormalizedFactsRoundTripConstraintsAndExactRootIds()
@@ -418,7 +689,7 @@ public class XVerProfileCatalogTests
         definitions.AddLogicalModel(logical, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
         HashSet<string> exclusions = [excluded.Url, QuantityUrl.Replace("Quantity", "Money")];
         using CatalogImport full = new(definitions);
-        full.Database.TryLoadFullCatalogCandidate(exclusions, []).ShouldBeTrue();
+        full.Database.TryLoadFromDefinitionCollections(exclusions, []).ShouldBeTrue();
         XVerStructureCatalog catalog = full.Catalog;
         catalog.GetDefinitions(full.PackageKey).Count.ShouldBe(9);
         catalog.GetDefinitions(full.PackageKey).Count(row => row.ArtifactClass == FhirArtifactClassEnum.Profile).ShouldBe(6);
@@ -439,14 +710,8 @@ public class XVerProfileCatalogTests
         DbStructureDefinitionFacts.SelectList(full.Connection).Count.ShouldBe(9);
         DbDefinitionInventoryState state = DefinitionInventoryStore.ReadState(full.Connection)!;
         state.CompletedRevision.ShouldBe(state.StartedRevision);
-        catalog.ResolveImportLinks(full.Connection, validateProcessedRoots: false);
+        catalog.ResolveImportLinks(full.Connection, validateProcessedRoots: true);
         catalog.Diagnostics.ShouldContain(message => message.Contains("missing", StringComparison.Ordinal));
-
-        using CatalogImport ordinary = new(definitions);
-        ordinary.Database.TryLoadFromDefinitionCollections(exclusions, []).ShouldBeTrue();
-        DbStructureDefinition.SelectList(ordinary.Connection).Count.ShouldBe(3);
-        DbStructureDefinition.SelectList(ordinary.Connection, ArtifactClass: FhirArtifactClassEnum.Profile).ShouldBeEmpty();
-        DefinitionInventoryStore.ReadState(ordinary.Connection).ShouldBeNull();
 
         DefinitionCollection r2 = Definitions(FhirReleases.FhirSequenceCodes.DSTU2);
         AddNative(r2, NativeQuantity());
@@ -455,8 +720,102 @@ public class XVerProfileCatalogTests
         r2.ComplexTypesByName.ContainsKey("Age").ShouldBeFalse();
         r2.ProfilesByUrl.ContainsKey(derivative.Url).ShouldBeTrue();
         using CatalogImport dstu2 = new(r2);
-        dstu2.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        dstu2.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         dstu2.Catalog.GetProcessedStructures(dstu2.PackageKey).Select(row => row.Id).Order().ShouldBe(["Age", "Quantity"]);
+    }
+
+    [Fact]
+    public void PassiveBindingsDoNotChangeUnrelatedTerminologyRetention()
+    {
+        using CatalogImport baseline = new(TerminologyDefinitions(passiveBindings: false));
+        using CatalogImport withPassive = new(TerminologyDefinitions(passiveBindings: true));
+        foreach (CatalogImport imported in new[] { baseline, withPassive })
+        {
+            imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+            DbCodeSystem.SelectList(imported.Connection).Select(row => row.Id).Order()
+                .ShouldBe(["eligible", "native", "native-additional", "other-tho", "outside"]);
+            DbValueSet.SelectList(imported.Connection).Count.ShouldBe(10);
+            AssertPrunedTerminologyDependencies(imported);
+            DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision.ShouldNotBeNullOrEmpty();
+        }
+        DbElement.SelectList(withPassive.Connection, BindingValueSet: TerminologyValueSet("passive")).ShouldHaveSingleItem();
+        DbElementAdditionalBinding.SelectList(withPassive.Connection, BindingValueSet: TerminologyValueSet("passive-additional"))
+            .ShouldHaveSingleItem();
+        BuildVocabularySchedule(withPassive).ShouldBe(BuildVocabularySchedule(baseline));
+    }
+
+    [Theory]
+    [InlineData("type")]
+    [InlineData("target")]
+    [InlineData("content")]
+    [InlineData("base")]
+    public void ReferencedPassiveBindingsRetainInheritedAndAdditionalTerminology(string reference)
+    {
+        DefinitionCollection definitions = TerminologyDefinitions(passiveBindings: true, reference: reference);
+        HashSet<string> exclusions = reference == "base" ? [PassiveTerminologyParentUrl] : [];
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections(exclusions, []).ShouldBeTrue();
+        XVerStructureCatalog catalog = new(imported.Connection, exclusions);
+        DbStructureDefinition passive = catalog.ResolveDefinition(imported.PackageKey, PassiveTerminologyUrl + "|passive-definition")!;
+        DbStructureDefinition parent = catalog.ResolveDefinition(imported.PackageKey, PassiveTerminologyParentUrl + "|definition-1")!;
+        if (reference == "base")
+        {
+            catalog.IsProcessed(parent).ShouldBeFalse();
+            catalog.IsProcessed(passive).ShouldBeTrue();
+        }
+        else
+        {
+            catalog.IsProcessed(passive).ShouldBeFalse();
+            catalog.IsProcessed(parent).ShouldBeFalse();
+        }
+        DbCodeSystem.SelectList(imported.Connection).Select(row => row.Id).Order().ShouldBe(
+            ["eligible", "inherited", "inherited-additional", "native", "native-additional", "other-tho", "outside", "passive", "passive-additional"]);
+        DbElement inherited = catalog.ResolveOwnedElement(passive, catalog.ResolveRoot(passive).Id + ".code")!;
+        inherited.BaseStructureKey.ShouldBe(parent.Key);
+        inherited.BindingValueSetKey.ShouldBeNull();
+        foreach (DbElementAdditionalBinding binding in DbElementAdditionalBinding.SelectList(imported.Connection))
+        {
+            binding.BindingValueSetKey.ShouldBe(DbValueSet.SelectSingle(imported.Connection, VersionedUrl: binding.BindingValueSet)!.Key);
+        }
+        if (reference is "type" or "target")
+        {
+            DbElementType use = DbElementType.SelectList(imported.Connection).Single(type =>
+                (reference == "type" ? type.TypeProfile : type.TargetProfile) == PassiveTerminologyUrl + "|passive-definition");
+            (reference == "type" ? use.TypeProfileStructureKey : use.TargetProfileStructureKey).ShouldBe(passive.Key);
+        }
+        if (reference == "content")
+        {
+            DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
+            DbElement use = catalog.ResolveOwnedElement(quantity, "Quantity.borrowed")!;
+            use.ContentReferenceSourceKey.ShouldBe(inherited.Key);
+            catalog.ResolveContentReference(use).StructureKey.ShouldBe(passive.Key);
+        }
+        AssertPrunedTerminologyDependencies(imported);
+        foreach (string id in new[] { "passive", "passive-additional", "inherited", "inherited-additional" })
+        {
+            DbValueSet valueSet = DbValueSet.SelectSingle(imported.Connection, VersionedUrl: TerminologyValueSet(id))!;
+            DbValueSetConcept concept = DbValueSetConcept.SelectList(imported.Connection, ValueSetKey: valueSet.Key).ShouldHaveSingleItem();
+            concept.CodeSystemConceptKey.ShouldNotBeNull();
+            DbCodeSystemConcept systemConcept = DbCodeSystemConcept.SelectSingle(imported.Connection, Key: concept.CodeSystemConceptKey!.Value)!;
+            DbCodeSystem.SelectSingle(imported.Connection, Key: systemConcept.CodeSystemKey)!.UnversionedUrl.ShouldBe(TerminologySystem(id));
+        }
+        BuildVocabularySchedule(imported).ShouldContain("CodeSystem|" + TerminologySystem("passive") + "|terms-1");
+    }
+
+    [Fact]
+    public void PassiveBindingReferencesDoNotSubstituteThePackageVersion()
+    {
+        DefinitionCollection definitions = TerminologyDefinitions(passiveBindings: true, reference: "type");
+        ElementDefinition.TypeRefComponent use = definitions.ComplexTypesByName["Quantity"].Snapshot.Element
+            .Single(element => element.Path == "Quantity.extension").Type[0];
+        use.Profile = [PassiveTerminologyUrl + "|5.0.0"];
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        DbElementType stored = DbElementType.SelectSingle(imported.Connection, TypeProfile: use.Profile.Single())!;
+        stored.TypeProfileStructureKey.ShouldBeNull();
+        imported.Catalog.ResolveDefinition(imported.PackageKey, PassiveTerminologyUrl + "|passive-definition")!.Version.ShouldBe("passive-definition");
+        DbCodeSystem.SelectList(imported.Connection).Select(row => row.Id).Order()
+            .ShouldBe(["eligible", "native", "native-additional", "other-tho", "outside"]);
     }
 
     [Theory]
@@ -480,7 +839,7 @@ public class XVerProfileCatalogTests
         }
 
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         imported.Catalog.GetProcessedStructures(imported.PackageKey).Select(row => row.UnversionedUrl).Order()
             .ShouldBe(new[] { QuantityUrl, QuantityUrl.Replace("Quantity", "Age"), QuantityUrl.Replace("Quantity", "Money"), parent.Url, child.Url }.Order());
         imported.Catalog.ResolveNativeType(imported.PackageKey, "Quantity")!.ArtifactClass.ShouldBe(FhirArtifactClassEnum.ComplexType);
@@ -498,7 +857,7 @@ public class XVerProfileCatalogTests
             }
             AddProfile(invalid, first);
             using CatalogImport failed = new(invalid);
-            InvalidOperationException error = Should.Throw<InvalidOperationException>(() => failed.Database.TryLoadFullCatalogCandidate([], []));
+            InvalidOperationException error = Should.Throw<InvalidOperationException>(() => failed.Database.TryLoadFromDefinitionCollections([], []));
             error.Message.ShouldContain(cycle ? "cyclic" : "missing");
             error.Message.ShouldContain(cycle ? "CycleQuantity" : first.Url);
             DefinitionInventoryStore.ReadState(failed.Connection)!.CompletedRevision.ShouldBeNull();
@@ -532,7 +891,7 @@ public class XVerProfileCatalogTests
         });
         AddProfile(definitions, holder);
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         DbStructureDefinition one = catalog.ResolveDefinition(imported.PackageKey, versionOne.Url + "|definition-1")!;
         DbStructureDefinition two = catalog.ResolveDefinition(imported.PackageKey, versionTwo.Url + "|definition-2")!;
@@ -583,7 +942,7 @@ public class XVerProfileCatalogTests
         profile.Snapshot.Element[3].Base = new() { Path = "Quantity.code", Min = 0, Max = "1" };
         AddProfile(definitions, profile);
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
         DbStructureDefinition native = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
@@ -631,7 +990,7 @@ public class XVerProfileCatalogTests
             AddProfile(definitions, profile);
         }
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         DbStructureDefinition firstOwner = catalog.ResolveDefinition(imported.PackageKey, first.Url)!;
         DbStructureDefinition secondOwner = catalog.ResolveDefinition(imported.PackageKey, second.Url)!;
@@ -666,7 +1025,7 @@ public class XVerProfileCatalogTests
         AddProfile(missing, otherOwner);
         AddProfile(missing, missingOwner);
         using CatalogImport unresolved = new(missing);
-        Should.Throw<InvalidOperationException>(() => unresolved.Database.TryLoadFullCatalogCandidate([], [])).Message.ShouldContain(missingOwner.Url);
+        Should.Throw<InvalidOperationException>(() => unresolved.Database.TryLoadFromDefinitionCollections([], [])).Message.ShouldContain(missingOwner.Url);
         DefinitionInventoryStore.ReadState(unresolved.Connection)!.CompletedRevision.ShouldBeNull();
     }
 
@@ -713,7 +1072,7 @@ public class XVerProfileCatalogTests
         }
 
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "Patient")!;
         DbStructureDefinition elementOwner = catalog.ResolveNativeType(imported.PackageKey, "Element")!;
@@ -744,7 +1103,7 @@ public class XVerProfileCatalogTests
     }
 
     [Fact]
-    public void PublicNativeImportRejectsUnresolvedContentReferenceButCandidateRetainsPassiveDiagnostics()
+    public void PublicImportRejectsNativeUnresolvedContentReferenceButRetainsPassiveDiagnostics()
     {
         DefinitionCollection definitions = Definitions();
         StructureDefinition patient = Definition("Patient", "Patient");
@@ -757,6 +1116,7 @@ public class XVerProfileCatalogTests
                 imported.Database.TryLoadFromDefinitionCollections([], []));
             error.Message.ShouldContain(patient.Url);
             error.Message.ShouldContain("Patient.missing");
+            DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision.ShouldBeNull();
         }
 
         DefinitionCollection passiveDefinitions = Definitions();
@@ -765,7 +1125,7 @@ public class XVerProfileCatalogTests
         passive.Snapshot.Element.Add(new() { ElementId = "Patient.contact", Path = "Patient.contact", ContentReference = "#Patient.missing" });
         AddProfile(passiveDefinitions, passive);
         using CatalogImport retained = new(passiveDefinitions);
-        retained.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        retained.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = retained.Catalog;
         DbStructureDefinition passiveOwner = catalog.ResolveDefinition(retained.PackageKey, passive.Url)!;
         catalog.IsProcessed(passiveOwner).ShouldBeFalse();
@@ -784,16 +1144,22 @@ public class XVerProfileCatalogTests
         DefinitionCollection definitions = Definitions();
         AddNative(definitions, NativeQuantity());
         using CatalogImport imported = new(definitions);
-        InvalidOperationException late = Should.Throw<InvalidOperationException>(() =>
-            imported.Database.TryLoadFullCatalogCandidate([], [], connection =>
-            {
-                DbStructureDefinitionFacts.SelectList(connection).ShouldHaveSingleItem();
-                DefinitionInventoryStore.ReadState(connection)!.CompletedRevision.ShouldBeNull();
-                throw new InvalidOperationException("injected late post-processing failure");
-            }));
-        late.Message.ShouldContain("late post-processing");
+        using IDbCommand interrupt = imported.Connection.CreateCommand();
+        interrupt.CommandText = """
+            CREATE TRIGGER RejectInventoryCompletion BEFORE UPDATE ON DefinitionInventoryState
+            WHEN NEW.CompletedRevision IS NOT NULL
+            BEGIN SELECT RAISE(ABORT, 'injected late completion failure'); END
+            """;
+        interrupt.ExecuteNonQuery();
+        SqliteException late = Should.Throw<SqliteException>(() =>
+            imported.Database.TryLoadFromDefinitionCollections([], []));
+        late.Message.ShouldContain("late completion");
+        DbStructureDefinitionFacts.SelectList(imported.Connection).ShouldHaveSingleItem();
+        imported.Catalog.ResolveRoot(imported.Catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).Id.ShouldBe("Quantity");
         DbDefinitionInventoryState state = DefinitionInventoryStore.ReadState(imported.Connection)!;
         state.CompletedRevision.ShouldBeNull();
+        interrupt.CommandText = "DROP TRIGGER RejectInventoryCompletion";
+        interrupt.ExecuteNonQuery();
         DefinitionInventoryPackageCounts expected = JsonSerializer.Deserialize<DefinitionInventoryPackageCounts[]>(state.ExpectedPackageCountsJson)!.Single();
         string wrongRevision = DefinitionInventoryStore.BeginInventory(imported.Connection, [expected with { ElementCount = expected.ElementCount + 1 }]);
         Should.Throw<InvalidOperationException>(() => DefinitionInventoryStore.CompleteInventory(imported.Connection, wrongRevision))
@@ -814,7 +1180,7 @@ public class XVerProfileCatalogTests
         recursive.Snapshot.Element.Add(new() { ElementId = "Recursive.b", Path = "Recursive.b", ContentReference = "#Recursive.a" });
         AddNative(cycle, recursive);
         using CatalogImport cyclic = new(cycle);
-        Should.Throw<InvalidOperationException>(() => cyclic.Database.TryLoadFullCatalogCandidate([], [])).Message.ShouldContain("cyclic contentReference");
+        Should.Throw<InvalidOperationException>(() => cyclic.Database.TryLoadFromDefinitionCollections([], [])).Message.ShouldContain("cyclic contentReference");
         DefinitionInventoryStore.ReadState(cyclic.Connection)!.CompletedRevision.ShouldBeNull();
 
         DefinitionCollection duplicate = Definitions();
@@ -823,7 +1189,7 @@ public class XVerProfileCatalogTests
         conflict.Url = QuantityUrl;
         AddProfile(duplicate, conflict);
         using CatalogImport conflicting = new(duplicate);
-        Should.Throw<InvalidOperationException>(() => conflicting.Database.TryLoadFullCatalogCandidate([], []))
+        Should.Throw<InvalidOperationException>(() => conflicting.Database.TryLoadFromDefinitionCollections([], []))
             .Message.ShouldContain("identity");
         DefinitionInventoryStore.ReadState(conflicting.Connection)!.CompletedRevision.ShouldBeNull();
     }
@@ -847,7 +1213,7 @@ public class XVerProfileCatalogTests
         }
         AddProfile(definitions, profile);
         using CatalogImport imported = new(definitions);
-        InvalidOperationException error = Should.Throw<InvalidOperationException>(() => imported.Database.TryLoadFullCatalogCandidate([], []));
+        InvalidOperationException error = Should.Throw<InvalidOperationException>(() => imported.Database.TryLoadFromDefinitionCollections([], []));
         error.Message.ShouldContain(profile.Url);
         error.Message.ShouldContain(differentialOnly ? "snapshot" : "top-level Path");
         DbStructureDefinitionFacts facts = DbStructureDefinitionFacts.SelectList(imported.Connection)
@@ -865,7 +1231,7 @@ public class XVerProfileCatalogTests
         DefinitionCollection definitions = Definitions();
         AddNative(definitions, NativeQuantity());
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         string revision = DefinitionInventoryStore.ReadState(imported.Connection)!.StartedRevision;
         if (extraPackage)
         {
@@ -881,7 +1247,7 @@ public class XVerProfileCatalogTests
     }
 
     [Fact]
-    public async Task NativeOnlyPinnedCoreBaseline()
+    public async Task PublicCoreImportPreservesNativeInventory()
     {
         string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".fhir", "packages");
         string[][] entries = [TestCommon.EntriesR2, TestCommon.EntriesR3, TestCommon.EntriesR4, TestCommon.EntriesR4B, TestCommon.EntriesR5];
@@ -889,14 +1255,16 @@ public class XVerProfileCatalogTests
         {
             string moniker = directives[0];
             string[] parts = moniker.Split('#');
-            if (!Directory.Exists(Path.Combine(cache, moniker)) ||
-                !Directory.Exists(Path.Combine(cache, parts[0].Replace(".core", ".expansions") + "#" + parts[1])))
+            File.Exists(Path.Combine(cache, moniker, "package", "package.json")).ShouldBeTrue(
+                $"Required cached-core prerequisite absent: {moniker}; no package acquisition attempted.");
+            if (!moniker.StartsWith("hl7.fhir.r2.core#", StringComparison.Ordinal))
             {
-                _output.WriteLine($"Baseline prerequisite missing: {moniker} and/or its pinned expansions; no package acquisition attempted.");
-                continue;
+                string expansions = parts[0].Replace(".core", ".expansions") + "#" + parts[1];
+                File.Exists(Path.Combine(cache, expansions, "package", "package.json")).ShouldBeTrue(
+                    $"Required cached-expansions prerequisite absent: {expansions}; no package acquisition attempted.");
             }
 
-            PackageLoader loader = new(new()
+            using PackageLoader loader = new(new()
             {
                 OfflineMode = true, ResolvePackageDependencies = false, AutoLoadExpansions = true,
                 LogFactory = NullLoggerFactory.Instance,
@@ -907,10 +1275,21 @@ public class XVerProfileCatalogTests
             Stopwatch elapsed = Stopwatch.StartNew();
             imported.Database.TryLoadFromDefinitionCollections(XVerProcessor._exclusionSet, XVerProcessor._escapeValveCodes).ShouldBeTrue();
             elapsed.Stop();
-            List<DbStructureDefinition> nativeRows = DbStructureDefinition.SelectList(imported.Connection);
-            nativeRows.Count(row => row.ArtifactClass == FhirArtifactClassEnum.Profile).ShouldBe(0);
+            List<DbStructureDefinition> nativeRows = [.. DbStructureDefinition.SelectList(imported.Connection)
+                .Where(row => row.ArtifactClass != FhirArtifactClassEnum.Profile)];
+            nativeRows.Count.ShouldBe(definitions.PrimitiveTypesByName.Count + definitions.ComplexTypesByName.Count + definitions.ResourcesByName.Count);
+            foreach ((IEnumerable<StructureDefinition> inventory, FhirArtifactClassEnum artifactClass) in new[]
+            {
+                (definitions.PrimitiveTypesByName.Values.AsEnumerable(), FhirArtifactClassEnum.PrimitiveType),
+                (definitions.ComplexTypesByName.Values.AsEnumerable(), FhirArtifactClassEnum.ComplexType),
+                (definitions.ResourcesByName.Values.AsEnumerable(), FhirArtifactClassEnum.Resource),
+            })
+            {
+                nativeRows.Where(row => row.ArtifactClass == artifactClass).Select(row => (row.UnversionedUrl, row.Version)).Order()
+                    .ShouldBe(inventory.Select(row => (row.Url, row.Version)).Order());
+            }
             _output.WriteLine($"{moniker}: primitives={definitions.PrimitiveTypesByName.Count}; complex={definitions.ComplexTypesByName.Count}; resources={definitions.ResourcesByName.Count}");
-            _output.WriteLine($"  native definitions={nativeRows.Count}; retained source profiles={definitions.ProfilesByUrl.Count}; imported profiles=0; elements={DbElement.SelectList(imported.Connection).Count}; import ms={elapsed.ElapsedMilliseconds}");
+            _output.WriteLine($"  native definitions={nativeRows.Count}; retained source profiles={definitions.ProfilesByUrl.Count}; elements={DbElement.SelectList(imported.Connection).Count}; import ms={elapsed.ElapsedMilliseconds}");
             _output.WriteLine($"  code systems source/stored={definitions.CodeSystemsByUrl.Count}/{DbCodeSystem.SelectList(imported.Connection).Count}; value sets source/stored={definitions.ValueSetsByVersionedUrl.Count}/{DbValueSet.SelectList(imported.Connection).Count}");
         }
     }
@@ -921,7 +1300,7 @@ public class XVerProfileCatalogTests
     [InlineData("hl7.fhir.r4.core#4.0.1")]
     [InlineData("hl7.fhir.r4b.core#4.3.0")]
     [InlineData("hl7.fhir.r5.core#5.0.0")]
-    public async Task FullCandidateRequiresPinnedCachedCore(string moniker)
+    public async Task PublicFullImportRequiresPinnedCachedCore(string moniker)
     {
         string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".fhir", "packages");
         List<string> prerequisites = [moniker];
@@ -945,7 +1324,7 @@ public class XVerProfileCatalogTests
         definitions.ShouldNotBeNull();
         using CatalogImport imported = new(definitions);
         Stopwatch elapsed = Stopwatch.StartNew();
-        imported.Database.TryLoadFullCatalogCandidate(XVerProcessor._exclusionSet, XVerProcessor._escapeValveCodes).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections(XVerProcessor._exclusionSet, XVerProcessor._escapeValveCodes).ShouldBeTrue();
         elapsed.Stop();
         XVerStructureCatalog catalog = new(imported.Connection, XVerProcessor._exclusionSet);
         catalog.GetDefinitions(imported.PackageKey).Count.ShouldBe(definitions.PrimitiveTypesByName.Count +
@@ -965,7 +1344,7 @@ public class XVerProfileCatalogTests
             contactId.BaseStructureKey.ShouldBe(element.Key);
         }
         catalog.ValidateStoredLinks(DbElementType.SelectList(imported.Connection));
-        _output.WriteLine($"{moniker}: full candidate completed; definitions={catalog.GetDefinitions(imported.PackageKey).Count}; profiles={definitions.ProfilesByUrl.Count}; elements={DbElement.SelectList(imported.Connection).Count}; import ms={elapsed.ElapsedMilliseconds}");
+        _output.WriteLine($"{moniker}: public full import completed; definitions={catalog.GetDefinitions(imported.PackageKey).Count}; profiles={definitions.ProfilesByUrl.Count}; elements={DbElement.SelectList(imported.Connection).Count}; import ms={elapsed.ElapsedMilliseconds}");
     }
 
     private const string QuantityUrl = "http://hl7.org/fhir/StructureDefinition/Quantity";
@@ -1017,7 +1396,7 @@ public class XVerProfileCatalogTests
         StructureDefinition holder = definitions.ResourcesByName["UseHolder"];
         holder.Snapshot.Element.Single(element => element.Path == "UseHolder.quantity").Type[0].Profile = [prohibited.Url, permitted.Url];
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = imported.Catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
         DbElement element = imported.Catalog.ResolveOwnedElement(owner, "UseHolder.quantity")!;
@@ -1109,6 +1488,13 @@ public class XVerProfileCatalogTests
         comparison.PreservesRestrictions.ShouldBeFalse();
         comparison.Diagnostics.ShouldContain(message => message.Contains("minValueDecimal"));
         comparison.Diagnostics.ShouldContain(message => message.Contains("maxLength"));
+        PersistedProfileDecision persisted = ProfileUseFacts.ReadDecisions(ProfileUseFacts.SerializeDecisions([comparison])).ShouldHaveSingleItem();
+        persisted.Input.ShouldBe(comparison.Input);
+        persisted.TargetPackageKey.ShouldBe(comparison.TargetPackageKey);
+        persisted.Reasons.Select(reason => reason.Category).ShouldBe(comparison.Reasons.Select(reason => reason.Category));
+        persisted.RequiredFacts[".value"].Restrictions.ShouldContain(restriction => restriction.Name == "minValueDecimal");
+        persisted.RequiredFacts[".unit"].Restrictions.ShouldContain(restriction => restriction.Name == "maxLength");
+        persisted.TargetCanonical.ShouldBeNull();
         DbStructureDefinition holder = imported.Catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
         DbElement targetUse = imported.Catalog.ResolveOwnedElement(holder, "UseHolder.native")!;
         ProfileRepresentationProof projection = facts.Prove(branch, target, holder, targetUse, new HashSet<int> { holder.Key });
@@ -1140,7 +1526,7 @@ public class XVerProfileCatalogTests
             Type = [new() { Code = "Coding", Profile = [passive.Url] }],
         });
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         DbStructureDefinition profileOwner = catalog.ResolveDefinition(imported.PackageKey, passive.Url)!;
         catalog.IsProcessed(profileOwner).ShouldBeFalse();
@@ -1531,7 +1917,7 @@ public class XVerProfileCatalogTests
             Strength = Hl7.Fhir.Model.BindingStrength.Extensible, ValueSet = "http://example.org/occurrence|2",
         };
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         EffectiveProfileBranch branch = QuantityUse(imported, facts, profile).Branches.ShouldHaveSingleItem();
@@ -1636,7 +2022,7 @@ public class XVerProfileCatalogTests
             Representation = [ElementDefinition.PropertyRepresentation.XmlAttr], Type = [new() { Code = "id" }],
         });
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, legacy.Url)!);
@@ -1730,7 +2116,7 @@ public class XVerProfileCatalogTests
             Type = [new() { Code = "uri" }], Fixed = new Hl7.Fhir.Model.FhirUri("http://example.org/target-only"),
         });
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
         EffectiveProfileBranch source = QuantityUse(imported, facts, profile).Branches.ShouldHaveSingleItem();
         DbStructureDefinition holder = imported.Catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
@@ -1787,7 +2173,7 @@ public class XVerProfileCatalogTests
             }
         }
         using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         if (scenario is "missing" or "ambiguous" or "qualified")
         {
             foreach (DbStructureDefinition child in DbStructureDefinition.SelectList(imported.Connection)
@@ -1872,7 +2258,7 @@ public class XVerProfileCatalogTests
         (onTarget ? targetDefinitions : sourceDefinitions).ComplexTypesByName["Quantity"]
             .Snapshot.Element.Single(element => element.Path == "Quantity.code").Type.Clear();
         using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
@@ -1908,7 +2294,7 @@ public class XVerProfileCatalogTests
         DefinitionCollection definitions = UseDefinitions(parent, child);
         definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.extension").Max = "*";
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, child.Url)!;
@@ -1990,7 +2376,7 @@ public class XVerProfileCatalogTests
             }
         }
         using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
@@ -2011,7 +2397,7 @@ public class XVerProfileCatalogTests
             Type = [new() { Code = "Extension", Profile = [ChildProfileUrl] }],
         });
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
@@ -2031,7 +2417,7 @@ public class XVerProfileCatalogTests
         code.Type.Clear();
         code.ContentReference = "#Quantity.system";
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
@@ -2052,7 +2438,7 @@ public class XVerProfileCatalogTests
         holder.Snapshot.Element.Add(new() { ElementId = "UseHolder.group.again", Path = "UseHolder.group.again",
             Min = 0, Max = "*", ContentReference = "#UseHolder.group" });
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
@@ -2072,7 +2458,7 @@ public class XVerProfileCatalogTests
         code.Type.Clear();
         code.Max = "0";
         using CatalogImport imported = new(definitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
@@ -2137,7 +2523,7 @@ public class XVerProfileCatalogTests
             incomplete.ComplexTypesByName["Extension"].Snapshot.Element[1].Type.Clear();
         }
         using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
@@ -2153,6 +2539,630 @@ public class XVerProfileCatalogTests
             proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.UnclassifiedRestriction &&
                 reason.Restriction!.Value.GetProperty("url").GetString() == "http://example.org/unclassified");
         }
+    }
+
+    [Theory]
+    [InlineData("equal")]
+    [InlineData("no-regex")]
+    [InlineData("regex")]
+    [InlineData("representation")]
+    [InlineData("context")]
+    [InlineData("legacy-regex")]
+    [InlineData("regex-url")]
+    [InlineData("direct-code")]
+    [InlineData("core-bridge")]
+    [InlineData("string-integer-bridge")]
+    public void PrimitiveTypeObligationsRequireEqualSemanticsInProvenDatatypeContexts(string scenario)
+    {
+        DefinitionCollection sourceDefinitions = PrimitiveObligationDefinitions("source");
+        DefinitionCollection targetDefinitions = PrimitiveObligationDefinitions("target", scenario == "context" ? "OtherPrimitive" : "dateTime");
+        ElementDefinition.TypeRefComponent sourceType = sourceDefinitions.PrimitiveTypesByName["dateTime"].Snapshot.Element[1].Type[0];
+        ElementDefinition.TypeRefComponent targetType = targetDefinitions.PrimitiveTypesByName.Values.Single().Snapshot.Element[1].Type[0];
+        if (scenario == "no-regex")
+        {
+            sourceType.Extension.RemoveAt(0);
+            targetType.Extension.RemoveAt(0);
+        }
+        else if (scenario == "regex")
+        {
+            targetType.Extension[0].Value = new Hl7.Fhir.Model.FhirString("[0-9]+");
+        }
+        else if (scenario == "representation")
+        {
+            targetType.Extension[1].Value = new Hl7.Fhir.Model.FhirUrl("instant");
+            targetType.Extension[3].Value = new Hl7.Fhir.Model.FhirUrl("xs:dateTime");
+        }
+        else if (scenario is "legacy-regex" or "regex-url")
+        {
+            targetType.Extension[0].Url = CommonDefinitions.ExtUrlSdRegex2;
+            if (scenario == "legacy-regex")
+            {
+                sourceType.Extension[0].Url = CommonDefinitions.ExtUrlSdRegex2;
+            }
+        }
+        else if (scenario == "direct-code")
+        {
+            foreach (ElementDefinition.TypeRefComponent type in new[] { sourceType, targetType })
+            {
+                type.Code = "dateTime";
+                type.Extension.RemoveRange(1, 3);
+            }
+        }
+        else if (scenario == "core-bridge")
+        {
+            sourceType.Extension.RemoveRange(2, 2);
+            targetType.Extension.RemoveRange(2, 2);
+        }
+        else if (scenario == "string-integer-bridge")
+        {
+            foreach (ElementDefinition.TypeRefComponent type in new[] { sourceType, targetType })
+            {
+                type.Code = "http://hl7.org/fhirpath/System.String";
+                type.Extension[1].Value = new Hl7.Fhir.Model.FhirUrl("positiveInt");
+                type.Extension[2].Value = new Hl7.Fhir.Model.FhirUrl("number");
+                type.Extension[3].Value = new Hl7.Fhir.Model.FhirUrl("xs:positiveInteger");
+            }
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        DbStructureDefinition source = catalog.ResolveNativeType(imported.PackageKey, "dateTime")!;
+        DbStructureDefinition target = catalog.ResolveNativeType(targetPackage, scenario == "context" ? "OtherPrimitive" : "dateTime")!;
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), target);
+        bool equal = scenario is "equal" or "no-regex" or "legacy-regex" or "direct-code" or "core-bridge" or "string-integer-bridge";
+        proof.Kind.ShouldBe(equal ? ProfileProofKind.NativeReuse : ProfileProofKind.Unrepresentable,
+            string.Join("; ", proof.Diagnostics));
+        proof.IsAcceptedDecision.ShouldBeTrue();
+        proof.PreservesRestrictions.ShouldBe(equal);
+        ProfileRestriction retained = proof.RequiredFacts[".value"].Restrictions.ShouldHaveSingleItem();
+        retained.Name.ShouldBe("primitive type obligations");
+        retained.Origin.ShouldBe(new(imported.PackageKey, source.Key, source.UnversionedUrl, source.Version, "dateTime.value"));
+        using JsonDocument expectedType = JsonDocument.Parse(sourceType.ToJson());
+        JsonElement.DeepEquals(retained.Value, expectedType.RootElement).ShouldBeTrue();
+        retained.Value.GetProperty("code").GetString().ShouldBe(sourceType.Code);
+        if (!equal)
+        {
+            proof.TargetCanonical.ShouldBeNull();
+            proof.Projection.ShouldBeEmpty();
+            proof.ProjectionOwner.ShouldBeNull();
+            proof.Reasons.ShouldContain(reason => scenario == "context"
+                ? reason.Category == ProfileReasonCategory.DatatypeContext
+                : reason.Category == ProfileReasonCategory.RestrictionTransformation &&
+                    reason.Restriction != null && reason.Restriction.Name == retained.Name);
+        }
+    }
+
+    [Theory]
+    [InlineData("missing-fhir", false)]
+    [InlineData("missing-json", false)]
+    [InlineData("missing-xml", false)]
+    [InlineData("missing-all", false)]
+    [InlineData("wrong-system", false)]
+    [InlineData("unknown-system", false)]
+    [InlineData("wrong-value-kind", false)]
+    [InlineData("empty-regex", false)]
+    [InlineData("empty-xml", false)]
+    [InlineData("unknown-fhir", false)]
+    [InlineData("unknown-json", false)]
+    [InlineData("unknown-xml", false)]
+    [InlineData("unknown-url", false)]
+    [InlineData("duplicate-regex", false)]
+    [InlineData("duplicate-fhir", false)]
+    [InlineData("duplicate-json", false)]
+    [InlineData("duplicate-xml", false)]
+    [InlineData("duplicate-regex-alias", false)]
+    [InlineData("nested", false)]
+    [InlineData("missing-fhir", true)]
+    [InlineData("unknown-url", true)]
+    [InlineData("duplicate-regex", true)]
+    public void InvalidPrimitiveTypeObligationsCannotCertifyEqualOrDifferentContexts(string scenario, bool differentContext)
+    {
+        DefinitionCollection sourceDefinitions = PrimitiveObligationDefinitions("source");
+        DefinitionCollection targetDefinitions = PrimitiveObligationDefinitions("target", differentContext ? "OtherPrimitive" : "dateTime");
+        ElementDefinition.TypeRefComponent invalid = targetDefinitions.PrimitiveTypesByName.Values.Single().Snapshot.Element[1].Type[0];
+        switch (scenario)
+        {
+            case "missing-fhir": invalid.Extension.RemoveAt(1); break;
+            case "missing-json": invalid.Extension.RemoveAt(2); break;
+            case "missing-xml": invalid.Extension.RemoveAt(3); break;
+            case "missing-all": invalid.Extension.Clear(); break;
+            case "wrong-system": invalid.Code = "http://hl7.org/fhirpath/System.String"; break;
+            case "unknown-system": invalid.Code = "http://example.org/System.DateTime"; break;
+            case "wrong-value-kind": invalid.Extension[0].Value = new Hl7.Fhir.Model.FhirUrl("[0-9]+"); break;
+            case "empty-regex": invalid.Extension[0].Value = new Hl7.Fhir.Model.FhirString(" "); break;
+            case "empty-xml": invalid.Extension[3].Value = new Hl7.Fhir.Model.FhirUrl(" "); break;
+            case "unknown-fhir": invalid.Extension[1].Value = new Hl7.Fhir.Model.FhirUrl("unknown"); break;
+            case "unknown-json": invalid.Extension[2].Value = new Hl7.Fhir.Model.FhirUrl("object"); break;
+            case "unknown-xml": invalid.Extension[3].Value = new Hl7.Fhir.Model.FhirUrl("xs:unknown"); break;
+            case "unknown-url": invalid.Extension[0].Url = "http://example.org/StructureDefinition/regex"; break;
+            case "duplicate-regex": invalid.Extension.Add((Hl7.Fhir.Model.Extension)invalid.Extension[0].DeepCopy()); break;
+            case "duplicate-fhir": invalid.Extension.Add((Hl7.Fhir.Model.Extension)invalid.Extension[1].DeepCopy()); break;
+            case "duplicate-json": invalid.Extension.Add((Hl7.Fhir.Model.Extension)invalid.Extension[2].DeepCopy()); break;
+            case "duplicate-xml": invalid.Extension.Add((Hl7.Fhir.Model.Extension)invalid.Extension[3].DeepCopy()); break;
+            case "duplicate-regex-alias": invalid.Extension.Add(new(CommonDefinitions.ExtUrlSdRegex2, new Hl7.Fhir.Model.FhirString("[0-9]+"))); break;
+            case "nested": invalid.Extension[0].Extension.Add(new("http://example.org/nested", new Hl7.Fhir.Model.FhirString("unknown"))); break;
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "dateTime")!),
+            catalog.ResolveNativeType(targetPackage, differentContext ? "OtherPrimitive" : "dateTime")!);
+        proof.Kind.ShouldBe(ProfileProofKind.Unsupported);
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.TargetCanonical.ShouldBeNull();
+        proof.Projection.ShouldBeEmpty();
+        proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.UnclassifiedRestriction &&
+            reason.Origin.PackageKey == targetPackage && reason.Restriction != null);
+    }
+
+    [Theory]
+    [InlineData("equal")]
+    [InlineData("different")]
+    [InlineData("absent")]
+    public void RepetitionOrderMeaningIsAnOpaqueEqualityOnlyObligation(string scenario)
+    {
+        DefinitionCollection sourceDefinitions = UseDefinitions();
+        DefinitionCollection targetDefinitions = UseDefinitions();
+        targetDefinitions.MainPackageId = "example.target";
+        foreach (DefinitionCollection definitions in new[] { sourceDefinitions, targetDefinitions })
+        {
+            ElementDefinition unit = definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.unit");
+            unit.Max = "*";
+            unit.OrderMeaning = definitions == sourceDefinitions || scenario == "equal"
+                ? "Units appear in presentation order" : scenario == "different" ? "Units appear in reverse order" : null;
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+            catalog.ResolveNativeType(targetPackage, "Quantity")!);
+        proof.Kind.ShouldBe(scenario == "equal" ? ProfileProofKind.NativeReuse : ProfileProofKind.Unrepresentable);
+        proof.IsAcceptedDecision.ShouldBeTrue();
+        proof.PreservesRestrictions.ShouldBe(scenario == "equal");
+        proof.RequiredFacts[".unit"].Restrictions.ShouldContain(fact => fact.Name == "orderMeaning" &&
+            fact.Value.GetString() == "Units appear in presentation order");
+        if (scenario != "equal")
+        {
+            proof.TargetCanonical.ShouldBeNull();
+            proof.Projection.ShouldBeEmpty();
+            proof.Reasons.ShouldContain(reason => reason.Restriction != null && reason.Restriction.Name == "orderMeaning" &&
+                reason.Category == ProfileReasonCategory.RestrictionTransformation);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void NumericDefaultsAreRetainedWithoutInferringAMissingValueTransform(bool integer, bool different)
+    {
+        DefinitionCollection sourceDefinitions = UseDefinitions();
+        DefinitionCollection targetDefinitions = UseDefinitions();
+        targetDefinitions.MainPackageId = "example.target";
+        foreach (DefinitionCollection definitions in new[] { sourceDefinitions, targetDefinitions })
+        {
+            ElementDefinition value = definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.value");
+            value.Type[0].Code = integer ? "integer" : "decimal";
+            int number = definitions == targetDefinitions && different ? 2 : 1;
+            value.DefaultValue = integer ? new Hl7.Fhir.Model.Integer(number) : new Hl7.Fhir.Model.FhirDecimal(number);
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+            catalog.ResolveNativeType(targetPackage, "Quantity")!);
+        proof.Kind.ShouldBe(different ? ProfileProofKind.Unrepresentable : ProfileProofKind.NativeReuse);
+        proof.IsAcceptedDecision.ShouldBeTrue();
+        proof.PreservesRestrictions.ShouldBe(!different);
+        proof.RequiredFacts[".value"].Restrictions.ShouldContain(fact =>
+            fact.Name == (integer ? "defaultValueInteger" : "defaultValueDecimal") && fact.Value.GetDecimal() == 1);
+        if (different)
+        {
+            proof.TargetCanonical.ShouldBeNull();
+            proof.Projection.ShouldBeEmpty();
+            proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.RestrictionTransformation &&
+                reason.Restriction != null && reason.Restriction.Name.StartsWith("defaultValue", StringComparison.Ordinal));
+        }
+    }
+
+    [Theory]
+    [InlineData("equal")]
+    [InlineData("different")]
+    [InlineData("absent")]
+    [InlineData("unknown")]
+    [InlineData("malformed")]
+    [InlineData("duplicate")]
+    public void BestPracticeInvariantAnnotationsRemainRequiredAndStrict(string scenario)
+    {
+        DefinitionCollection sourceDefinitions = UseDefinitions();
+        DefinitionCollection targetDefinitions = UseDefinitions();
+        targetDefinitions.MainPackageId = "example.target";
+        foreach (DefinitionCollection definitions in new[] { sourceDefinitions, targetDefinitions })
+        {
+            ElementDefinition.ConstraintComponent invariant = new()
+            {
+                Key = "ordering-advice", Severity = Hl7.Fhir.Model.ConstraintSeverity.Warning,
+                Human = "An opaque recommendation", Expression = "value.exists()",
+                Extension =
+                [
+                    new("http://hl7.org/fhir/StructureDefinition/elementdefinition-bestpractice", new Hl7.Fhir.Model.FhirBoolean(true)),
+                    new("http://hl7.org/fhir/StructureDefinition/elementdefinition-bestpractice-explanation", new Hl7.Fhir.Model.Markdown("Retain this exact explanation")),
+                ],
+            };
+            if (definitions == targetDefinitions)
+            {
+                switch (scenario)
+                {
+                    case "different": invariant.Extension[0].Value = new Hl7.Fhir.Model.FhirBoolean(false); break;
+                    case "absent": invariant.Extension.Clear(); break;
+                    case "unknown": invariant.Extension[0].Url = "http://example.org/elementdefinition-bestpractice"; break;
+                    case "malformed": invariant.Extension[0].Value = new Hl7.Fhir.Model.FhirString("true"); break;
+                    case "duplicate": invariant.Extension.Add((Hl7.Fhir.Model.Extension)invariant.Extension[0].DeepCopy()); break;
+                }
+            }
+            definitions.ComplexTypesByName["Quantity"].Snapshot.Element[0].Constraint.Add(invariant);
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+            catalog.ResolveNativeType(targetPackage, "Quantity")!);
+        bool invalid = scenario is "unknown" or "malformed" or "duplicate";
+        proof.Kind.ShouldBe(invalid ? ProfileProofKind.Unsupported :
+            scenario == "equal" ? ProfileProofKind.NativeReuse : ProfileProofKind.Unrepresentable);
+        proof.IsAcceptedDecision.ShouldBe(!invalid);
+        proof.PreservesRestrictions.ShouldBe(scenario == "equal");
+        proof.RequiredFacts[""].Invariants.ShouldHaveSingleItem().Value.GetProperty("extension").GetArrayLength().ShouldBe(2);
+        if (scenario != "equal")
+        {
+            proof.TargetCanonical.ShouldBeNull();
+            proof.Projection.ShouldBeEmpty();
+            proof.Reasons.ShouldContain(reason => reason.Restriction != null &&
+                reason.Category == (invalid ? ProfileReasonCategory.UnclassifiedRestriction : ProfileReasonCategory.InvariantTransformation));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PrimitiveInheritanceUsesOnlyExplicitValidatedBridgeIdentity(bool missingBridge)
+    {
+        DefinitionCollection definitions = Definitions();
+        StructureDefinition parent = Definition("string", "string");
+        parent.Kind = StructureDefinition.StructureDefinitionKind.PrimitiveType;
+        parent.Snapshot.Element.Add(new()
+        {
+            ElementId = "string.value", Path = "string.value", Min = 0, Max = "1",
+            Type = [new()
+            {
+                Code = "http://hl7.org/fhirpath/System.String",
+                Extension = missingBridge ? [] :
+                [
+                    new(CommonDefinitions.ExtUrlFhirType, new Hl7.Fhir.Model.FhirUrl("string")),
+                    new(CommonDefinitions.ExtUrlJsonType, new Hl7.Fhir.Model.FhirUrl("string")),
+                    new(CommonDefinitions.ExtUrlXmlType, new Hl7.Fhir.Model.FhirUrl("xs:string")),
+                ],
+            }],
+        });
+        definitions.AddPrimitiveType(parent, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+        StructureDefinition child = Definition("id", "id", parent.Url);
+        child.Kind = StructureDefinition.StructureDefinitionKind.PrimitiveType;
+        child.Snapshot.Element.Add(new()
+        {
+            ElementId = "id.value", Path = "id.value", Min = 0, Max = "1", Type = [new() { Code = "string" }],
+        });
+        definitions.AddPrimitiveType(child, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "id")!;
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        ProfileRepresentationProof proof = facts.Prove(branch, owner);
+        proof.IsAcceptedDecision.ShouldBe(!missingBridge);
+        proof.PreservesRestrictions.ShouldBe(!missingBridge);
+        if (!missingBridge)
+        {
+            proof.Kind.ShouldBe(ProfileProofKind.NativeReuse, string.Join("; ", proof.Diagnostics));
+            branch.Elements[".value"].Restrictions.ShouldContain(fact => fact.Name == "primitive type obligations" &&
+                fact.Origin.Canonical == parent.Url);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void NativePrimitiveStringIdStorageRetainsTheInheritedIdDomain(bool primitive)
+    {
+        DefinitionCollection definitions = Definitions();
+        StructureDefinition parent = Definition("Element", "Element");
+        parent.Snapshot.Element.Add(new()
+        {
+            ElementId = "Element.id", Path = "Element.id", Min = 0, Max = "1",
+            Type = [new() { Code = "http://hl7.org/fhirpath/System.String",
+                Extension = [new(CommonDefinitions.ExtUrlFhirType, new Hl7.Fhir.Model.FhirUrl("id"))] }],
+        });
+        AddNative(definitions, parent);
+        StructureDefinition child = Definition("dateTime", "dateTime", parent.Url);
+        child.Kind = primitive ? StructureDefinition.StructureDefinitionKind.PrimitiveType : StructureDefinition.StructureDefinitionKind.ComplexType;
+        child.Snapshot.Element.Add(new()
+        {
+            ElementId = "dateTime.id", Path = "dateTime.id", Min = 0, Max = "1",
+            Type = [new() { Code = "http://hl7.org/fhirpath/System.String",
+                Extension = [new(CommonDefinitions.ExtUrlFhirType, new Hl7.Fhir.Model.FhirUrl("string"))] }],
+        });
+        if (primitive)
+        {
+            definitions.AddPrimitiveType(child, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+        }
+        else
+        {
+            AddNative(definitions, child);
+        }
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "dateTime")!;
+        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        ProfileRepresentationProof proof = facts.Prove(branch, owner);
+        proof.IsAcceptedDecision.ShouldBe(primitive);
+        proof.PreservesRestrictions.ShouldBe(primitive);
+        if (primitive)
+        {
+            branch.Elements[".id"].Types.ShouldHaveSingleItem().FhirType.ShouldBe("id");
+            branch.Elements[".id"].Origins.ShouldContain(origin => origin.Canonical == parent.Url && origin.ElementId == "Element.id");
+            branch.Elements[".id"].Origins.ShouldContain(origin => origin.Canonical == child.Url && origin.ElementId == "dateTime.id");
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void Integer64BoundsRetainExactStringValuesWithoutProjection(bool different, bool malformed)
+    {
+        DefinitionCollection sourceDefinitions = UseDefinitions();
+        DefinitionCollection targetDefinitions = UseDefinitions();
+        targetDefinitions.MainPackageId = "example.target";
+        foreach (DefinitionCollection definitions in new[] { sourceDefinitions, targetDefinitions })
+        {
+            ElementDefinition value = definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.value");
+            value.Type[0].Code = "integer64";
+            value.MinValue = new Hl7.Fhir.Model.Integer64(long.MinValue);
+            value.MaxValue = new Hl7.Fhir.Model.Integer64(definitions == targetDefinitions && different ? long.MaxValue - 1 : long.MaxValue);
+        }
+        using CatalogImport imported = new(sourceDefinitions, targetDefinitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
+        DbStructureDefinition target = catalog.ResolveNativeType(targetPackage, "Quantity")!;
+        EffectiveProfileBranch targetBranch = facts.ForDefinition(target);
+        if (malformed)
+        {
+            EffectiveProfileElement value = targetBranch.Elements[".value"];
+            targetBranch = targetBranch with { Elements = targetBranch.Elements.SetItem(".value", value with
+            {
+                Restrictions = [.. value.Restrictions.Select(fact => fact.Name == "maxValueInteger64"
+                    ? fact with { Value = JsonSerializer.SerializeToElement("9223372036854775808") } : fact)],
+            }) };
+        }
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+            target, nativeContext: targetBranch);
+        proof.Kind.ShouldBe(malformed ? ProfileProofKind.Unsupported : different ? ProfileProofKind.Unrepresentable : ProfileProofKind.NativeReuse);
+        proof.IsAcceptedDecision.ShouldBe(!malformed);
+        proof.PreservesRestrictions.ShouldBe(!different && !malformed);
+        proof.RequiredFacts[".value"].Restrictions.ShouldContain(fact => fact.Name == "minValueInteger64" &&
+            fact.Value.ValueKind == JsonValueKind.String && fact.Value.GetString() == "-9223372036854775808");
+        if (different || malformed)
+        {
+            proof.TargetCanonical.ShouldBeNull();
+            proof.Projection.ShouldBeEmpty();
+            proof.Reasons.ShouldContain(reason => reason.Restriction != null && reason.Restriction.Name == "maxValueInteger64" &&
+                reason.Category == (malformed ? ProfileReasonCategory.UnclassifiedRestriction : ProfileReasonCategory.RestrictionTransformation));
+        }
+    }
+
+    private static DefinitionCollection PrimitiveObligationDefinitions(string package, string name = "dateTime")
+    {
+        DefinitionCollection definitions = Definitions();
+        definitions.MainPackageId = "example." + package;
+        StructureDefinition primitive = Definition(name, name);
+        primitive.Kind = StructureDefinition.StructureDefinitionKind.PrimitiveType;
+        primitive.Snapshot.Element.Add(new()
+        {
+            ElementId = name + ".value", Path = name + ".value", Min = 0, Max = "1",
+            Type = [new()
+            {
+                Code = "http://hl7.org/fhirpath/System.DateTime",
+                Extension =
+                [
+                    new("http://hl7.org/fhir/StructureDefinition/regex", new Hl7.Fhir.Model.FhirString(@"\i\c*")),
+                    new(CommonDefinitions.ExtUrlFhirType, new Hl7.Fhir.Model.FhirUrl("dateTime")),
+                    new(CommonDefinitions.ExtUrlJsonType, new Hl7.Fhir.Model.FhirUrl("string")),
+                    new(CommonDefinitions.ExtUrlXmlType, new Hl7.Fhir.Model.FhirUrl("xs:dateTime, xs:date, xs:gYearMonth, xs:gYear")),
+                ],
+            }],
+        });
+        definitions.AddPrimitiveType(primitive, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+        return definitions;
+    }
+
+    private const string PassiveTerminologyUrl = "http://example.org/StructureDefinition/PassiveTerminology";
+    private const string PassiveTerminologyParentUrl = "http://example.org/StructureDefinition/InheritedTerminology";
+
+    private static string TerminologySystem(string id) => "http://example.org/CodeSystem/" + id;
+    private static string TerminologyValueSet(string id) => "http://example.org/ValueSet/" + id + "|terms-1";
+
+    private static ElementDefinition.ElementDefinitionBindingComponent TerminologyBinding(string primary, string? additional = null) => new()
+    {
+        Strength = Hl7.Fhir.Model.BindingStrength.Required,
+        ValueSet = TerminologyValueSet(primary),
+        Additional = additional is null ? [] : [new()
+        {
+            Purpose = ElementDefinition.AdditionalBindingPurposeVS.Maximum, ValueSet = TerminologyValueSet(additional),
+        }],
+    };
+
+    private static DefinitionCollection TerminologyDefinitions(bool passiveBindings, string? reference = null)
+    {
+        DefinitionCollection definitions = Definitions(FhirReleases.FhirSequenceCodes.R5);
+        definitions.FhirVersion = Hl7.Fhir.Model.FHIRVersion.N5_0_0;
+        definitions.FhirVersionLiteral = definitions.MainPackageVersion = "5.0.0";
+        definitions.MainPackageId = "hl7.fhir.r5.core";
+        foreach (string id in new[] { "native", "native-additional", "eligible", "inherited", "inherited-additional",
+            "passive", "passive-additional", "unrelated", "outside", "other-tho" })
+        {
+            Hl7.Fhir.Model.CodeSystem system = new()
+            {
+                Id = id, Name = id.Replace("-", ""), Url = TerminologySystem(id), Version = "terms-1",
+                Status = Hl7.Fhir.Model.PublicationStatus.Active, Content = Hl7.Fhir.Model.CodeSystemContentMode.Complete,
+                CaseSensitive = true, Count = 1,
+                Property = [new() { Code = "flag", Type = Hl7.Fhir.Model.CodeSystem.PropertyType.Boolean }],
+                Filter = [new() { Code = "flag", Operator = [Hl7.Fhir.Model.FilterOperator.Equal], Value = "true" }],
+                Concept = [new() { Code = "retained", Display = "Retained",
+                    Property = [new() { Code = "flag", Value = new Hl7.Fhir.Model.FhirBoolean(true) }] }],
+            };
+            definitions.AddCodeSystem(system, id == "outside" ? definitions.MainPackageId : "hl7.terminology",
+                id == "outside" ? definitions.MainPackageVersion : id == "other-tho" ? "5.2.0" : "5.1.0");
+            Hl7.Fhir.Model.ValueSet valueSet = new()
+            {
+                Id = id, Name = id.Replace("-", ""), Url = TerminologyValueSet(id).Split('|')[0], Version = "terms-1",
+                Status = Hl7.Fhir.Model.PublicationStatus.Active,
+                Compose = new() { Include = [new() { System = system.Url, Version = system.Version,
+                    Concept = [new() { Code = "retained", Display = "Retained" }] }] },
+                Expansion = new() { Total = 1, Contains = [new()
+                    { System = system.Url, Version = system.Version, Code = "retained", Display = "Retained" }] },
+            };
+            definitions.AddValueSet(valueSet, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+        }
+
+        StructureDefinition quantity = NativeQuantity();
+        quantity.Snapshot.Element.Single(element => element.Path == "Quantity.code").Binding = TerminologyBinding("native", "native-additional");
+        quantity.Snapshot.Element.Add(new() { ElementId = "Quantity.status", Path = "Quantity.status",
+            Min = 0, Max = "1", Type = [new() { Code = "code" }] });
+        string datatype = reference == "target" ? "Patient" : reference == "base" ? "Quantity" : "Coding";
+        StructureDefinition native = datatype == "Quantity" ? quantity : Definition(datatype, datatype);
+        if (datatype != "Quantity")
+        {
+            native.Kind = datatype == "Patient" ? StructureDefinition.StructureDefinitionKind.Resource : StructureDefinition.StructureDefinitionKind.ComplexType;
+            native.Snapshot.Element.Add(new() { ElementId = datatype + ".code", Path = datatype + ".code",
+                Min = 0, Max = "1", Type = [new() { Code = "code" }] });
+            native.Snapshot.Element.Add(new() { ElementId = datatype + ".status", Path = datatype + ".status",
+                Min = 0, Max = "1", Type = [new() { Code = "code" }] });
+        }
+        StructureDefinition parent = (StructureDefinition)native.DeepCopy();
+        parent.Id = parent.Name = "InheritedTerminology";
+        parent.Url = PassiveTerminologyParentUrl;
+        parent.BaseDefinition = native.Url;
+        parent.Derivation = StructureDefinition.TypeDerivationRule.Constraint;
+        parent.Snapshot.Element.Single(element => element.Path == datatype + ".code").Binding =
+            passiveBindings ? TerminologyBinding("inherited", "inherited-additional") : null;
+        StructureDefinition passive = (StructureDefinition)parent.DeepCopy();
+        passive.Id = passive.Name = "SameName";
+        passive.Url = PassiveTerminologyUrl;
+        passive.Version = "passive-definition";
+        passive.BaseDefinition = parent.Url + "|" + parent.Version;
+        passive.Snapshot.Element.Single(element => element.Path == datatype + ".status").Binding =
+            passiveBindings ? TerminologyBinding("passive", "passive-additional") : null;
+        passive.Snapshot.Element.Single(element => element.Path == datatype + ".code").Binding = null;
+        StructureDefinition unrelated = Profile("SameName", "Coding", baseDefinition: QuantityUrl.Replace("Quantity", "Coding"));
+        unrelated.Url = "http://example.org/StructureDefinition/SameName";
+        unrelated.Version = passive.Version;
+        unrelated.Snapshot.Element[0].Binding = TerminologyBinding("unrelated");
+        if (reference == "type")
+        {
+            ElementDefinition.TypeRefComponent use = quantity.Snapshot.Element.Single(element => element.Path == "Quantity.extension").Type[0];
+            use.Code = datatype;
+            use.Profile = [passive.Url + "|" + passive.Version];
+        }
+        else if (reference == "target")
+        {
+            AddNative(definitions, Definition("Reference", "Reference"));
+            quantity.Snapshot.Element.Add(new() { ElementId = "Quantity.reference", Path = "Quantity.reference", Min = 0, Max = "1",
+                Type = [new() { Code = "Reference", TargetProfile = [passive.Url + "|" + passive.Version] }] });
+        }
+        else if (reference == "content")
+        {
+            quantity.Snapshot.Element.Add(new() { ElementId = "Quantity.borrowed", Path = "Quantity.borrowed", Min = 0, Max = "1",
+                ContentReference = passive.Url + "|" + passive.Version + "#" + datatype + ".code" });
+        }
+        AddNative(definitions, quantity);
+        if (datatype == "Patient")
+        {
+            definitions.AddResourceDefinition(native, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+        }
+        else if (datatype != "Quantity")
+        {
+            AddNative(definitions, native);
+        }
+        if (datatype != "Coding")
+        {
+            AddNative(definitions, Definition("Coding", "Coding"));
+        }
+        StructureDefinition eligible = ConstraintProfile("TerminologyQuantity");
+        eligible.Snapshot.Element.Single(element => element.Path == "Quantity.code").Binding = TerminologyBinding("eligible");
+        foreach (StructureDefinition profile in new[] { parent, passive, unrelated, eligible })
+        {
+            AddProfile(definitions, profile);
+        }
+        return definitions;
+    }
+
+    private static void AssertPrunedTerminologyDependencies(CatalogImport imported)
+    {
+        HashSet<int> systems = [.. DbCodeSystem.SelectList(imported.Connection).Select(row => row.Key)];
+        List<DbCodeSystemConcept> concepts = DbCodeSystemConcept.SelectList(imported.Connection);
+        List<DbCodeSystemFilter> filters = DbCodeSystemFilter.SelectList(imported.Connection);
+        List<DbCodeSystemPropertyDefinition> properties = DbCodeSystemPropertyDefinition.SelectList(imported.Connection);
+        List<DbCodeSystemConceptProperty> values = DbCodeSystemConceptProperty.SelectList(imported.Connection);
+        concepts.Count.ShouldBe(systems.Count);
+        filters.Count.ShouldBe(systems.Count);
+        properties.Count.ShouldBe(systems.Count);
+        values.Count.ShouldBe(systems.Count);
+        concepts.ShouldAllBe(row => systems.Contains(row.CodeSystemKey));
+        filters.ShouldAllBe(row => systems.Contains(row.CodeSystemKey));
+        properties.ShouldAllBe(row => systems.Contains(row.CodeSystemKey));
+        values.ShouldAllBe(row => concepts.Any(concept => concept.Key == row.CodeSystemConceptKey) &&
+            properties.Any(property => property.Key == row.CodeSystemPropertyDefinitionKey));
+    }
+
+    private static string[] BuildVocabularySchedule(CatalogImport imported)
+    {
+        DbComparisonClasses.CreateTables(imported.Connection, forStructures: false);
+        DbOutcomeClasses.CreateTables(imported.Connection, forStructures: false);
+        DbFhirPackage package = DbFhirPackage.SelectList(imported.Connection).ShouldHaveSingleItem();
+        string output = Path.Combine(Path.GetTempPath(), "fhir-codegen-tests", "vocabulary-plan-" + Guid.NewGuid().ToString("N"));
+        ConfigXVer config = new() { OutputDirectory = output };
+        XVerExporter exporter = new(imported.Connection, config);
+        IgExporter igExporter = new(imported.Connection, NullLoggerFactory.Instance, output, null, exporter, config);
+        IgExporter.XVerExportTrackingRecord tracking = igExporter.PrepareXVerIgs(new([new(package, package)], [package]));
+        VocabularyFhirExporter vocabulary = new(exporter, imported.Connection, NullLoggerFactory.Instance);
+        IReadOnlyList<VocabularyFhirExporter.BuiltFile> files = vocabulary.Build(tracking);
+        Directory.Exists(output).ShouldBeFalse();
+        files.ShouldNotBeEmpty();
+        List<string> schedule = [];
+        foreach (VocabularyFhirExporter.BuiltFile file in files)
+        {
+            using JsonDocument document = JsonDocument.Parse(file.Json);
+            JsonElement resource = document.RootElement;
+            schedule.Add(resource.GetProperty("resourceType").GetString() + "|" + resource.GetProperty("url").GetString() +
+                "|" + (resource.TryGetProperty("version", out JsonElement version) ? version.GetString() : ""));
+        }
+        return [.. schedule.Order()];
     }
 
     private const string ChildProfileUrl = "http://example.org/PassiveExtension";
@@ -2246,7 +3256,7 @@ public class XVerProfileCatalogTests
     private static CatalogImport ImportUses(params StructureDefinition[] profiles)
     {
         CatalogImport imported = new(UseDefinitions(profiles));
-        imported.Database.TryLoadFullCatalogCandidate([], []).ShouldBeTrue();
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         return imported;
     }
 

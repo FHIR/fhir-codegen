@@ -13,6 +13,7 @@ namespace Fhir.CodeGen.Comparison.Models;
 
 internal sealed class XVerStructureCatalog
 {
+    private readonly IDbConnection _db;
     private readonly Dictionary<int, DbStructureDefinition> _structures;
     private readonly Dictionary<int, DbFhirPackage> _packages;
     private readonly Dictionary<int, DbElement> _elements;
@@ -29,6 +30,7 @@ internal sealed class XVerStructureCatalog
 
     internal XVerStructureCatalog(IDbConnection db, HashSet<string>? exclusions = null, string? elementTableName = null)
     {
+        _db = db;
         _structures = DbStructureDefinition.SelectList(db).ToDictionary(row => row.Key);
         _packages = DbFhirPackage.SelectList(db).ToDictionary(row => row.Key);
         _elements = DbElement.SelectList(db, dbTableName: elementTableName).ToDictionary(row => row.Key);
@@ -68,11 +70,70 @@ internal sealed class XVerStructureCatalog
 
     internal IReadOnlyList<string> Diagnostics => _diagnostics;
 
+    internal DbElementMapping? GetElementMapping(int key) => DbElementMapping.SelectSingle(_db, Key: key);
+
+    internal bool HasValueSet(int packageKey, string canonical)
+    {
+        UnsafeCodeCanonical identity = UnsafeCodeCanonical.Parse(canonical);
+        return identity.Url is not null && identity.Version is not null &&
+            DbValueSet.SelectList(_db, FhirPackageKey: packageKey, UnversionedUrl: identity.Url, Version: identity.Version).Count == 1;
+    }
+
     internal IReadOnlyList<DbStructureDefinition> GetDefinitions(int fhirPackageKey) =>
         [.. _structures.Values.Where(row => row.FhirPackageKey == fhirPackageKey).OrderBy(row => row.Key)];
 
     internal IReadOnlyList<DbStructureDefinition> GetProcessedStructures(int fhirPackageKey) =>
         [.. GetDefinitions(fhirPackageKey).Where(IsProcessed)];
+
+    internal DbStructureDefinition GetStructure(int key) => _structures.TryGetValue(key, out DbStructureDefinition? owner)
+        ? owner : throw new InvalidOperationException($"Definition catalog owner {key} is missing.");
+
+    internal bool IsProcessed(int key) => IsProcessed(GetStructure(key));
+
+    internal bool IsQuantityFamily(DbStructureDefinition owner)
+    {
+        DbStructureDefinition? quantity = ResolveNativeType(owner.FhirPackageKey, "Quantity", required: false);
+        return quantity is not null && (owner.Key == quantity.Key || GetAncestors(owner).Any(ancestor => ancestor.Key == quantity.Key));
+    }
+
+    internal IReadOnlySet<int> GetReferencedClosure(int packageKey)
+    {
+        HashSet<int> owners = [.. GetProcessedStructures(packageKey).Select(owner => owner.Key)];
+        Queue<int> pending = new(owners);
+        while (pending.TryDequeue(out int key))
+        {
+            DbStructureDefinition owner = GetStructure(key);
+            foreach (DbStructureDefinition ancestor in GetAncestors(owner))
+            {
+                if (owners.Add(ancestor.Key))
+                {
+                    pending.Enqueue(ancestor.Key);
+                }
+            }
+
+            foreach (DbElementType type in GetOwnedElements(owner).SelectMany(GetTypeUses))
+            {
+                foreach ((string? canonical, int? existingKey) in new[]
+                {
+                    (type.TypeProfile, type.TypeProfileStructureKey), (type.TargetProfile, type.TargetProfileStructureKey),
+                })
+                {
+                    if (canonical is null)
+                    {
+                        continue;
+                    }
+
+                    DbStructureDefinition? referenced = ResolveDefinition(packageKey, canonical, existingKey, required: false);
+                    if (referenced is not null && owners.Add(referenced.Key))
+                    {
+                        pending.Enqueue(referenced.Key);
+                    }
+                }
+            }
+        }
+
+        return owners;
+    }
 
     internal bool IsProcessed(DbStructureDefinition owner)
     {

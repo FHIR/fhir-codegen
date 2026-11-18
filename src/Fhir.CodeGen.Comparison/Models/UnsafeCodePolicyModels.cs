@@ -13,8 +13,8 @@ internal static class UnsafeCodeConstants
     internal const string PropertySystem = "http://hl7.org/fhir/uv/xver/ValueSet/xver-conceptmap-properties";
     internal const string PropertyCode = "requires-omitted-mandatory-code";
     internal const string ImplicitRules = "https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code";
-    internal const int InputFormatVersion = 1;
-    internal const int OutcomeFormatVersion = 1;
+    internal const int InputFormatVersion = 2;
+    internal const int OutcomeFormatVersion = 2;
 }
 
 internal sealed record UnsafeCodeIdentity(string System, string? Version, string Code);
@@ -152,4 +152,7 @@ internal sealed record UnsafeCodeTrigger(
     UnsafeCodeIdentity Identity,
     UnsafeCodeVersionMatch VersionMatch,
     ImmutableArray<int> EvidenceKeys,
-    ImmutableArray<int> RuleKeys);
+    ImmutableArray<int> RuleKeys)
+{
+    internal ImmutableArray<int> AnnotationKeys { get; init; } = [];
+}

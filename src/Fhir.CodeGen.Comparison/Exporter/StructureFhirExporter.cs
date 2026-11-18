@@ -7,6 +7,7 @@ using System.Reflection.Metadata;
 using System.Runtime.ConstrainedExecution;
 using System.Runtime.InteropServices.JavaScript;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Fhir.CodeGen.Common.Extensions;
 using Fhir.CodeGen.Common.FhirExtensions;
@@ -46,12 +47,15 @@ public class StructureFhirExporter
     private readonly IDbConnection _db;
     private ProfileRepresentationIndex? _representations;
     private XVerIgExportTrackingRecord? _representationTracking;
+    private readonly XVerStructureCatalog _catalog;
+    private readonly Dictionary<(int Source, int Target), IReadOnlyList<ProfileRepresentationProof>> _profileDecisions = [];
     private DbStructureOutcome? _profileOutcome;
     private DbElementOutcome? _profileElement;
 
     internal sealed record BuiltDefinition(string FileName, StructureDefinition Definition, int OutcomeKey)
     {
         internal string? SourceId { get; init; }
+        internal IReadOnlyList<ProfileRepresentationProof> Projections { get; init; } = [];
     }
     internal sealed record BuiltDefinitionSet(IReadOnlyList<BuiltDefinition> Definitions, ProfileRepresentationIndex Representations);
 
@@ -123,25 +127,31 @@ public class StructureFhirExporter
         PackagePairStructureMappingTracker> _resourceReferenceLookup = [];
 
     private static readonly FhirArtifactClassEnum[] _xverSourceArtifactClasses =
-        [FhirArtifactClassEnum.Resource, FhirArtifactClassEnum.ComplexType];
+        [FhirArtifactClassEnum.Resource, FhirArtifactClassEnum.ComplexType, FhirArtifactClassEnum.Profile];
 
-    private static bool shouldExportStructureOutcome(
+    private bool shouldExportStructureOutcome(
         DbStructureOutcome sdOutcome,
         FhirArtifactClassEnum sourceArtifactClass) =>
-        (sdOutcome.SourceArtifactClass == sourceArtifactClass) &&
+        _catalog.IsProcessed(sdOutcome.SourceStructureKey) &&
+        (sdOutcome.SourceArtifactClass == sourceArtifactClass ||
+            sourceArtifactClass == FhirArtifactClassEnum.ComplexType && IsDatatype(sdOutcome.SourceStructureKey)) &&
         !StructurePageExporter.StructureExportExclusions.Contains(sdOutcome.SourceId) &&
         !StructurePageExporter.StructureExportExclusions.Contains(sdOutcome.SourceName);
 
-    private static bool hasDirectTargetForSource(DbStructureOutcome sdOutcome)
+    private bool IsDatatype(int key) =>
+        _catalog.GetStructure(key).ArtifactClass == FhirArtifactClassEnum.ComplexType ||
+        _catalog.GetStructure(key).ArtifactClass == FhirArtifactClassEnum.Profile && _catalog.IsProcessed(key);
+
+    private bool hasDirectTargetForSource(DbStructureOutcome sdOutcome)
     {
         if (sdOutcome.TargetId is null)
         {
             return false;
         }
 
-        if (sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType)
+        if (IsDatatype(sdOutcome.SourceStructureKey))
         {
-            return sdOutcome.TargetArtifactClass == FhirArtifactClassEnum.ComplexType;
+            return sdOutcome.TargetStructureKey is int target && IsDatatype(target) && !HasNegativeDefinition(sdOutcome);
         }
 
         return true;
@@ -156,19 +166,29 @@ public class StructureFhirExporter
         _db = db;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<StructureFhirExporter>();
+        _catalog = new(db, XVer.XVerProcessor._exclusionSet);
     }
 
     public void Export(XVerExportTrackingRecord tr)
     {
+        List<(XVerIgExportTrackingRecord Tracking, BuiltDefinitions Definitions)> plans = [];
         foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
         {
-            BuiltDefinitions definitions = BuildDefinitions(igTr);
-            exportExtensions(igTr, definitions.Extensions);
-            exportProfiles(igTr, definitions.Profiles);
-            exportResourceMaps(igTr);
-            exportTypeMaps(igTr);
-            exportElementMaps(igTr);
+            plans.Add((igTr, BuildDefinitions(igTr)));
         }
+        foreach ((XVerIgExportTrackingRecord tracking, BuiltDefinitions definitions) in plans)
+        {
+            Emit(tracking, definitions);
+        }
+    }
+
+    internal void Emit(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions)
+    {
+        exportExtensions(igTr, definitions.Extensions);
+        exportProfiles(igTr, definitions.Profiles);
+        exportResourceMaps(igTr);
+        exportTypeMaps(igTr);
+        exportElementMaps(igTr);
     }
 
     internal BuiltDefinitions BuildDefinitions(XVerIgExportTrackingRecord igTr)
@@ -181,6 +201,11 @@ public class StructureFhirExporter
 
     private void prepareDefinitions(XVerIgExportTrackingRecord igTr)
     {
+        (int, int) pairKey = (igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey);
+        if (!_profileDecisions.ContainsKey(pairKey))
+        {
+            _profileDecisions.Add(pairKey, ProfileUseFacts.ClassifyPair(_db, igTr.PackagePair));
+        }
         if (!_extensionValueTypes.ContainsKey(igTr.PackagePair.TargetFhirSequence))
         {
             DbStructureDefinition? extensionStructure = DbStructureDefinition.SelectSingle(
@@ -248,6 +273,15 @@ public class StructureFhirExporter
 
             foreach (DbStructureOutcome sdOutcome in structureOutcomes)
             {
+                if (!_catalog.IsProcessed(sdOutcome.SourceStructureKey) ||
+                    sdOutcome.TargetStructureKey is int targetOwner && !_catalog.IsProcessed(targetOwner))
+                {
+                    throw new InvalidOperationException($"Passive standalone outcome {sdOutcome.Key} cannot be scheduled for structure export.");
+                }
+                if (HasNegativeDefinition(sdOutcome))
+                {
+                    continue;
+                }
                 bool added = false;
                 bool hasDirectTarget = hasDirectTargetForSource(sdOutcome);
                 string? sdTargetName = hasDirectTarget
@@ -287,7 +321,7 @@ public class StructureFhirExporter
                     if (!structureMappingTracker.TargetStructuresByUrl.TryGetValue(sdOutcome.SourceCanonicalUnversioned, out List<string>? sdUrlTargets))
                     {
                         sdUrlTargets = [];
-                        structureMappingTracker.TargetStructuresByName[sdOutcome.SourceCanonicalUnversioned] = sdUrlTargets;
+                        structureMappingTracker.TargetStructuresByUrl[sdOutcome.SourceCanonicalUnversioned] = sdUrlTargets;
                     }
 
                     if (!sdUrlTargets.Contains(sdTargetUrl))
@@ -303,6 +337,12 @@ public class StructureFhirExporter
                     continue;
                 }
 
+                // Datatypes never acquire an automatic standalone generated profile.
+                if (sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.Resource ||
+                    !shouldExportStructureOutcome(sdOutcome, FhirArtifactClassEnum.Resource))
+                {
+                    continue;
+                }
                 string profileTarget = sdOutcome.GenUrl!;
                 if (!structureMappingTracker.TargetProfilesByName.TryGetValue(sdOutcome.SourceName, out List<string>? profileNameTargets))
                 {
@@ -318,7 +358,7 @@ public class StructureFhirExporter
                 if (!structureMappingTracker.TargetProfilesByUrl.TryGetValue(sdOutcome.SourceCanonicalUnversioned, out List<string>? profileUrlTargets))
                 {
                     profileUrlTargets = [];
-                    structureMappingTracker.TargetProfilesByName[sdOutcome.SourceCanonicalUnversioned] = profileUrlTargets;
+                    structureMappingTracker.TargetProfilesByUrl[sdOutcome.SourceCanonicalUnversioned] = profileUrlTargets;
                 }
 
                 if (!profileUrlTargets.Contains(profileTarget))
@@ -326,6 +366,39 @@ public class StructureFhirExporter
                     profileUrlTargets.Add(profileTarget);
                 }
             }
+
+        }
+    }
+
+    private bool HasNegativeDefinition(DbStructureOutcome outcome) =>
+        _profileDecisions.TryGetValue((outcome.SourceFhirPackageKey, outcome.TargetFhirPackageKey),
+            out IReadOnlyList<ProfileRepresentationProof>? decisions) &&
+        decisions.Any(proof => proof.Input.OwnerKey == outcome.SourceStructureKey &&
+            proof.Input.TypeUseToken == -1 && !proof.PreservesRestrictions);
+
+    private void RequireScheduledUse(XVerIgExportTrackingRecord tracking, DbStructureDefinition owner, DbElement? element = null,
+        IReadOnlyList<ProfileRepresentationProof>? projected = null)
+    {
+        if (!_catalog.IsProcessed(owner))
+        {
+            throw new InvalidOperationException($"Passive owner {owner.VersionedUrl} cannot be scheduled for structure export.");
+        }
+        DbElement root = _catalog.ResolveRoot(owner);
+        string? relative = element is null ? null : element.Id[root.Id.Length..];
+        ProfileRepresentationProof? negative = _profileDecisions[(tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey)]
+            .FirstOrDefault(proof => proof.Input.OwnerKey == owner.Key && !proof.PreservesRestrictions &&
+                !(projected ?? []).Any(context => context.Kind == ProfileProofKind.OwnerProjection &&
+                    context.Input == proof.Input && context.NativeInput == proof.NativeInput) &&
+                (element is null || proof.Input.ElementKey == element.Key ||
+                    proof.Input.TypeUseToken != -1 && proof.Input.SliceContext.StartsWith(relative + ".", StringComparison.Ordinal)));
+        if (negative is not null)
+        {
+            ProfileRepresentationProof context = (projected ?? []).FirstOrDefault(proof =>
+                proof.Input == negative.Input && proof.NativeInput == negative.NativeInput) ?? negative;
+            throw new InvalidOperationException(
+                $"Unrepresentable scheduled profile use, pair {tracking.PackagePair.SourcePackageKey}->{tracking.PackagePair.TargetPackageKey}, " +
+                $"owner {owner.VersionedUrl}#{element?.Id ?? root.Id}, alternative {negative.Input.ProfileAlternative}/{negative.Input.TargetProfileAlternative}, " +
+                $"type-use {negative.Input.TypeUseToken}, slice {negative.Input.SliceContext}: {string.Join("; ", context.Diagnostics)}");
         }
     }
 
@@ -369,6 +442,10 @@ public class StructureFhirExporter
         // iterate over our source structures
         foreach (DbStructureDefinition sourceSd in sourceSds)
         {
+            if (!_catalog.IsProcessed(sourceSd))
+            {
+                continue;
+            }
             // skip abstract bases that don't need element-level maps
             if (StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Id) ||
                 StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Name))
@@ -510,6 +587,17 @@ public class StructureFhirExporter
 
         foreach (DbElementOutcome edOutcome in edOutcomes)
         {
+            if (edOutcome.ExtensionDefinitionIsProhibited)
+            {
+                if (!groupsByTarget.TryGetValue("", out ConceptMap.GroupComponent? prohibited))
+                {
+                    prohibited = new() { Source = sourceSd.VersionedUrl, Element = [] };
+                    groupsByTarget[""] = prohibited;
+                    edCm.Group.Add(prohibited);
+                }
+                prohibited.Element.Add(new() { Code = edOutcome.SourceId, Display = edOutcome.SourceName, NoMap = true });
+                continue;
+            }
             // skip the root element
             if (edOutcome.SourceResourceOrder == 0)
             {
@@ -522,7 +610,7 @@ public class StructureFhirExporter
                     ElementOutcomeKey: edOutcome.Key,
                     orderByProperties: [nameof(DbElementOutcomeTarget.TargetElementId), nameof(DbElementOutcomeTarget.ContextElementId)]);
 
-            if (edTargets.Count == 0)
+            if (edTargets.Count == 0 && !igTr.EdOutcomeMapTargets.ContainsKey(edOutcome.Key))
             {
                 // this element is not available in this target (e.g., mapped to another resource)
                 continue;
@@ -1106,8 +1194,12 @@ public class StructureFhirExporter
                 lastSourceId = sdOutcome.SourceId;
             }
 
-            if (sdOutcome.TargetId is null)
+            if (!hasDirectTargetForSource(sdOutcome))
             {
+                if (HasNegativeDefinition(sdOutcome))
+                {
+                    currentSourceElement.NoMap = true;
+                }
                 continue;
             }
 
@@ -1271,6 +1363,10 @@ public class StructureFhirExporter
         // iterate over all structures - each will get a profile
         foreach (DbStructureDefinition sourceSd in sourceStructures)
         {
+            if (!_catalog.IsProcessed(sourceSd))
+            {
+                continue;
+            }
             // skip abstract bases that don't get profiled
             if (StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Id) ||
                 StructurePageExporter.StructureExportExclusions.Contains(sourceSd.Name))
@@ -1281,7 +1377,7 @@ public class StructureFhirExporter
             // complex types are represented in the cross-version output via the
             // type ConceptMap and the per-element extension definitions; no
             // per-type profile is emitted
-            if (sourceSd.ArtifactClass == FhirArtifactClassEnum.ComplexType)
+            if (IsDatatype(sourceSd.Key))
             {
                 continue;
             }
@@ -1316,8 +1412,10 @@ public class StructureFhirExporter
                     sdOutcome,
                     profileSd);
 
+                IReadOnlyList<ProfileRepresentationProof> projected = ProjectScheduledUses(igTr, sdOutcome, targetSd, profileSd);
+                RequireScheduledUse(igTr, sourceSd, projected: projected);
                 string filename = sdOutcome.GenFileName ?? throw new ArgumentNullException(nameof(sdOutcome.GenFileName));
-                definitions.Add(new(filename, profileSd, sdOutcome.Key) { SourceId = sourceSd.Name });
+                definitions.Add(new(filename, profileSd, sdOutcome.Key) { SourceId = sourceSd.Name, Projections = projected });
             }
         }
 
@@ -1326,6 +1424,124 @@ public class StructureFhirExporter
             UnsafeCodeInputStore.ReadConstraintPlans(_db, igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey),
             $"{igTr.PackagePair.SourceFhirSequence.ToRLiteral()}->{igTr.PackagePair.TargetFhirSequence.ToRLiteral()}");
         return new(definitions.AsReadOnly(), Representations);
+    }
+
+    private IReadOnlyList<ProfileRepresentationProof> ProjectScheduledUses(XVerIgExportTrackingRecord tracking,
+        DbStructureOutcome outcome, DbStructureDefinition targetOwner, StructureDefinition definition)
+    {
+        List<ProfileRepresentationProof> projected = [];
+        if (outcome.TargetStructureKey != targetOwner.Key || definition.Type != _catalog.GetDeclaredType(targetOwner) ||
+            definition.BaseDefinition != targetOwner.UnversionedUrl)
+        {
+            return projected;
+        }
+        ProfileRepresentationProof[] decisions = [.. _profileDecisions[(outcome.SourceFhirPackageKey, outcome.TargetFhirPackageKey)]
+            .Where(proof => proof.Input.OwnerKey == outcome.SourceStructureKey && proof.Input.TypeUseToken >= 0 && !proof.PreservesRestrictions)];
+        if (decisions.Length == 0)
+        {
+            return projected;
+        }
+        using ProfileUseFacts facts = new(_catalog, tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey,
+            DbElementComparison.SelectList(_db, SourceFhirPackageKey: tracking.PackagePair.SourcePackageKey,
+                TargetFhirPackageKey: tracking.PackagePair.TargetPackageKey));
+        List<ProfileRepresentationProof> contexts = [];
+        foreach (ProfileRepresentationProof decision in decisions)
+        {
+            // Membership comes from this already constructed outcome/profile, not all target resources.
+            ProfileRepresentationProof context = facts.ProveInOwner(decision, targetOwner, new HashSet<int> { targetOwner.Key });
+            contexts.Add(context);
+        }
+        RequireScheduledUse(tracking, _catalog.GetStructure(outcome.SourceStructureKey), projected: contexts);
+        foreach (ProfileRepresentationProof context in contexts.Where(proof => proof.Kind == ProfileProofKind.OwnerProjection))
+        {
+            ApplyProjection(definition, context);
+            projected.Add(context);
+        }
+        return projected;
+    }
+
+    private static void ApplyProjection(StructureDefinition definition, ProfileRepresentationProof proof)
+    {
+        int projectionIndex = 0;
+        foreach (ProfileElementProjection projection in proof.Projection)
+        {
+            projectionIndex++;
+            List<ElementDefinition> elements = definition.Differential.Element;
+            ElementDefinition? existing = elements.SingleOrDefault(element => element.ElementId == projection.TargetElementId);
+            JsonObject json = existing is null ? new() : JsonNode.Parse(existing.ToJson())!.AsObject();
+            if (existing is not null && (existing.Path != projection.TargetPath ||
+                projection.Minimum < existing.Min ||
+                int.TryParse(existing.Max, out int maximum) && (projection.Maximum ?? int.MaxValue) > maximum))
+            {
+                throw new InvalidOperationException($"Owner projection conflicts with the prepared differential at {definition.Url}#{projection.TargetElementId}.");
+            }
+            json["id"] = projection.TargetElementId;
+            json["path"] = projection.TargetPath;
+            json["min"] = projection.Minimum;
+            json["max"] = projection.Maximum?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "*";
+            foreach (ProfileRestriction restriction in projection.Restrictions)
+            {
+                JsonNode value = JsonNode.Parse(restriction.Value.GetRawText())!;
+                if (restriction.Kind == ProfileRestrictionKind.Invariant)
+                {
+                    JsonArray constraints = json["constraint"]?.AsArray() ?? [];
+                    string? key = ProfileUseFacts.Text(restriction.Value, "key");
+                    JsonNode? prior = constraints.SingleOrDefault(constraint => (string?)constraint!["key"] == key);
+                    if (prior is not null && !JsonNode.DeepEquals(prior, value))
+                    {
+                        throw new InvalidOperationException($"Conflicting projected invariant {key} at {projection.TargetElementId}.");
+                    }
+                    if (prior is null)
+                    {
+                        constraints.Add(value);
+                    }
+                    if (json["constraint"] is null)
+                    {
+                        json["constraint"] = constraints;
+                    }
+                }
+                else
+                {
+                    if (json[restriction.Name] is JsonNode prior && !JsonNode.DeepEquals(prior, value))
+                    {
+                        throw new InvalidOperationException($"Conflicting projected {restriction.Name} at {projection.TargetElementId}.");
+                    }
+                    json[restriction.Name] = value;
+                }
+            }
+            ElementDefinition materialized = new FhirJsonParser().Parse<ElementDefinition>(json.ToJsonString());
+            if (existing is not null)
+            {
+                elements[elements.IndexOf(existing)] = materialized;
+            }
+            else
+            {
+                int child = elements.FindIndex(element => element.ElementId.StartsWith(projection.TargetElementId + ".", StringComparison.Ordinal) ||
+                    element.ElementId.StartsWith(projection.TargetElementId + ":", StringComparison.Ordinal));
+                int later = elements.FindIndex(element => proof.Projection.Skip(projectionIndex).Any(next =>
+                    element.ElementId == next.TargetElementId ||
+                    element.ElementId.StartsWith(next.TargetElementId + ".", StringComparison.Ordinal) ||
+                    element.ElementId.StartsWith(next.TargetElementId + ":", StringComparison.Ordinal)));
+                if (later >= 0 && (child < 0 || later < child))
+                {
+                    child = later;
+                }
+                if (child < 0 && projection.TargetElementId.LastIndexOf('.') is int separator && separator >= 0)
+                {
+                    string parent = projection.TargetElementId[..separator];
+                    int parentIndex = elements.FindIndex(element => element.ElementId == parent);
+                    if (parentIndex >= 0)
+                    {
+                        child = parentIndex + 1;
+                        while (child < elements.Count && elements[child].ElementId.StartsWith(parent + ".", StringComparison.Ordinal))
+                        {
+                            child++;
+                        }
+                    }
+                }
+                elements.Insert(child < 0 ? elements.Count : child, materialized);
+            }
+        }
     }
 
     private DbStructureDefinition resolveProfileTargetSd(
@@ -2468,6 +2684,7 @@ public class StructureFhirExporter
                     continue;
                 }
 
+                RequireScheduledUse(igTr, sourceSd, sourceEd);
                 if (edOutcome.ExtensionDefinitionIsProhibited)
                 {
                     continue;
@@ -3548,23 +3765,50 @@ public class StructureFhirExporter
             Dictionary<string, ElementDefinition.TypeRefComponent> typeRefs = [];
             foreach ((string rawTypeName, DbElementType et) in validValueTypes)
             {
-                bool skipProfile = false;
-                string typeName;
-                if ((rawTypeName != "Quantity") || (et.TypeProfile is null))
+                string typeName = rawTypeName;
+                string? provenProfile = null;
+                string? provenTargetProfile = null;
+                DbStructureDefinition sourceType = _catalog.ResolveTypeUse(et);
+                bool constrained = et.TypeProfile is not null || et.TargetProfile is not null || _catalog.IsQuantityFamily(sourceType);
+                if (constrained)
                 {
-                    typeName = rawTypeName;
-                }
-                else
-                {
-                    string quantityProfile = et.TypeProfile.Split('/')[^1];
-                    if (_extensionValueTypeNames[igTr.PackagePair.TargetFhirSequence].Contains(quantityProfile))
+                    using ProfileUseFacts facts = new(_catalog, igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey);
+                    DbElement input = sourceElements[et.ElementKey];
+                    EffectiveProfileUse use = facts.AtUse(input, et);
+                    foreach (EffectiveProfileBranch branch in use.Branches.Where(branch =>
+                        branch.Key.ProfileAlternative == et.TypeProfile && branch.Key.TargetProfileAlternative == et.TargetProfile))
                     {
-                        typeName = quantityProfile;
-                        skipProfile = true;
+                        DbStructureDefinition target = _catalog.ResolveDefinition(igTr.PackagePair.TargetPackageKey,
+                            branch.Definition.UnversionedUrl, required: false) ??
+                            _catalog.ResolveNativeType(igTr.PackagePair.TargetPackageKey, rawTypeName)!;
+                        EffectiveProfileBranch native = facts.ForDefinition(target);
+                        // The enclosing extension carries occurrence repetition; value[x] carries the datatype.
+                        // No restriction is removed from either graph when comparing these value domains.
+                        native = native with
+                        {
+                            TargetProfileFacts = branch.TargetProfileFacts is null ? null : facts.ForDefinition(
+                                _catalog.ResolveDefinition(igTr.PackagePair.TargetPackageKey,
+                                    branch.TargetProfileFacts.Definition.UnversionedUrl)!),
+                        };
+                        ProfileRepresentationProof proof = facts.Prove(branch, target, nativeContext: native,
+                            occurrenceCardinalityCarried: true);
+                        if (!proof.PreservesRestrictions)
+                        {
+                            throw new InvalidOperationException($"Unrepresentable extension value {sourceSd.VersionedUrl}#{input.Id}, " +
+                                $"pair {igTr.PackagePair.SourcePackageKey}->{igTr.PackagePair.TargetPackageKey}: {string.Join("; ", proof.Diagnostics)}");
+                        }
+                        typeName = _catalog.GetDeclaredType(target)!;
+                        if (!_extensionValueTypeNames[igTr.PackagePair.TargetFhirSequence].Contains(typeName))
+                        {
+                            throw new InvalidOperationException($"Proven datatype {target.VersionedUrl} is not legal in target Extension.value[x].");
+                        }
+                        provenProfile = target.ArtifactClass == FhirArtifactClassEnum.Profile ? proof.TargetCanonical : null;
+                        provenTargetProfile = native.TargetProfileFacts is null ? null :
+                            native.TargetProfileFacts.Definition.UnversionedUrl + "|" + native.TargetProfileFacts.Definition.Version;
                     }
-                    else
+                    if (!use.Diagnostics.IsEmpty || use.Branches.IsEmpty)
                     {
-                        typeName = rawTypeName;
+                        throw new InvalidOperationException($"Missing effective extension value facts for {input.Id}: {string.Join("; ", use.Diagnostics)}");
                     }
                 }
 
@@ -3614,10 +3858,10 @@ public class StructureFhirExporter
                     }
                 }
 
-                if ((et.TypeProfile is not null) && !skipProfile)
+                if (provenProfile is not null)
                 {
                     tr.ProfileElement ??= [];
-                    tr.ProfileElement.AddRange(getValidResourceUrls(igTr.PackagePair.SequencePair, [et.TypeProfile]));
+                    tr.ProfileElement.Add(new Canonical(provenProfile));
                 }
 
                 if (!addedDtTypeProfiles &&
@@ -3626,14 +3870,14 @@ public class StructureFhirExporter
                 {
                     addedDtTypeProfiles = true;
                     tr.ProfileElement ??= [];
-                    tr.ProfileElement.AddRange(getValidResourceUrls(igTr.PackagePair.SequencePair, dtTypeProfiles));
+                    tr.ProfileElement.AddRange(getValidResourceUrls(igTr, dtTypeProfiles));
                 }
 
-                if ((et.TargetProfile is not null) &&
+                if ((provenTargetProfile is not null) &&
                     !codeableRefDisableTargets)
                 {
                     tr.TargetProfileElement ??= [];
-                    tr.TargetProfileElement.AddRange(getValidResourceUrls(igTr.PackagePair.SequencePair, [et.TargetProfile]));
+                    tr.TargetProfileElement.Add(new Canonical(provenTargetProfile));
                 }
 
                 if (!addedDtTargetProfiles &&
@@ -3643,7 +3887,7 @@ public class StructureFhirExporter
                 {
                     addedDtTargetProfiles = true;
                     tr.TargetProfileElement ??= [];
-                    tr.TargetProfileElement.AddRange(getValidResourceUrls(igTr.PackagePair.SequencePair, dtTargetProfiles));
+                    tr.TargetProfileElement.AddRange(getValidResourceUrls(igTr, dtTargetProfiles));
                 }
             }
 
@@ -3677,28 +3921,52 @@ public class StructureFhirExporter
     }
 
     private List<Canonical> getValidResourceUrls(
-        (FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t) ps,
+        XVerIgExportTrackingRecord tracking,
         List<string> urls)
     {
-        if (!_resourceReferenceLookup.TryGetValue(ps, out PackagePairStructureMappingTracker? mt) ||
-            (mt is null))
+        if (!_resourceReferenceLookup.TryGetValue(tracking.PackagePair.SequencePair, out PackagePairStructureMappingTracker? mt))
         {
-            return urls.Select(v => new Canonical(v)).ToList();
+            throw new InvalidOperationException("Missing prepared native/emitted reference inventory.");
         }
 
         HashSet<string> valids = [];
         foreach (string v in urls)
         {
-            List<string> targets = mt.GetTargets(v);
+            DbStructureDefinition source = _catalog.ResolveDefinition(tracking.PackagePair.SourcePackageKey, v)!;
+            DbStructureDefinition? counterpart = _catalog.ResolveDefinition(tracking.PackagePair.TargetPackageKey,
+                source.UnversionedUrl, required: false);
+            if (source.ArtifactClass == FhirArtifactClassEnum.Profile)
+            {
+                if (counterpart is null)
+                {
+                    throw new InvalidOperationException($"Missing exact target profile for required reference {v}; no base fallback is permitted.");
+                }
+                using ProfileUseFacts facts = new(_catalog, tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey);
+                ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), counterpart);
+                if (!proof.PreservesRestrictions)
+                {
+                    throw new InvalidOperationException($"Unrepresentable required profile reference {v}: {string.Join("; ", proof.Diagnostics)}");
+                }
+                valids.Add(proof.TargetCanonical!);
+                continue;
+            }
+            List<string> targets = mt.GetTargets(source.UnversionedUrl);
             if (targets.Count == 0)
             {
-                valids.Add(v);
+                if (counterpart is null || !_catalog.IsProcessed(counterpart))
+                {
+                    throw new InvalidOperationException($"Missing exact target-native or emitted representation for required reference {v}.");
+                }
+                valids.Add(counterpart.VersionedUrl);
                 continue;
             }
 
-            foreach (string t in mt.GetTargets(v))
+            foreach (string t in targets)
             {
-                valids.Add(t);
+                DbStructureDefinition? native = _catalog.ResolveDefinition(tracking.PackagePair.TargetPackageKey, t, required: false);
+                // Generated references come only from the resource profiles already scheduled
+                // by prepareDefinitions; native references are resolved, never copied from input.
+                valids.Add(native is null ? t : native.VersionedUrl);
             }
         }
 

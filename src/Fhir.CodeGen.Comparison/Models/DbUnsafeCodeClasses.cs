@@ -9,6 +9,7 @@ using System.Data.Common;
 using System.Text.Json;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Comparison.Exporter;
+using Fhir.CodeGen.Comparison.Outcomes;
 using Fhir.CodeGen.SQLiteGenerator;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Utility;
@@ -146,6 +147,7 @@ internal static class UnsafeCodeInputStore
             }
 
             string revision = inputs[0].CompletedInputRevision!;
+            DefinitionInventoryStore.RequireMapBinding(db, inputs[0].SnapshotId);
             foreach (FhirPackageComparisonPair scheduled in schedule)
             {
                 DbUnsafeCodePairState[] matches = [.. pairs.Where(pair =>
@@ -160,6 +162,7 @@ internal static class UnsafeCodeInputStore
                         $"Unsafe-code structure export {scheduled.SourcePackage.PackageId}|{scheduled.SourcePackage.PackageVersion}" +
                         $" -> {scheduled.TargetPackage.PackageId}|{scheduled.TargetPackage.PackageVersion} is missing, incomplete, incompatible, or stale. {recovery}");
                 }
+                ProfileUseFacts.RequirePersistedDecisions(db, scheduled);
             }
         }
         catch (DbException error) when (error is SqliteException { SqliteErrorCode: 1 } &&
@@ -180,7 +183,13 @@ internal static class UnsafeCodeInputStore
 
         Dictionary<int, string> evidence = DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey)
             .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} ({row.ConceptMapUrl ?? row.ConceptMapId}, group {row.GroupIndex}, source {row.SourceIndex}, target {row.TargetIndex})");
-        Dictionary<int, string> annotations = DbUnsafeCodeElementAnnotation.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey)
+        HashSet<int> annotationKeys = [.. triggers.SelectMany(row => JsonSerializer.Deserialize<int[]>(row.AnnotationKeysJson)!)];
+        if (annotationKeys.Count > 0)
+        {
+            Dictionary<int, DbFhirPackage> packages = DbFhirPackage.SelectDict(db);
+            new UnsafeCodeOutcomeGenerator(db).ValidateAnnotationProvenance(new(packages[sourceKey], packages[targetKey]), triggers);
+        }
+        Dictionary<int, string> annotations = DbUnsafeCodeElementAnnotation.SelectList(db).Where(row => annotationKeys.Contains(row.Key))
             .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} ({row.ConceptMapUrl ?? row.ConceptMapId}, group {row.GroupIndex}, source {row.SourceIndex}, target {row.TargetIndex})");
         Dictionary<int, string> rules = DbUnsafeCodeRule.SelectList(db)
             .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} entry {row.EntryIndex}");
@@ -227,7 +236,11 @@ internal static class UnsafeCodeInputStore
 
     internal static string RequireInputs(IDbConnection db)
     {
-        EnsureStateTables(db);
+        DefinitionInventoryStore.RequireReady(db);
+        if (!DefinitionInventoryStore.TableExists(db, DbUnsafeCodeInputState.DefaultTableName))
+        {
+            throw new InvalidOperationException("Unsafe-code inputs are missing. Reload the database, load maps, compare, generate outcomes, then export.");
+        }
         DbUnsafeCodeInputState? input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1);
         if (input?.FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
             string.IsNullOrEmpty(input.CompletedInputRevision))
@@ -235,6 +248,7 @@ internal static class UnsafeCodeInputStore
             throw new InvalidOperationException("Unsafe-code inputs are missing, incomplete, or incompatible. Reload cross-version maps, rerun structure comparisons, and regenerate outcomes.");
         }
 
+        DefinitionInventoryStore.RequireMapBinding(db, input.SnapshotId);
         return input.CompletedInputRevision;
     }
 
@@ -252,7 +266,7 @@ internal static class UnsafeCodeInputStore
 
     internal static string? BeginComparison(IDbConnection db, int sourceKey, int targetKey)
     {
-        EnsureStateTables(db);
+        string revision = RequireInputs(db);
         DbUnsafeCodePairState? pair = DbUnsafeCodePairState.SelectSingle(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
         if (pair is not null)
         {
@@ -261,8 +275,7 @@ internal static class UnsafeCodeInputStore
             DbUnsafeCodePairState.Update(db, [pair]);
         }
 
-        DbUnsafeCodeInputState? input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1);
-        return input?.FormatVersion == UnsafeCodeConstants.InputFormatVersion ? input.CompletedInputRevision : null;
+        return revision;
     }
 
     internal static void CompleteComparison(IDbConnection db, int sourceKey, int targetKey, string? revision)
@@ -272,14 +285,17 @@ internal static class UnsafeCodeInputStore
             return;
         }
 
+        string currentRevision = RequireInputs(db);
         DbUnsafeCodeInputState? input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1);
         DbUnsafeCodePairState? pair = DbUnsafeCodePairState.SelectSingle(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
-        if (input?.CompletedInputRevision != revision || input.FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
+        if (currentRevision != revision || input?.CompletedInputRevision != revision || input.FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
             pair?.InputRevision != revision)
         {
-            return;
+            throw new InvalidOperationException("Catalog or map inputs changed during comparison. Reload maps, compare, generate outcomes, then export.");
         }
 
+        Dictionary<int, DbFhirPackage> packages = DbFhirPackage.SelectDict(db);
+        ProfileUseFacts.ClassifyPair(db, new(packages[sourceKey], packages[targetKey]));
         pair.ComparisonRevision = Guid.NewGuid().ToString("N");
         ClearOutcome(pair);
         DbUnsafeCodePairState.Update(db, [pair]);
@@ -302,6 +318,9 @@ internal static class UnsafeCodeInputStore
             throw new InvalidOperationException($"Unsafe-code dependencies changed during outcomes for {pair.SourceFhirPackageKey}->{pair.TargetFhirPackageKey}. Rerun structure comparisons and outcomes.");
         }
 
+        Dictionary<int, DbFhirPackage> packages = DbFhirPackage.SelectDict(db);
+        ProfileUseFacts.RequirePersistedDecisions(db,
+            new(packages[pair.SourceFhirPackageKey], packages[pair.TargetFhirPackageKey]));
         pair.OutcomeInputRevision = pair.InputRevision;
         pair.OutcomeComparisonRevision = pair.ComparisonRevision;
         pair.OutcomeFormatVersion = UnsafeCodeConstants.OutcomeFormatVersion;
@@ -310,8 +329,7 @@ internal static class UnsafeCodeInputStore
 
     internal static void InsertTriggers(
         IDbConnection db,
-        IEnumerable<UnsafeCodeTrigger> triggers,
-        IReadOnlyDictionary<UnsafeCodeMappingContext, int[]> annotationKeys)
+        IEnumerable<UnsafeCodeTrigger> triggers)
     {
         List<DbUnsafeCodeTrigger> rows = triggers.Select(trigger => new DbUnsafeCodeTrigger
         {
@@ -329,7 +347,7 @@ internal static class UnsafeCodeInputStore
             VersionsJson = JsonSerializer.Serialize(trigger.VersionMatch.Versions),
             EvidenceKeysJson = JsonSerializer.Serialize(trigger.EvidenceKeys),
             RuleKeysJson = JsonSerializer.Serialize(trigger.RuleKeys),
-            AnnotationKeysJson = JsonSerializer.Serialize(trigger.EvidenceKeys.Length > 0 && annotationKeys.TryGetValue(trigger.Context, out int[]? keys) ? keys : []),
+            AnnotationKeysJson = JsonSerializer.Serialize(trigger.AnnotationKeys),
         }).ToList();
         rows.Insert(db, insertPrimaryKey: true);
     }
@@ -372,6 +390,7 @@ internal static class UnsafeCodeInputStore
 
     internal static void BeginInputs(IDbConnection db, string sourceMode, string? sourceRoot)
     {
+        string inventoryRevision = DefinitionInventoryStore.RequireReady(db);
         InvalidateInputs(db);
         DbUnsafeCodeInputState.Delete(db);
         new DbUnsafeCodeInputState
@@ -382,12 +401,14 @@ internal static class UnsafeCodeInputStore
             SourceMode = sourceMode,
             SourceRoot = sourceRoot,
         }.Insert(db, insertPrimaryKey: true);
+        DefinitionInventoryStore.BeginMapInputs(db, DbUnsafeCodeInputState.SelectSingle(db, Key: 1)!.SnapshotId, inventoryRevision);
     }
 
     internal static void CompleteInputs(IDbConnection db, IReadOnlyList<DbFhirPackage> packages)
     {
         DbUnsafeCodeInputState input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1)
             ?? throw new InvalidOperationException("Unsafe-code input load was not started.");
+        string inventoryRevision = DefinitionInventoryStore.RequirePendingMapBinding(db, input.SnapshotId);
         string revision = Guid.NewGuid().ToString("N");
         DbUnsafeCodePairState.Delete(db);
         List<DbUnsafeCodePairState> pairs = [];
@@ -409,13 +430,20 @@ internal static class UnsafeCodeInputStore
         }
 
         pairs.Insert(db, insertPrimaryKey: true);
+        DefinitionInventoryStore.CompleteMapInputs(db, input.SnapshotId, inventoryRevision);
         input.CompletedInputRevision = revision;
         DbUnsafeCodeInputState.Update(db, [input]);
     }
 
     internal static void ReplaceWithEmptyInputs(IDbConnection db, IReadOnlyList<DbFhirPackage> packages)
     {
+        DefinitionInventoryStore.RequireReady(db);
         BeginInputs(db, "none", null);
+        DefinitionInventoryStore.InvalidateMapInputs(db);
+        DbProfileMapOwnerFacts.DropTable(db);
+        DbProfileMapOwnerFacts.CreateTable(db);
+        DefinitionInventoryStore.BeginMapInputs(db, DbUnsafeCodeInputState.SelectSingle(db, Key: 1)!.SnapshotId,
+            DefinitionInventoryStore.RequireReady(db));
         DbUnsafeCodeElementAnnotation.DropTable(db);
         DbUnsafeCodeMapEvidence.DropTable(db);
         DbUnsafeCodeRule.DropTable(db);

@@ -755,17 +755,7 @@ public class ElementComparer
 
         DbElement ResolveRoot(DbStructureDefinition owner, int packageKey, DbElement sourceElement)
         {
-            List<DbElement> roots = DbElement.SelectList(_db, FhirPackageKey: packageKey, StructureKey: owner.Key, ResourceFieldOrder: 0);
-            if (roots.Count != 1 || string.IsNullOrEmpty(roots[0].Id) || string.IsNullOrEmpty(roots[0].Path) ||
-                roots[0].ParentElementKey is not null || roots[0].Path.Contains('.', StringComparison.Ordinal) ||
-                roots[0].Id != roots[0].Path)
-            {
-                throw new InvalidOperationException(
-                    $"Cannot compare element `{sourceElement.Id}` ({sourceElement.Key}), pair {trackingRecord.SourcePackage.Key}->{trackingRecord.TargetPackage.Key}:" +
-                    $" owner `{owner.VersionedUrl}` ({owner.Key}) requires one well-formed root;" +
-                    $" found [{string.Join(", ", roots.Select(root => $"{root.Key}:{root.Id}/{root.Path}"))}].");
-            }
-            return roots[0];
+            return new XVerStructureCatalog(_db).ResolveRoot(owner);
         }
     }
 

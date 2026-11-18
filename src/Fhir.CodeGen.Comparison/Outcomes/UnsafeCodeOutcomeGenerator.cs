@@ -16,12 +16,20 @@ namespace Fhir.CodeGen.Comparison.Outcomes;
 
 internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
 {
+    internal void ValidateAnnotationProvenance(FhirPackageComparisonPair pair, IReadOnlyList<DbUnsafeCodeTrigger> triggers)
+    {
+        using PairFacts facts = new(db, pair);
+        facts.ValidateAnnotationProvenance(triggers);
+    }
+
     internal void GenerateForPair(FhirPackageComparisonPair pair, DbUnsafeCodePairState? dependency = null)
     {
         dependency ??= UnsafeCodeInputStore.BeginOutcomes(db, pair.SourcePackageKey, pair.TargetPackageKey);
-        PairFacts facts = new(db, pair);
+        IReadOnlyList<ProfileRepresentationProof> profileDecisions = ProfileUseFacts.ClassifyPair(db, pair);
+        using PairFacts facts = new(db, pair);
         if (!facts.HasCandidates)
         {
+            ProfileUseFacts.PersistNegativeDecisions(db, pair, profileDecisions);
             UnsafeCodeInputStore.CompleteOutcomes(db, dependency);
             return;
         }
@@ -49,7 +57,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                 string? typeName = null,
                 bool contentReference = false)
             {
-                if (element.MaxCardinalityString == "0")
+                if (!facts.Permits(element))
                 {
                     return;
                 }
@@ -111,7 +119,8 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                         // Inline snapshot children override the corresponding type fields.
                         foreach (DbElement child in facts.Children(root))
                         {
-                            if (!facts.Children(element).Any(local => RelativeName(local, element) == RelativeName(child, root)))
+                            if (facts.PermitsChild(element, child, type.StructureKey) &&
+                                !facts.Children(element).Any(local => RelativeName(local, element) == RelativeName(child, root)))
                             {
                                 Follow(child, "type", type.TypeName, false, carrier && RelativeName(child, root) == "code", childContexts);
                             }
@@ -145,7 +154,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
 
                 foreach (MappingUse use in contexts)
                 {
-                    UnsafeCodeElementAnnotation[] annotations = [.. facts.Annotations.Where(annotation => annotation.Context == use.Context)];
+                    UnsafeCodeElementAnnotation[] annotations = facts.AnnotationsFor(use);
                     UnsafeCodeMapEvidence[] evidence = facts.EvidenceFor(use);
                     UnsafeCodeMapEvidence[] potentialEvidence = facts.PotentialEvidenceFor(use);
                     if (annotations.Length > 0 && potentialEvidence.Any(item => item.ExplicitNoMap && item.SourceCode is not null && item.SourceSystem.Url is null))
@@ -192,7 +201,10 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                             triggers.Add(new(
                                 outcome.Key, use.Context, path, decision.Identity, decision.VersionMatch,
                                 [.. facts.EvidenceRows.Where(row => decision.EvidenceProvenance.Contains(Provenance(row))).Select(row => row.Key).Order()],
-                                [.. facts.RuleRows.Where(row => decision.RuleProvenance.Contains(new(row.SourceRelativeFilename, row.EntryIndex))).Select(row => row.Key).Order()]));
+                                [.. facts.RuleRows.Where(row => decision.RuleProvenance.Contains(new(row.SourceRelativeFilename, row.EntryIndex))).Select(row => row.Key).Order()])
+                            {
+                                AnnotationKeys = [.. facts.SelectedAnnotationKeys(decision, use)],
+                            });
                         }
                     }
                 }
@@ -206,8 +218,10 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             {
                 EvidenceKeys = [.. group.SelectMany(trigger => trigger.EvidenceKeys).Distinct().Order()],
                 RuleKeys = [.. group.SelectMany(trigger => trigger.RuleKeys).Distinct().Order()],
+                AnnotationKeys = [.. group.SelectMany(trigger => trigger.AnnotationKeys).Distinct().Order()],
             });
-        UnsafeCodeInputStore.InsertTriggers(db, normalized, facts.AnnotationKeys);
+        ProfileUseFacts.PersistNegativeDecisions(db, pair, profileDecisions);
+        UnsafeCodeInputStore.InsertTriggers(db, normalized);
         UnsafeCodeInputStore.CompleteOutcomes(db, dependency);
     }
 
@@ -222,9 +236,10 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
     private static UnsafeCodeProvenance Provenance(DbUnsafeCodeMapEvidence row) =>
         new(row.SourceRelativeFilename, row.ConceptMapId, row.ConceptMapUrl, row.GroupIndex, row.SourceIndex, row.TargetIndex);
 
-    private sealed record MappingUse(UnsafeCodeMappingContext Context, DbElement Source, DbElement? Target);
+    private sealed record MappingUse(UnsafeCodeMappingContext Context, DbElement Source, DbElement? Target,
+        int? ElementMappingKey = null, int? ElementComparisonKey = null);
 
-    private sealed class PairFacts
+    private sealed class PairFacts : IDisposable
     {
         private readonly FhirPackageComparisonPair _pair;
         private readonly Dictionary<int, DbElement> _targetElements;
@@ -232,6 +247,11 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
         private readonly ILookup<(int StructureKey, string ParentId), DbElement> _looseChildren;
         private readonly ILookup<int, DbElementType> _types;
         private readonly Dictionary<int, DbElementComparison> _comparisons;
+        private readonly Dictionary<int, DbElementComparison> _allComparisons;
+        private readonly Dictionary<int, DbStructureComparison> _structureComparisons;
+        private readonly Dictionary<int, DbElement> _allElements;
+        private readonly XVerStructureCatalog _catalog;
+        private readonly ProfileUseFacts _profileFacts;
         private readonly Dictionary<int, DbElementMapping> _mappings;
         private readonly Dictionary<int, DbElementOutcome> _elementOutcomes;
         private readonly ILookup<int, DbElementOutcomeTarget> _targets;
@@ -243,6 +263,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
         private readonly Dictionary<MappingUse, UnsafeCodeMapEvidence[]> _potentialEvidence = [];
         private readonly Dictionary<(int ElementKey, int OwnerKey), ImmutableArray<MappingUse>> _contexts = [];
         private readonly Dictionary<int, string[]> _typeNames = [];
+        private readonly Dictionary<MappingUse, HashSet<int>> _selectedAnnotationKeys = [];
 
         internal Dictionary<int, DbStructureDefinition> Structures { get; }
         internal Dictionary<int, DbElement> SourceElements { get; }
@@ -254,12 +275,16 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
         internal UnsafeCodeRule[] Rules { get; }
         internal bool HasCandidates => Rules.Any(rule => !rule.NoMapOnly) ||
             (Evidence.Any(item => item.ExplicitNoMap) && (Annotations.Length > 0 || Rules.Length > 0));
-        internal Dictionary<UnsafeCodeMappingContext, int[]> AnnotationKeys { get; }
+        private readonly DbUnsafeCodeElementAnnotation[] _annotationRows;
+        private readonly DbProfileMapOwnerFacts[] _annotationOwners;
         private UnsafeCodeMapEvidence[] Evidence { get; }
 
         internal PairFacts(IDbConnection db, FhirPackageComparisonPair pair)
         {
             _pair = pair;
+            _catalog = new(db, XVer.XVerProcessor._exclusionSet);
+            _profileFacts = new(_catalog, pair.SourcePackageKey, pair.TargetPackageKey);
+            _allElements = DbElement.SelectDict(db);
             Structures = DbStructureDefinition.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
             SourceElements = DbElement.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
             _targetElements = DbElement.SelectDict(db, FhirPackageKey: pair.TargetPackageKey);
@@ -269,8 +294,19 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             Roots = SourceElements.Values.Where(element => element.ParentElementKey is null && !element.Path.Contains('.', StringComparison.Ordinal)).ToLookup(element => element.StructureKey);
             _types = DbElementType.SelectList(db, FhirPackageKey: pair.SourcePackageKey).ToLookup(type => type.ElementKey);
             Outcomes = DbStructureOutcome.SelectDict(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
-            _comparisons = DbElementComparison.SelectDict(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
-            _mappings = DbElementMapping.SelectDict(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+            foreach (DbStructureOutcome outcome in Outcomes.Values)
+            {
+                if (!_catalog.IsProcessed(outcome.SourceStructureKey) ||
+                    outcome.TargetStructureKey is int targetKey && !_catalog.IsProcessed(targetKey))
+                {
+                    throw new InvalidOperationException($"Passive standalone outcome {outcome.Key} is not operational for pair {pair.SourcePackageKey}->{pair.TargetPackageKey}.");
+                }
+            }
+            _allComparisons = DbElementComparison.SelectDict(db);
+            _structureComparisons = DbStructureComparison.SelectDict(db);
+            _comparisons = _allComparisons.Values.Where(row => row.SourceFhirPackageKey == pair.SourcePackageKey &&
+                row.TargetFhirPackageKey == pair.TargetPackageKey).ToDictionary(row => row.Key);
+            _mappings = DbElementMapping.SelectDict(db);
             _elementOutcomes = DbElementOutcome.SelectDict(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
             _targets = DbElementOutcomeTarget.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
                 .Where(target => _elementOutcomes.ContainsKey(target.ElementOutcomeKey))
@@ -278,10 +314,10 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             Dictionary<int, DbValueSet> valueSets = DbValueSet.SelectList(db).Where(row => row.FhirPackageKey == pair.SourcePackageKey || row.FhirPackageKey == pair.TargetPackageKey).ToDictionary(row => row.Key);
             ILookup<int, DbValueSetConcept> concepts = DbValueSetConcept.SelectList(db).Where(row => valueSets.ContainsKey(row.ValueSetKey)).ToLookup(row => row.ValueSetKey);
             _bindingResolver = new(valueSets, key => concepts[key]);
-            DbUnsafeCodeElementAnnotation[] annotationRows = [.. DbUnsafeCodeElementAnnotation.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            DbUnsafeCodeElementAnnotation[] annotationRows = [.. DbUnsafeCodeElementAnnotation.SelectList(db)
                 .Where(row => row.RequiresOmittedMandatoryCode)];
-            AnnotationKeys = annotationRows.GroupBy(row => new UnsafeCodeMappingContext(row.SourceFhirPackageKey, row.TargetFhirPackageKey, row.SourceElementId, row.TargetElementId))
-                .ToDictionary(group => group.Key, group => group.Select(row => row.Key).Order().ToArray());
+            _annotationRows = annotationRows;
+            _annotationOwners = [.. DbProfileMapOwnerFacts.SelectList(db)];
             Annotations = [.. annotationRows
                 .Select(row => new UnsafeCodeElementAnnotation(
                     new(row.SourceFhirPackageKey, row.TargetFhirPackageKey, row.SourceElementId, row.TargetElementId),
@@ -294,6 +330,214 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                 new(row.TargetSystem, row.TargetSystemVersion), row.TargetCode, row.Relationship, row.ExplicitNoMap, Provenance(row)))];
             RuleRows = [.. DbUnsafeCodeRule.SelectList(db)];
             Rules = [.. RuleRows.Select(UnsafeCodeInputStore.ReadRule)];
+        }
+
+        public void Dispose() => _profileFacts.Dispose();
+
+        internal bool Permits(DbElement element) => _profileFacts.Permits(element);
+
+        internal bool PermitsChild(DbElement occurrence, DbElement child, int datatypeKey) =>
+            _profileFacts.PermitsChild(occurrence, child, datatypeKey);
+
+        internal UnsafeCodeElementAnnotation[] AnnotationsFor(MappingUse use)
+        {
+            if (_selectedAnnotationKeys.TryGetValue(use, out HashSet<int>? cached))
+            {
+                return [.. _annotationRows.Where(row => cached.Contains(row.Key)).Select(row =>
+                    new UnsafeCodeElementAnnotation(use.Context, AnnotationProvenance(row)))];
+            }
+
+            List<UnsafeCodeElementAnnotation> selected = [];
+            HashSet<int> selectedKeys = [];
+            foreach (MappingUse authority in ContributingUses(use))
+            {
+                List<DbUnsafeCodeElementAnnotation> unnormalized = [];
+                foreach (DbUnsafeCodeElementAnnotation row in _annotationRows.Where(row =>
+                    row.SourceFhirPackageKey == authority.Source.FhirPackageKey &&
+                    row.TargetFhirPackageKey == authority.Target?.FhirPackageKey &&
+                    row.SourceElementId == authority.Source.Id && row.TargetElementId == authority.Target?.Id))
+                {
+                    DbProfileMapOwnerFacts[] owners = [.. _annotationOwners.Where(owner => owner.AnnotationKey == row.Key &&
+                        (owner.SourceStructureKey is null || owner.SourceStructureKey == authority.Source.StructureKey) &&
+                        (owner.TargetStructureKey is null || owner.TargetStructureKey == authority.Target?.StructureKey))];
+                    if (!_annotationOwners.Any(owner => owner.AnnotationKey == row.Key) ||
+                        owners.Any(owner => owner.ResolutionState is ProfileMapOwnerResolution.Ambiguous or ProfileMapOwnerResolution.Unresolved))
+                    {
+                        throw new InvalidOperationException($"Annotation {row.Key} has unresolved owner/authority at {use.Source.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}. Reload maps, compare, and regenerate outcomes.");
+                    }
+
+                    if (owners.Any(owner => owner.ResolutionState == ProfileMapOwnerResolution.Resolved &&
+                        owner.ElementMappingKey is not null && owner.ElementMappingKey == authority.ElementMappingKey))
+                    {
+                        Add(row);
+                    }
+                    else if (authority.ElementMappingKey is null && owners.Any(owner =>
+                        owner.ResolutionState == ProfileMapOwnerResolution.Unnormalized &&
+                        owner.SourceStructureKey == authority.Source.StructureKey &&
+                        owner.TargetStructureKey == authority.Target?.StructureKey))
+                    {
+                        unnormalized.Add(row);
+                    }
+                }
+
+                if (unnormalized.Select(AnnotationProvenance).Distinct().Count() > 1)
+                {
+                    throw new InvalidOperationException($"Annotation authority is ambiguous at {authority.Source.Id}->{authority.Target?.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}. Reload maps with a unique authored authority.");
+                }
+                foreach (DbUnsafeCodeElementAnnotation row in unnormalized)
+                {
+                    Add(row);
+                }
+            }
+            _selectedAnnotationKeys.Add(use, selectedKeys);
+            return [.. selected];
+
+            void Add(DbUnsafeCodeElementAnnotation row)
+            {
+                if (selectedKeys.Add(row.Key))
+                {
+                    selected.Add(new(use.Context, AnnotationProvenance(row)));
+                }
+            }
+        }
+
+        internal void ValidateAnnotationProvenance(IReadOnlyList<DbUnsafeCodeTrigger> triggers)
+        {
+            foreach (DbUnsafeCodeTrigger trigger in triggers)
+            {
+                int[] keys = JsonSerializer.Deserialize<int[]>(trigger.AnnotationKeysJson)!;
+                if (keys.Length == 0)
+                {
+                    continue;
+                }
+                if (!Outcomes.TryGetValue(trigger.StructureOutcomeKey, out DbStructureOutcome? outcome))
+                {
+                    throw Incomplete();
+                }
+
+                ImmutableArray<UnsafeCodePathStep> path = JsonSerializer.Deserialize<ImmutableArray<UnsafeCodePathStep>>(trigger.SourcePathJson);
+                Dictionary<int, UnsafeCodeEffectiveTypeFacts> precedingFacts = [];
+                DbElement? source = null;
+                ImmutableArray<MappingUse> contexts = [];
+                ImmutableArray<MappingUse> childContexts = [];
+                for (int index = 0; index < path.Length; index++)
+                {
+                    UnsafeCodePathStep step = path[index];
+                    if (source is not null)
+                    {
+                        precedingFacts[index] = SourceUseFacts(source);
+                        if (UnsafeCodeSourceUseNormalizer.IsEndpointCandidate(step, precedingFacts[index]))
+                        {
+                            if (UnsafeCodeSourceUseNormalizer.Normalize(path, precedingFacts).Failure is not null)
+                            {
+                                throw Incomplete();
+                            }
+                            break;
+                        }
+                        if (index > 1 && IsResourceUse(source))
+                        {
+                            throw Incomplete();
+                        }
+                    }
+
+                    IEnumerable<DbElement> candidates = source is null ? Roots[outcome.SourceStructureKey] :
+                        step.IsContentReference
+                            ? source.ContentReferenceSourceKey is int referenceKey && SourceElements.TryGetValue(referenceKey, out DbElement? reference)
+                                ? [reference] : []
+                            : step.TypeName is not null
+                                ? TypeStructures(source).Where(type => type.TypeName == step.TypeName && !IsResource(type.StructureKey))
+                                    .SelectMany(type => Roots[type.StructureKey]).SelectMany(Children)
+                                    .Where(child => !Children(source).Any(local =>
+                                        RelativeName(local, source) == RelativeName(child, Roots[child.StructureKey].Single())))
+                                : Children(source);
+                    DbElement[] matches = [.. candidates.Where(element => element.Id == step.ElementId).DistinctBy(element => element.Key)];
+                    if (matches.Length != 1)
+                    {
+                        throw Incomplete();
+                    }
+                    source = matches[0];
+                    contexts = [.. Contexts(source, outcome).Concat(step.IsContentReference ? contexts : childContexts).Distinct()];
+                    string[] names = TypeNames(source);
+                    childContexts = names.Any(IsCarrier) || names.Any(name => name is "CodeableConcept" or "CodeableReference") ? contexts : [];
+                }
+
+                HashSet<int> selected = [];
+                foreach (MappingUse use in contexts.Where(use => use.Context.SourceElementId == trigger.SourceElementId &&
+                    use.Context.TargetElementId == trigger.TargetElementId))
+                {
+                    AnnotationsFor(use);
+                    selected.UnionWith(_selectedAnnotationKeys[use]);
+                }
+                if (path.IsDefaultOrEmpty || keys.Any(key => !selected.Contains(key)))
+                {
+                    throw Incomplete();
+                }
+
+                InvalidOperationException Incomplete() => new(
+                    $"Unsafe-code trigger provenance is incomplete or does not belong to its contributing owner/edge at {trigger.SourceElementId}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}. Regenerate load, compare, outcomes, and export.");
+            }
+        }
+
+        private static UnsafeCodeProvenance AnnotationProvenance(DbUnsafeCodeElementAnnotation row) =>
+            new(row.SourceRelativeFilename, row.ConceptMapId, row.ConceptMapUrl, row.GroupIndex, row.SourceIndex, row.TargetIndex);
+
+        internal IEnumerable<int> SelectedAnnotationKeys(UnsafeCodeDecision decision, MappingUse use) =>
+            _annotationRows.Where(row => _selectedAnnotationKeys[use].Contains(row.Key) &&
+                decision.AnnotationProvenance.Contains(AnnotationProvenance(row)))
+                .Select(row => row.Key).Distinct().Order();
+
+        private IEnumerable<MappingUse> ContributingUses(MappingUse use)
+        {
+            if (use.ElementComparisonKey is not int comparisonKey || !_allComparisons.TryGetValue(comparisonKey, out DbElementComparison? comparison) ||
+                comparison.Steps <= 1 || comparison.ElementMappingKey is not null)
+            {
+                yield return use;
+                yield break;
+            }
+
+            if (!_structureComparisons.TryGetValue(comparison.StructureComparisonKey, out DbStructureComparison? structure))
+            {
+                throw new InvalidOperationException($"Missing transitive comparison authority at {use.Source.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}.");
+            }
+
+            int sourceIndex = _pair.SourcePackage.PackageArrayIndex;
+            int targetIndex = _pair.TargetPackage.PackageArrayIndex;
+            int increment = sourceIndex < targetIndex ? 1 : -1;
+            for (int index = sourceIndex; index != targetIndex; index += increment)
+            {
+                int nextIndex = index + increment;
+                if (comparison.ContentKeys[index] is not int sourceKey || comparison.ContentKeys[nextIndex] is not int targetKey ||
+                    !_allElements.TryGetValue(sourceKey, out DbElement? source) || !_allElements.TryGetValue(targetKey, out DbElement? target) ||
+                    structure.ContentKeys[index] != source.StructureKey || structure.ContentKeys[nextIndex] != target.StructureKey ||
+                    !_catalog.IsProcessed(source.StructureKey) || !_catalog.IsProcessed(target.StructureKey))
+                {
+                    throw new InvalidOperationException($"Invalid transitive owner/element path at {use.Source.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}. Rerun comparisons and outcomes.");
+                }
+
+                DbElementComparison[] steps = [.. _allComparisons.Values.Where(step =>
+                    step.SourceFhirPackageKey == source.FhirPackageKey && step.TargetFhirPackageKey == target.FhirPackageKey &&
+                    step.SourceStructureKey == source.StructureKey && step.TargetStructureKey == target.StructureKey &&
+                    step.SourceElementKey == source.Key && step.TargetElementKey == target.Key && !step.NotMapped &&
+                    _structureComparisons.TryGetValue(step.StructureComparisonKey, out DbStructureComparison? owner) &&
+                    owner.SourceStructureKey == source.StructureKey && owner.TargetStructureKey == target.StructureKey)];
+                if (steps.Length == 0 || steps.Select(step => step.ElementMappingKey).Distinct().Count() != 1)
+                {
+                    throw new InvalidOperationException($"Transitive mapping authority is missing or ambiguous at {source.Id}->{target.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}.");
+                }
+
+                DbElementComparison step = steps[0];
+                if (step.ElementMappingKey is int mappingKey &&
+                    (!_mappings.TryGetValue(mappingKey, out DbElementMapping? mapping) ||
+                        mapping.SourceFhirPackageKey != source.FhirPackageKey || mapping.TargetFhirPackageKey != target.FhirPackageKey ||
+                        mapping.SourceStructureKey != source.StructureKey || mapping.TargetStructureKey != target.StructureKey ||
+                        mapping.SourceElementId != source.Id || mapping.TargetElementId != target.Id ||
+                        mapping.SourceElementKey is int mappedSource && mappedSource != source.Key ||
+                        mapping.TargetElementKey is int mappedTarget && mappedTarget != target.Key))
+                {
+                    throw new InvalidOperationException($"Transitive mapping provenance is inconsistent at {source.Id}->{target.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}.");
+                }
+                yield return new(use.Context, source, target, step.ElementMappingKey, step.Key);
+            }
         }
 
         internal bool IsResource(int key)
@@ -407,7 +651,12 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                     return [];
                 }
 
-                return [.. Roots[matches[0].Key].Select(root => new UnsafeCodeRootFact(matches[0].Key, root.Id, IsResource(matches[0].Key)))];
+                DbElement exactRoot = _catalog.ResolveRoot(matches[0]);
+                if (profile is not null)
+                {
+                    _profileFacts.ForDefinition(matches[0]);
+                }
+                return [new UnsafeCodeRootFact(matches[0].Key, exactRoot.Id, IsResource(matches[0].Key))];
             }
         }
 
@@ -440,6 +689,19 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
 
             foreach (DbElementType type in types)
             {
+                if (type.TypeProfile is not null)
+                {
+                    DbStructureDefinition definition = _catalog.ResolveTypeUse(type);
+                    EffectiveProfileUse use = _profileFacts.AtUse(element, type);
+                    if (!use.Diagnostics.IsEmpty || use.Branches.Any(branch => !branch.Diagnostics.IsEmpty))
+                    {
+                        throw new InvalidOperationException($"Unsafe-code effective profile facts are unresolved for {element.Id}: " +
+                            string.Join("; ", use.Diagnostics.Concat(use.Branches.SelectMany(branch => branch.Diagnostics))));
+                    }
+                    RequireTypeRoot(definition.Key, type.TypeName);
+                    yield return (type.TypeProfile, definition.Key);
+                    continue;
+                }
                 int? key = type.TypeProfileStructureKey ?? (type.TypeProfile is null ? type.TypeStructureKey : null);
                 if (key is null)
                 {
@@ -511,7 +773,8 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                     if (targetElement is not null && targetElement.Id == comparison.TargetElementId &&
                         targetElement.StructureKey == comparison.TargetStructureKey)
                     {
-                        uses.Add(new(new(_pair.SourcePackageKey, _pair.TargetPackageKey, basis.Id, targetElement.Id), basis, targetElement));
+                        uses.Add(new(new(_pair.SourcePackageKey, _pair.TargetPackageKey, basis.Id, targetElement.Id), basis, targetElement,
+                            comparison.ElementMappingKey, comparison.Key));
                     }
                 }
 
@@ -522,12 +785,14 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                     .Select(row => row.TargetStructureKey).OfType<int>()];
                 bool hasContributingTarget = _targets[basis.Key].Any(target => Outcomes.TryGetValue(target.StructureOutcomeKey, out DbStructureOutcome? contributing) &&
                     contributing.SourceStructureKey == basis.StructureKey && (basis.StructureKey != owner.SourceStructureKey || contributing.Key == owner.Key));
-                foreach (UnsafeCodeElementAnnotation annotation in Annotations.Where(annotation =>
-                    !hasContributingTarget && annotation.Context.SourceElementId == basis.Id))
+                foreach (DbProfileMapOwnerFacts annotation in _annotationOwners.Where(annotation =>
+                    !hasContributingTarget && annotation.SourceStructureKey == basis.StructureKey &&
+                    annotation.ResolutionState == ProfileMapOwnerResolution.Unnormalized && annotation.SourceElementId == basis.Id))
                 {
-                    foreach (DbElement target in _targetElements.Values.Where(target => target.Id == annotation.Context.TargetElementId && targetStructures.Contains(target.StructureKey)))
+                    foreach (DbElement target in _targetElements.Values.Where(target => target.Id == annotation.TargetElementId &&
+                        target.StructureKey == annotation.TargetStructureKey && targetStructures.Contains(target.StructureKey)))
                     {
-                        uses.Add(new(annotation.Context, basis, target));
+                        uses.Add(new(new(_pair.SourcePackageKey, _pair.TargetPackageKey, basis.Id, target.Id), basis, target));
                     }
                 }
 

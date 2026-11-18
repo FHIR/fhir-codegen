@@ -144,6 +144,8 @@ internal sealed class ProfileRepresentationIndex
     internal const string DatatypeMetadataUrl = "http://hl7.org/fhir/StructureDefinition/_datatype";
 
     private readonly IDbConnection _db;
+    private readonly XVerStructureCatalog _catalog;
+    private readonly ProfileUseFacts _profileFacts;
     private readonly Dictionary<int, DbElement> _elements;
     private readonly Dictionary<int, DbStructureDefinition> _structures;
     private readonly ILookup<int, DbElement> _children;
@@ -166,6 +168,8 @@ internal sealed class ProfileRepresentationIndex
     internal ProfileRepresentationIndex(IDbConnection db, FhirPackageComparisonPair pair)
     {
         _db = db;
+        _catalog = new(db);
+        _profileFacts = new(_catalog, pair.SourcePackageKey, pair.TargetPackageKey);
         _elements = DbElement.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
         foreach (DbElement element in DbElement.SelectList(db, FhirPackageKey: pair.TargetPackageKey))
         {
@@ -387,11 +391,14 @@ internal sealed class ProfileRepresentationIndex
                 return [];
             }
 
-            return [.. _elements.Values.Where(root => root.FhirPackageKey == element.FhirPackageKey &&
-                    root.StructureKey == matches[0].Key && root.ParentElementKey is null && !root.Path.Contains('.', StringComparison.Ordinal))
-                .Select(root => new UnsafeCodeRootFact(matches[0].Key, root.Id,
-                    BaseChain(root).Any(basis => _structures.GetValueOrDefault(basis.StructureKey)?.ArtifactClass == FhirArtifactClassEnum.Resource ||
-                        IsResource(basis))))];
+            DbElement root = _catalog.ResolveRoot(matches[0]);
+            if (profile is not null)
+            {
+                _profileFacts.ForDefinition(matches[0]);
+            }
+            return [new UnsafeCodeRootFact(matches[0].Key, root.Id,
+                BaseChain(root).Any(basis => _structures.GetValueOrDefault(basis.StructureKey)?.ArtifactClass == FhirArtifactClassEnum.Resource ||
+                    IsResource(basis)))];
         }
     }
 
@@ -796,8 +803,8 @@ internal sealed class ProfileRepresentationIndex
         DbElementType[] targetTypes = [.. Types(target)];
         foreach (DbElementType type in targetTypes)
         {
-            DbElement? root = TypeRoot(target.FhirPackageKey, type.TypeName, type.TypeProfileStructureKey ?? type.TypeStructureKey);
-            if (root is not null)
+            DbElement? root = _catalog.ResolveRoot(_catalog.ResolveTypeUse(type));
+            if (root is not null && !contexts.Contains(root))
             {
                 contexts.Add(root);
             }
@@ -826,8 +833,10 @@ internal sealed class ProfileRepresentationIndex
                 !comparison.NotMapped && comparison.TargetElementKey == basis.Key)))];
             if (mapped.Count == 0 && comparisons.Length == 0)
             {
-                mapped.AddRange(children.Where(child => child.Name == source.Name ||
-                    (source.BasePath is not null && child.BasePath == source.BasePath)));
+                string sourceToken = source.Id[(source.Id.LastIndexOf('.') + 1)..];
+                mapped.AddRange(children.Where(child => child.Id[(child.Id.LastIndexOf('.') + 1)..] == sourceToken ||
+                    (!sourceToken.Contains(':') && !child.Id.Contains(':') &&
+                        source.BasePath is not null && child.BasePath == source.BasePath)));
             }
 
             foreach (DbElement child in mapped)
@@ -880,7 +889,7 @@ internal sealed class ProfileRepresentationIndex
         IEnumerable<RepresentationOccurrence> Walk(DbElement source, ImmutableArray<UnsafeCodePathStep> prefix,
             HashSet<(int, int, string)> edges, string? typeName, bool contentReference)
         {
-            if (source.MaxCardinalityString == "0")
+            if (!_profileFacts.Permits(source))
             {
                 yield break;
             }
@@ -910,8 +919,8 @@ internal sealed class ProfileRepresentationIndex
 
     private IEnumerable<(DbElement Child, string Kind, string? Type, bool Reference)> Children(DbElement source)
     {
-        DbElement[] children = [.. EffectiveChildren(source)];
-        foreach (DbElement child in children)
+        (string RelativeId, DbElement Child)[] children = [.. EffectiveChildEntries(source)];
+        foreach ((string _, DbElement child) in children)
         {
             yield return (child, "child", null, false);
         }
@@ -923,10 +932,12 @@ internal sealed class ProfileRepresentationIndex
                 continue;
             }
 
-            DbElement? root = TypeRoot(source.FhirPackageKey, type.TypeName, type.TypeProfileStructureKey ?? type.TypeStructureKey);
+            DbElement? root = _catalog.ResolveRoot(_catalog.ResolveTypeUse(type));
             if (root is not null && !IsResource(root))
             {
-                foreach (DbElement child in EffectiveChildren(root).Where(child => !children.Any(local => local.Name == child.Name)))
+                foreach ((string _, DbElement child) in EffectiveChildEntries(root).Where(child =>
+                    !children.Any(local => local.RelativeId == child.RelativeId) &&
+                        _profileFacts.PermitsChild(source, child.Child, root.StructureKey)))
                 {
                     yield return (child, "type", type.TypeProfile ?? type.TypeName, false);
                 }
@@ -939,9 +950,18 @@ internal sealed class ProfileRepresentationIndex
         }
     }
 
-    private DbElement? TypeRoot(int packageKey, string? name, int? structureKey = null) =>
-        _elements.Values.FirstOrDefault(element => element.FhirPackageKey == packageKey && !element.Id.Contains('.') &&
-            (structureKey is not null ? element.StructureKey == structureKey : element.Id == name));
+    private DbElement? TypeRoot(int packageKey, string? name, int? structureKey = null)
+    {
+        DbStructureDefinition? owner = structureKey is int key ? _catalog.GetStructure(key) :
+            name?.Contains("://", StringComparison.Ordinal) == true
+                ? _catalog.ResolveDefinition(packageKey, name)
+                : _catalog.ResolveNativeType(packageKey, name, required: false);
+        if (owner is not null && owner.FhirPackageKey != packageKey)
+        {
+            throw new InvalidOperationException($"Type root owner {owner.Key} is not in package {packageKey}.");
+        }
+        return owner is null ? null : _catalog.ResolveRoot(owner);
+    }
 
     private IEnumerable<DbElement> BaseChain(DbElement element)
     {
@@ -961,8 +981,13 @@ internal sealed class ProfileRepresentationIndex
         }
     }
 
+    private IEnumerable<(string RelativeId, DbElement Child)> EffectiveChildEntries(DbElement element) =>
+        BaseChain(element).SelectMany(basis => _children[basis.Key].Select(child => (
+            RelativeId: child.Id.StartsWith(basis.Id + ".", StringComparison.Ordinal) ? child.Id[basis.Id.Length..] : child.Id,
+            Child: child))).DistinctBy(item => item.RelativeId, StringComparer.Ordinal);
+
     private IEnumerable<DbElement> EffectiveChildren(DbElement element) =>
-        BaseChain(element).SelectMany(basis => _children[basis.Key]).DistinctBy(child => child.Name, StringComparer.Ordinal);
+        EffectiveChildEntries(element).Select(item => item.Child);
 
     private IEnumerable<DbElementType> Types(DbElement element) =>
         BaseChain(element).Select(basis => _types[basis.Key]).FirstOrDefault(types => types.Any()) ?? [];
@@ -1140,7 +1165,7 @@ internal sealed class ProfileRepresentationIndex
 
     private static ImmutableArray<RepresentationStep> CloseCycle(ImmutableArray<RepresentationStep> prefix, ImmutableArray<RepresentationStep> steps)
     {
-        if (steps.Length <= prefix.Length || !steps.Take(prefix.Length).SequenceEqual(prefix))
+        if (steps.Length <= prefix.Length || StepsKey(steps[..prefix.Length]) != StepsKey(prefix))
         {
             return steps;
         }
@@ -1154,7 +1179,7 @@ internal sealed class ProfileRepresentationIndex
         ImmutableArray<ImmutableArray<RepresentationStep>> prefixes, ImmutableArray<RepresentationStep> steps)
     {
         ImmutableArray<RepresentationStep>[] matches = [.. prefixes.Where(prefix =>
-            prefix.Length < steps.Length && steps.Take(prefix.Length).SequenceEqual(prefix)).OrderByDescending(prefix => prefix.Length)];
+            prefix.Length < steps.Length && StepsKey(steps[..prefix.Length]) == StepsKey(prefix)).OrderByDescending(prefix => prefix.Length)];
         return matches.Length > 0 ? CloseCycle(matches[0], steps) : steps;
     }
 

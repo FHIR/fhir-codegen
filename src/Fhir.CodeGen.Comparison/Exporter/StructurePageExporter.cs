@@ -31,6 +31,7 @@ public class StructurePageExporter
 {
     private readonly XVerExporter _exporter;
     private readonly IDbConnection _db;
+    private readonly XVerStructureCatalog _catalog;
 
     private ILoggerFactory _loggerFactory;
     private ILogger _logger;
@@ -93,6 +94,7 @@ public class StructurePageExporter
     {
         _exporter = exporter;
         _db = db;
+        _catalog = new(db, XVer.XVerProcessor._exclusionSet);
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<StructurePageExporter>();
     }
@@ -144,12 +146,24 @@ public class StructurePageExporter
         return id;
     }
 
-    private static bool hasDirectTarget(
+    private bool IsDatatype(int key) =>
+        _catalog.GetStructure(key).ArtifactClass == FhirArtifactClassEnum.ComplexType ||
+        _catalog.GetStructure(key).ArtifactClass == FhirArtifactClassEnum.Profile && _catalog.IsProcessed(key);
+
+    private bool MatchesArtifactClass(DbStructureOutcome outcome, FhirArtifactClassEnum artifactClass) =>
+        _catalog.IsProcessed(outcome.SourceStructureKey) &&
+        (outcome.SourceArtifactClass == artifactClass ||
+            artifactClass == FhirArtifactClassEnum.ComplexType && IsDatatype(outcome.SourceStructureKey));
+
+    private bool hasDirectTarget(
         DbStructureOutcome sdOutcome,
         FhirArtifactClassEnum sourceArtifactClass) =>
         (sdOutcome.TargetId is not null) &&
         ((sourceArtifactClass != FhirArtifactClassEnum.ComplexType) ||
-            (sdOutcome.TargetArtifactClass == FhirArtifactClassEnum.ComplexType));
+            (sdOutcome.TargetStructureKey is int target && IsDatatype(target) &&
+                !DbElementOutcome.SelectList(_db, SourceFhirPackageKey: sdOutcome.SourceFhirPackageKey,
+                    TargetFhirPackageKey: sdOutcome.TargetFhirPackageKey, SourceStructureKey: sdOutcome.SourceStructureKey)
+                    .Any(outcome => outcome.SourceResourceOrder == 0 && outcome.ExtensionDefinitionIsProhibited)));
 
     private void exportLookupPages(
         XVerIgExportTrackingRecord igTr,
@@ -184,7 +198,7 @@ public class StructurePageExporter
         // iterate over the outcomes to create lookup pages
         foreach (DbStructureOutcome sdOutcome in sdOutcomes)
         {
-            if ((sdOutcome.SourceArtifactClass != sourceArtifactClass) ||
+            if (!MatchesArtifactClass(sdOutcome, sourceArtifactClass) ||
                 StructureExportExclusions.Contains(sdOutcome.SourceId) ||
                 StructureExportExclusions.Contains(sdOutcome.SourceName))
             {
@@ -347,7 +361,7 @@ public class StructurePageExporter
             ? $"{sourceBaseUrl}{pageUrl}"
             : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
             ? $"{sourceBaseUrl}{sdOutcome.SourceName}.html#resource"
-            : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+            : IsDatatype(sdOutcome.SourceStructureKey)
             ? $"{sourceBaseUrl}datatypes.html#{sdOutcome.SourceName}"
             : $"{sourceBaseUrl}{sdOutcome.SourceName}.html";
 
@@ -355,7 +369,7 @@ public class StructurePageExporter
         foreach (DbElementOutcome edOutcome in edOutcomes)
         {
             if ((edOutcome.SourceResourceOrder == 0) &&
-                (sdOutcome.SourceArtifactClass != FhirArtifactClassEnum.ComplexType))
+                !IsDatatype(sdOutcome.SourceStructureKey))
             {
                 //if (sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType)
                 //{
@@ -431,7 +445,7 @@ public class StructurePageExporter
                             ? $"{targetBaseUrl}{targetPageUrl}"
                             : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
                             ? $"{targetBaseUrl}{targetSdName}.html#resource"
-                            : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+                            : IsDatatype(sdOutcome.SourceStructureKey)
                             ? $"{targetBaseUrl}datatypes.html#{targetSdName}"
                             : $"{targetBaseUrl}{targetSdName}.html";
 
@@ -451,7 +465,7 @@ public class StructurePageExporter
                         ? $"{targetBaseUrl}{targetPageUrl}"
                         : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
                         ? $"{targetBaseUrl}{targetSdName}.html#resource"
-                        : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+                        : IsDatatype(sdOutcome.SourceStructureKey)
                         ? $"{targetBaseUrl}datatypes.html#{targetSdName}"
                         : $"{targetBaseUrl}{targetSdName}.html";
 
@@ -840,7 +854,7 @@ public class StructurePageExporter
         // iterate over the outcomes
         foreach (DbStructureOutcome sdOutcome in sdOutcomes)
         {
-            if ((sdOutcome.SourceArtifactClass != sourceArtifactClass) ||
+            if (!MatchesArtifactClass(sdOutcome, sourceArtifactClass) ||
                 StructureExportExclusions.Contains(sdOutcome.SourceId) ||
                 StructureExportExclusions.Contains(sdOutcome.SourceName))
             {
@@ -852,24 +866,27 @@ public class StructurePageExporter
                 ? $"{sourceBaseUrl}{sourcePageUrl}"
                 : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.Resource
                 ? $"{sourceBaseUrl}{sdOutcome.SourceName}.html#resource"
-                : sdOutcome.SourceArtifactClass == FhirArtifactClassEnum.ComplexType
+                : IsDatatype(sdOutcome.SourceStructureKey)
                 ? $"{sourceBaseUrl}datatypes.html#{sdOutcome.SourceName}"
                 : $"{sourceBaseUrl}{sdOutcome.SourceName}.html";
 
             string targetMarkdown;
-            if (sdOutcome.TargetId is null)
+            if (!hasDirectTarget(sdOutcome, sourceArtifactClass))
             {
-                targetMarkdown = isResourceLookup
+                bool negative = DbElementOutcome.SelectList(_db, SourceFhirPackageKey: sdOutcome.SourceFhirPackageKey,
+                    TargetFhirPackageKey: sdOutcome.TargetFhirPackageKey, SourceStructureKey: sdOutcome.SourceStructureKey)
+                    .Any(outcome => outcome.SourceResourceOrder == 0 && outcome.ExtensionDefinitionIsProhibited);
+                targetMarkdown = negative ? "Unrepresentable (no usable target)" : isResourceLookup
                 ? $"[{igTr.PackagePair.TargetFhirSequence} Basic]({targetBaseUrl}Basic.html)"
                 : $"[{igTr.PackagePair.TargetFhirSequence} Extension]({targetBaseUrl}extensibility.html#Extension)";
             }
             else
             {
-                targetMarkdown = ExtendedTypeSpecPageLookup.TryGetValue(sdOutcome.TargetId, out string? targetPageUrl)
+                targetMarkdown = ExtendedTypeSpecPageLookup.TryGetValue(sdOutcome.TargetId!, out string? targetPageUrl)
                                 ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetName}]({targetBaseUrl}{targetPageUrl})"
                                 : sdOutcome.TargetArtifactClass == FhirArtifactClassEnum.Resource
                                 ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetName}]({targetBaseUrl}{sdOutcome.TargetName}.html#resource)"
-                                : sdOutcome.TargetArtifactClass == FhirArtifactClassEnum.ComplexType
+                                : sdOutcome.TargetStructureKey is int targetKey && IsDatatype(targetKey)
                                 ? $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetName}]({targetBaseUrl}datatypes.html#{sdOutcome.TargetName})"
                                 : $"[{igTr.PackagePair.TargetFhirSequence} {sdOutcome.TargetName}]({targetBaseUrl}{sdOutcome.TargetName}.html)";
             }

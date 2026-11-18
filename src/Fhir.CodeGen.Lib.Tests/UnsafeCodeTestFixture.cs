@@ -7,6 +7,7 @@ extern alias r4;
 extern alias r4b;
 
 using System.Collections.Immutable;
+using System.Data;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
@@ -32,6 +33,8 @@ using BindingStrength = Hl7.Fhir.Model.BindingStrength;
 using ConceptMap = Hl7.Fhir.Model.ConceptMap;
 using FhirBoolean = Hl7.Fhir.Model.FhirBoolean;
 using PublicationStatus = Hl7.Fhir.Model.PublicationStatus;
+using ElementDefinition = Hl7.Fhir.Model.ElementDefinition;
+using StructureDefinition = Hl7.Fhir.Model.StructureDefinition;
 
 namespace Fhir.CodeGen.Lib.Tests;
 
@@ -61,6 +64,8 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     private readonly bool _persistDatabase;
     private string _persistedStage = "creation";
+    private readonly Dictionary<int, (string Type, StructureDefinition.StructureDefinitionKind Kind, string? Base)> _authoredDefinitions = [];
+    private readonly Dictionary<int, Action<StructureDefinition>> _authoredRestrictions = [];
 
     internal SqliteConnection Connection { get; private set; }
     internal int ConnectionReopens { get; private set; }
@@ -69,7 +74,8 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal List<DbFhirPackage> Packages { get; } = [];
     internal DbUnsafeCodeInputState InputState => DbUnsafeCodeInputState.SelectSingle(Connection, Key: 1)!;
 
-    internal UnsafeCodeTestFixture(bool initializeIndices = false, bool persistDatabase = false)
+    internal UnsafeCodeTestFixture(bool initializeIndices = false, bool persistDatabase = false, bool publishDefinitions = true,
+        bool includeLegacyPackages = false)
     {
         _persistDatabase = persistDatabase;
         SourceRoot = Path.Combine(Path.GetTempPath(), "fhir-codegen-unsafe-" + Guid.NewGuid().ToString("N"));
@@ -117,6 +123,27 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                 InsertStructure(package);
                 InsertValueSet(package);
             }
+
+            // The transitive comparer indexes all five releases, even for these three-release fixtures.
+            foreach (FhirReleases.FhirSequenceCodes sequence in includeLegacyPackages
+                ? new[] { FhirReleases.FhirSequenceCodes.DSTU2, FhirReleases.FhirSequenceCodes.STU3 } : [])
+            {
+                DbFhirPackage.Insert(Connection, new DbFhirPackage
+                {
+                    Name = sequence.ToCorePackageId(),
+                    PackageId = sequence.ToCorePackageId(),
+                    PackageVersion = sequence.ToLongVersion(),
+                    FhirVersionShort = sequence.ToShortVersion(),
+                    CanonicalUrl = "http://hl7.org/fhir",
+                    ShortName = sequence.ToRLiteral(),
+                    Dependencies = null,
+                    DefinitionFhirSequence = sequence,
+                });
+            }
+            if (publishDefinitions)
+            {
+                PublishAuthoredDefinitions();
+            }
         }
         catch
         {
@@ -126,6 +153,178 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     }
 
     internal bool Load() => new MappingLoader(Connection, NullLoggerFactory.Instance).TryLoadCrossVersionSourceMaps(SourceRoot, false);
+
+    internal void DeclareProfile(DbStructureDefinition profile, DbStructureDefinition basis, string? declaredType = null)
+    {
+        (string type, StructureDefinition.StructureDefinitionKind kind, _) = _authoredDefinitions[basis.Key];
+        _authoredDefinitions[profile.Key] = (declaredType ?? type, kind, basis.VersionedUrl);
+    }
+
+    internal void DeclareBaseDefinition(DbStructureDefinition owner, DbStructureDefinition basis)
+    {
+        (string type, StructureDefinition.StructureDefinitionKind kind, _) = _authoredDefinitions[owner.Key];
+        _authoredDefinitions[owner.Key] = (type, kind, basis.VersionedUrl);
+    }
+
+    internal void ConfigureDefinition(DbStructureDefinition owner, Action<StructureDefinition> configure) =>
+        _authoredRestrictions.Add(owner.Key, configure);
+
+    // Explicit arrangement only: never call from Load, comparison, outcomes, or export.
+    // Counts come from the fixture-owned normalized snapshots, not a census offered as import proof.
+    internal void PublishAuthoredDefinitions()
+    {
+        List<DbStructureDefinition> owners = DbStructureDefinition.SelectList(Connection);
+        List<(DbStructureDefinition Owner, StructureDefinition Definition)> definitions = [];
+        foreach (DbStructureDefinition owner in owners)
+        {
+            (string type, StructureDefinition.StructureDefinitionKind kind, string? baseDefinition) = _authoredDefinitions[owner.Key];
+            List<DbElement> elements = DbElement.SelectList(Connection, StructureKey: owner.Key, orderByProperties: [nameof(DbElement.ResourceFieldOrder)]);
+            if (elements.Count == 0)
+            {
+                AddElement(owner, type);
+                elements = DbElement.SelectList(Connection, StructureKey: owner.Key);
+            }
+
+            StructureDefinition definition = new()
+            {
+                Id = owner.Id,
+                Url = owner.UnversionedUrl,
+                Version = owner.Version,
+                Name = owner.Name,
+                Status = owner.Status,
+                Type = type,
+                Kind = kind,
+                Abstract = false,
+                Derivation = owner.ArtifactClass == FhirArtifactClassEnum.Profile
+                    ? StructureDefinition.TypeDerivationRule.Constraint : StructureDefinition.TypeDerivationRule.Specialization,
+                BaseDefinition = baseDefinition,
+                Snapshot = new() { Element = [] },
+            };
+            foreach (DbElement element in elements)
+            {
+                List<DbElementType> types = DbElementType.SelectList(Connection, ElementKey: element.Key);
+                if (types.Count == 0 && !element.DefinedAsContentReference)
+                {
+                    string[] names = element.ResourceFieldOrder == 0 ? [type]
+                        : element.DistinctTypeLiterals.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                    foreach (string name in names)
+                    {
+                        DbStructureDefinition? native = owners.SingleOrDefault(candidate => candidate.FhirPackageKey == owner.FhirPackageKey &&
+                            candidate.ArtifactClass != FhirArtifactClassEnum.Profile && candidate.Id == name);
+                        if (native is not null)
+                        {
+                            AddType(element, name, native);
+                        }
+                        else
+                        {
+                            DbElementType.Insert(Connection, new DbElementType
+                            {
+                                FhirPackageKey = element.FhirPackageKey,
+                                StructureKey = element.StructureKey,
+                                ElementKey = element.Key,
+                                TypeName = name,
+                                TypeStructureKey = null,
+                                TypeProfile = null,
+                                TypeProfileStructureKey = null,
+                                TargetProfile = null,
+                                TargetProfileStructureKey = null,
+                            });
+                        }
+                    }
+                    types = DbElementType.SelectList(Connection, ElementKey: element.Key);
+                }
+
+                ElementDefinition normalized = new()
+                {
+                    ElementId = element.Id,
+                    Path = element.Path,
+                    SliceName = element.SliceName,
+                    Min = element.MinCardinality,
+                    Max = element.MaxCardinalityString,
+                    IsModifier = element.IsModifier,
+                    Short = element.Short,
+                    Definition = element.Definition,
+                    Base = element.BasePath is null ? null : new()
+                    {
+                        Path = element.BasePath,
+                        Min = element.MinCardinality,
+                        Max = element.MaxCardinalityString,
+                    },
+                    Type = [.. types.Select(row => new ElementDefinition.TypeRefComponent
+                    {
+                        Code = row.TypeName,
+                        Profile = row.TypeProfile is null ? [] : [row.TypeProfile],
+                        TargetProfile = row.TargetProfile is null ? [] : [row.TargetProfile],
+                    })],
+                    Binding = element.BindingValueSet is null ? null : new()
+                    {
+                        Strength = element.ValueSetBindingStrength,
+                        ValueSet = element.BindingValueSet,
+                        Description = element.BindingDescription,
+                    },
+                };
+                if (element.DefinedAsContentReference && element.ContentReferenceSourceKey is int referenceKey)
+                {
+                    DbElement referenced = DbElement.SelectSingle(Connection, Key: referenceKey)!;
+                    DbStructureDefinition referencedOwner = owners.Single(candidate => candidate.Key == referenced.StructureKey);
+                    normalized.ContentReference = (referencedOwner.Key == owner.Key ? "" : referencedOwner.VersionedUrl) + "#" + referenced.Id;
+                    element.ContentReferenceSourceId = referenced.Id;
+                    DbElement.Update(Connection, [element]);
+                }
+                definition.Snapshot.Element.Add(normalized);
+            }
+            if (_authoredRestrictions.TryGetValue(owner.Key, out Action<StructureDefinition>? configure))
+            {
+                configure(definition);
+            }
+
+            owner.SnapshotCount = definition.Snapshot.Element.Count;
+            owner.DifferentialCount = 0;
+            DbStructureDefinition.Update(Connection, [owner]);
+            definitions.Add((owner, definition));
+        }
+
+        PublishAuthoredDefinitions(Connection, definitions);
+    }
+
+    internal static void PublishAuthoredDefinitions(
+        IDbConnection connection, IReadOnlyList<(DbStructureDefinition Owner, StructureDefinition Definition)> definitions)
+    {
+        DefinitionInventoryPackageCounts[] counts = [.. DbFhirPackage.SelectList(connection).Select(package =>
+        {
+            (DbStructureDefinition Owner, StructureDefinition Definition)[] owned = [.. definitions.Where(entry => entry.Owner.FhirPackageKey == package.Key)];
+            return new DefinitionInventoryPackageCounts(package.Key,
+                owned.Count(entry => entry.Owner.ArtifactClass == FhirArtifactClassEnum.PrimitiveType),
+                owned.Count(entry => entry.Owner.ArtifactClass == FhirArtifactClassEnum.ComplexType),
+                owned.Count(entry => entry.Owner.ArtifactClass == FhirArtifactClassEnum.Resource),
+                owned.Count(entry => entry.Owner.ArtifactClass == FhirArtifactClassEnum.Profile),
+                owned.Sum(entry => entry.Definition.Snapshot.Element.Count),
+                owned.Sum(entry => entry.Definition.Snapshot.Element.Sum(element => element.Type.Sum(type =>
+                    Math.Max(1, type.ProfileElement.Count) * Math.Max(1, type.TargetProfileElement.Count)))),
+                owned.Sum(entry => entry.Definition.Snapshot.Element.Sum(element => element.Binding?.Additional.Count ?? 0)));
+        })];
+        string revision = DefinitionInventoryStore.BeginInventory(connection, counts);
+        DbStructureDefinitionFacts.Delete(connection);
+        foreach ((DbStructureDefinition owner, StructureDefinition definition) in definitions)
+        {
+            DbStructureDefinitionFacts.Insert(connection,
+                StructureDefinitionFactsStore.CreateFacts(owner.Key, owner.FhirPackageKey, owner.Key, definition), insertPrimaryKey: true);
+        }
+        DefinitionInventoryStore.CompleteInventory(connection, revision);
+    }
+
+    internal void CompleteAuthoredArrangement(FhirPackageComparisonPair pair)
+    {
+        PublishAuthoredDefinitions();
+        UnsafeCodeInputStore.BeginInputs(Connection, "fixture", null);
+        UnsafeCodeInputStore.CompleteInputs(Connection, DbFhirPackage.SelectList(Connection));
+        foreach (DbProfileMapOwnerFacts owner in DbProfileMapOwnerFacts.SelectList(Connection))
+        {
+            owner.InputSnapshotId = InputState.SnapshotId;
+            DbProfileMapOwnerFacts.Update(Connection, owner);
+        }
+        StampComparison(pair);
+    }
 
     internal const string MixedChoiceElement = "Parameters.parameter.value[x]";
     internal const string MixedCodingSystem = "urn:example:codes";
@@ -144,9 +343,10 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             throw new ArgumentException("Unknown mixed-choice input variant.");
         }
 
-        UnsafeCodeTestFixture fixture = new(initializeIndices: true, persistDatabase: true);
+        UnsafeCodeTestFixture fixture = new(initializeIndices: true, persistDatabase: true, publishDefinitions: false, includeLegacyPackages: true);
         Directory.Delete(Path.Combine(fixture.SourceRoot, "input"), recursive: true);
         DbStructureDefinition.Delete(fixture.Connection);
+        fixture._authoredDefinitions.Clear();
         DbValueSet.Delete(fixture.Connection);
         DbOutcomeClasses.CreateTables(fixture.Connection, forValueSets: true, forStructures: false);
         foreach (DbFhirPackage package in fixture.Packages)
@@ -177,8 +377,10 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             fixture.AddMixedChoiceElement(extension, "Extension", []);
             fixture.AddMixedChoiceElement(extension, "Extension.value[x]", ["Coding", "boolean", "code", "string", "uri"]);
             DbStructureDefinition parameters = fixture.AddStructure(package, "Parameters", FhirArtifactClassEnum.Resource);
+            DbStructureDefinition backbone = fixture.AddStructure(package, "BackboneElement");
+            fixture.AddMixedChoiceElement(backbone, "BackboneElement", []);
             fixture.AddMixedChoiceElement(parameters, "Parameters", []);
-            fixture.AddMixedChoiceElement(parameters, "Parameters.parameter", [], max: -1);
+            fixture.AddMixedChoiceElement(parameters, "Parameters.parameter", ["BackboneElement"], max: -1);
             fixture.AddMixedChoiceElement(parameters, "Parameters.parameter.name", ["string"], min: 1);
 
             DbValueSet? binding = null;
@@ -248,12 +450,15 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                 ? """[{"system":"urn:example:codes","code":"unsafe"}]"""
                 : """[{"system":"urn:example:codes","code":"unsafe"},{"system":"urn:example:primitive","version":"primitive-v1","code":"unsafe"}]"""
             : "[]");
+        fixture.PublishAuthoredDefinitions();
         return fixture;
     }
 
     private DbStructureDefinition AddMixedChoiceOwnerProfile(DbFhirPackage package, string id = "SelectedCoding")
     {
         DbStructureDefinition profile = AddStructure(package, id, FhirArtifactClassEnum.Profile);
+        _authoredDefinitions[profile.Key] = ("Coding", StructureDefinition.StructureDefinitionKind.ComplexType,
+            "http://example.org/StructureDefinition/Coding|" + package.PackageVersion);
         profile.Version = "coding-profile-v7";
         profile.VersionedUrl = profile.UnversionedUrl + "|" + profile.Version;
         DbStructureDefinition.Update(Connection, [profile]);
@@ -308,6 +513,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             map.Group[0].Element.RemoveAll(element => element.Code == "Coding");
             File.WriteAllText(filename, map.ToJson());
         }
+        PublishAuthoredDefinitions();
     }
 
     internal DbElement AddDuplicateMixedChoiceRoot(DbStructureDefinition structure)
@@ -504,6 +710,11 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                 {
                     continue;
                 }
+                if (TryNormalizeInventoryValue(table, column, value, out object? inventoryValue))
+                {
+                    normalized[column] = inventoryValue;
+                    continue;
+                }
                 string? reference = references[table].GetValueOrDefault(column) ?? column switch
                 {
                     "FhirPackageKey" or "SourceFhirPackageKey" or "TargetFhirPackageKey" => "FhirPackages",
@@ -697,6 +908,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             });
             File.WriteAllText(filename, map.ToJson());
         }
+        PublishAuthoredDefinitions();
     }
 
     internal const string MixedCodingProfile = "http://example.org/StructureDefinition/SelectedCoding|coding-profile-v7";
@@ -707,6 +919,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         DbStructureDefinition basis = Structure(package, "Coding");
         DbElement basisRoot = DbElement.SelectSingle(Connection, StructureKey: basis.Key, Id: "Coding")!;
         DbStructureDefinition profile = AddStructure(package, "SelectedCoding", FhirArtifactClassEnum.Profile);
+        DeclareProfile(profile, basis);
         profile.UnversionedUrl = MixedCodingProfile.Split('|')[0];
         profile.Version = MixedCodingProfile.Split('|')[1];
         profile.VersionedUrl = MixedCodingProfile;
@@ -727,6 +940,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         choice.DistinctTypeLiterals = string.Join(',', typeNames);
         choice.DistinctTypeCount = typeNames.Length;
         DbElement.Update(Connection, [choice]);
+        PublishAuthoredDefinitions();
     }
 
     internal string SafetyPersistenceSnapshot() => JsonSerializer.Serialize(new
@@ -755,7 +969,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal static UnsafeCodeTestFixture CreateProfileInputs(bool initializeIndices = true, bool persistDatabase = false)
     {
-        UnsafeCodeTestFixture fixture = new(initializeIndices, persistDatabase);
+        UnsafeCodeTestFixture fixture = new(initializeIndices, persistDatabase, publishDefinitions: false, includeLegacyPackages: true);
         foreach (DbFhirPackage package in fixture.Packages)
         {
             DbStructureDefinition code = fixture.AddStructure(package, "code", FhirArtifactClassEnum.PrimitiveType);
@@ -768,9 +982,9 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
             DbStructureDefinition structure = fixture.Structure(package);
             fixture.AddElement(structure, "ValueSet");
-            fixture.AddElement(structure, "ValueSet.compose");
-            fixture.AddElement(structure, "ValueSet.compose.include");
-            fixture.AddElement(structure, "ValueSet.compose.include.filter");
+            fixture.AddElement(structure, "ValueSet.compose", "BackboneElement");
+            fixture.AddElement(structure, "ValueSet.compose.include", "BackboneElement");
+            fixture.AddElement(structure, "ValueSet.compose.include.filter", "BackboneElement");
             DbElement op = fixture.AddElement(structure, FilterElement, "code", FilterValueSet);
             fixture.AddType(op, "code", code);
             if (package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R5)
@@ -788,6 +1002,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                     ? "source-vs" : package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.R4 ? "target-vs-r4" : "target-vs-r4b");
         }
 
+        fixture.PublishAuthoredDefinitions();
         return fixture;
     }
 
@@ -845,7 +1060,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         return built;
     }
 
-    private void ReopenPersistedDatabase()
+    internal void ReopenPersistedDatabase()
     {
         if (!_persistDatabase)
         {
@@ -903,27 +1118,6 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal void LoadProfileMaps()
     {
         _persistedStage = "LoadProfileMaps entered";
-        // The production transitive comparer indexes the package list by release.
-        foreach (FhirReleases.FhirSequenceCodes sequence in new[] { FhirReleases.FhirSequenceCodes.DSTU2, FhirReleases.FhirSequenceCodes.STU3 })
-        {
-            if (DbFhirPackage.SelectSingle(Connection, PackageId: sequence.ToCorePackageId()) is not null)
-            {
-                continue;
-            }
-
-            DbFhirPackage.Insert(Connection, new DbFhirPackage
-            {
-                Name = sequence.ToCorePackageId(),
-                PackageId = sequence.ToCorePackageId(),
-                PackageVersion = sequence.ToLongVersion(),
-                FhirVersionShort = sequence.ToShortVersion(),
-                CanonicalUrl = "http://hl7.org/fhir",
-                ShortName = sequence.ToRLiteral(),
-                Dependencies = null,
-                DefinitionFhirSequence = sequence,
-            });
-        }
-
         if (!Load())
         {
             throw new InvalidOperationException("The synthetic cross-version maps did not load.");
@@ -950,11 +1144,236 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         ReopenPersistedDatabase();
     }
 
-    internal static UnsafeCodeTestFixture CreateRepresentationInputs()
+    internal static UnsafeCodeTestFixture CreateRepresentationInputs(bool persistDatabase = false)
     {
-        UnsafeCodeTestFixture fixture = new();
+        UnsafeCodeTestFixture fixture = new(persistDatabase: persistDatabase, publishDefinitions: false);
         fixture.InsertRepresentationGraph(includeOtherCarriers: true);
+        fixture.PublishAuthoredDefinitions();
         return fixture;
+    }
+
+    internal static UnsafeCodeTestFixture CreateProcessingEligibilityInputs()
+    {
+        UnsafeCodeTestFixture fixture = new(initializeIndices: true, publishDefinitions: false, includeLegacyPackages: true);
+        Directory.Delete(Path.Combine(fixture.SourceRoot, "input"), recursive: true);
+        fixture.InsertRepresentationGraph(includeOtherCarriers: true);
+        string[] nativeTypes = ["Age", "Count", "Distance", "Duration", "Money"];
+        string[] passiveBases = ["Age", "Coding", "ValueSet", "Money"];
+        foreach (DbFhirPackage package in fixture.Packages)
+        {
+            DbStructureDefinition quantity = fixture.Structure(package, "Quantity");
+            foreach (string name in nativeTypes)
+            {
+                DbStructureDefinition native = fixture.AddStructure(package, name);
+                fixture.AddElement(native, name);
+                fixture.AddTypedElement(native, name + ".code", "code");
+                if (name != "Money")
+                {
+                    fixture.DeclareBaseDefinition(native, quantity);
+                }
+            }
+            fixture.AddTypedElement(fixture.Structure(package), "ValueSet.code", "code");
+
+            foreach (string name in passiveBases)
+            {
+                DbStructureDefinition basis = fixture.Structure(package, name);
+                DbStructureDefinition profile = fixture.AddStructure(package,
+                    name == "Money" ? "MoneyQuantity" : "Passive" + name, FhirArtifactClassEnum.Profile);
+                profile.Version = "profile-definition-7";
+                profile.VersionedUrl = profile.UnversionedUrl + "|" + profile.Version;
+                DbStructureDefinition.Update(fixture.Connection, [profile]);
+                fixture.DeclareProfile(profile, basis);
+                fixture.AddElement(profile, name);
+                fixture.AddTypedElement(profile, name + ".code", "code");
+            }
+
+            bool isProfile = package.DefinitionFhirSequence != FhirReleases.FhirSequenceCodes.R4B;
+            DbStructureDefinition simple = fixture.AddStructure(package, "SimpleQuantity",
+                isProfile ? FhirArtifactClassEnum.Profile : FhirArtifactClassEnum.ComplexType);
+            if (isProfile)
+            {
+                simple.Version = "quantity-definition-7";
+                simple.VersionedUrl = simple.UnversionedUrl + "|" + simple.Version;
+                DbStructureDefinition.Update(fixture.Connection, [simple]);
+                fixture.DeclareProfile(simple, quantity);
+            }
+            else
+            {
+                fixture.DeclareBaseDefinition(simple, quantity);
+            }
+            string rootId = isProfile ? "Quantity:simplequantity" : "SimpleQuantity";
+            fixture.AddElement(simple, rootId);
+            DbElement code = fixture.AddTypedElement(simple, rootId + ".code", "code");
+            if (isProfile)
+            {
+                DbElement root = DbElement.SelectSingle(fixture.Connection, StructureKey: simple.Key, ResourceFieldOrder: 0)!;
+                root.Path = "Quantity";
+                code.Path = "Quantity.code";
+                DbElement.Update(fixture.Connection, [root, code]);
+            }
+        }
+        fixture.PublishAuthoredDefinitions();
+        return fixture;
+    }
+
+    internal void WriteOwnerElementMap(FhirPackageComparisonPair pair, DbStructureDefinition source,
+        DbStructureDefinition target, string name, bool fml = false, bool annotate = false)
+    {
+        DbElement sourceRoot = DbElement.SelectSingle(Connection, StructureKey: source.Key, ResourceFieldOrder: 0)!;
+        DbElement targetRoot = DbElement.SelectSingle(Connection, StructureKey: target.Key, ResourceFieldOrder: 0)!;
+        if (fml)
+        {
+            string directory = Path.Combine(SourceRoot, "input", pair.SourcePackageShortName + "to" + pair.TargetPackageShortName);
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, name + ".fml"), $$"""
+                /// url = "http://example.org/StructureMap/{{name}}"
+                /// name = "{{name}}"
+                uses "{{source.VersionedUrl}}" alias SourceOwner as source
+                uses "{{target.VersionedUrl}}" alias TargetOwner as target
+                group {{name}}(source src : SourceOwner, target tgt : TargetOwner) {
+                  src.code -> tgt.code;
+                }
+                """);
+            return;
+        }
+
+        ConceptMap map = new()
+        {
+            Id = name, Url = "http://example.org/ConceptMap/" + name, Status = PublicationStatus.Active,
+            Group = [new()
+            {
+                Source = source.VersionedUrl, Target = target.VersionedUrl,
+                Element = [new()
+                {
+                    Code = sourceRoot.Id + ".code",
+                    Target = [new()
+                    {
+                        Code = targetRoot.Id + ".code", Relationship = ConceptMap.ConceptMapRelationship.Equivalent,
+                        Property = annotate ? [new() { Code = UnsafeCodeConstants.PropertyCode, Value = new FhirBoolean(true) }] : [],
+                    }],
+                }],
+            }],
+        };
+        if (annotate)
+        {
+            map.Property = [new()
+            {
+                Code = UnsafeCodeConstants.PropertyCode, System = UnsafeCodeConstants.PropertySystem,
+                Type = ConceptMap.ConceptMapPropertyType.Boolean,
+            }];
+        }
+        string direction = pair.SourcePackageShortName[1..] + "to" + pair.TargetPackageShortName[1..];
+        WriteInputMap(map, "elements", "ConceptMap-elements-" + name + "-" + direction + ".json");
+    }
+
+    internal void WriteProcessingTypeMaps()
+    {
+        WriteInputMap(new ConceptMap
+        {
+            Id = "processing-fallback", Url = "http://example.org/ConceptMap/processing-fallback", Status = PublicationStatus.Active,
+            Group = [new()
+            {
+                Source = "http://hl7.org/fhir/fhir-types", Target = "http://hl7.org/fhir/fhir-types",
+                Element = [.. DbStructureDefinition.SelectList(Connection, FhirPackageKey: Packages[2].Key)
+                    .Select(owner => new ConceptMap.SourceElementComponent
+                    {
+                        Code = owner.Id,
+                        Target = [new()
+                        {
+                            Code = owner.Id,
+                            Relationship = owner.Id == "SimpleQuantity" ? ConceptMap.ConceptMapRelationship.NotRelatedTo
+                                : ConceptMap.ConceptMapRelationship.Equivalent,
+                            Comment = "Authored fallback authority",
+                        }],
+                    })],
+            }],
+        }, "types", "ConceptMap-types-fallback.json");
+        (int Source, int Target)[] neighbors = [(2, 1), (1, 2), (1, 0), (0, 1)];
+        foreach ((int source, int target) in neighbors)
+        {
+            string direction = Packages[source].ShortName[1..] + "to" + Packages[target].ShortName[1..];
+            WriteInputMap(new ConceptMap
+            {
+                Id = "quantity-" + direction, Url = "http://example.org/ConceptMap/quantity-" + direction, Status = PublicationStatus.Active,
+                Group = [new()
+                {
+                    Source = "http://hl7.org/fhir/" + Packages[source].FhirVersionShort + "/data-types",
+                    Target = "http://hl7.org/fhir/" + Packages[target].FhirVersionShort + "/data-types",
+                    Element = [new()
+                    {
+                        Code = "SimpleQuantity",
+                        Target = [new()
+                        {
+                            Code = "SimpleQuantity", Relationship = ConceptMap.ConceptMapRelationship.Equivalent,
+                            Comment = "Authored primary Quantity authority",
+                        }],
+                    }],
+                }],
+            }, "types", "ConceptMap-types-quantity-" + direction + ".json");
+        }
+    }
+
+    internal (FhirPackageComparisonPair Pair, DbStructureOutcome Owner, DbElement Source, DbElement Target)
+        AddOwnerProjectionAlternatives(int targetIndex, string alternatives, bool commonRestriction = false)
+    {
+        FhirPackageComparisonPair pair = PreparePair(2, targetIndex);
+        Dictionary<int, DbElement> uses = [];
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            DbStructureDefinition coding = Structure(package, "Coding");
+            foreach (DbElement child in DbElement.SelectList(Connection, StructureKey: coding.Key).Where(element => element.Id.Contains('.')))
+            {
+                child.MinCardinality = 0;
+                DbElement.Update(Connection, [child]);
+            }
+            DbStructureDefinition resource = AddStructure(package, "Parameters", FhirArtifactClassEnum.Resource);
+            AddElement(resource, "Parameters");
+            AddTypedElement(resource, "Parameters.parameter", "BackboneElement");
+            DbElement use = AddElement(resource, MixedChoiceElement, "Coding");
+            use.IsChoiceType = true;
+            DbElement.Update(Connection, [use]);
+            uses.Add(package.Key, use);
+            if (package.Key == pair.TargetPackageKey)
+            {
+                AddType(use, "Coding", coding);
+                continue;
+            }
+            List<string> profiles = [];
+            foreach (string name in new[] { "AlternativeCodingA", "AlternativeCodingB" })
+            {
+                if (name == "AlternativeCodingA" && alternatives is "unprofiled-type" or "other-type")
+                {
+                    string type = alternatives == "other-type" ? "CodeableConcept" : "Coding";
+                    AddType(use, type, Structure(package, type));
+                    continue;
+                }
+                DbStructureDefinition profile = AddStructure(package, name, FhirArtifactClassEnum.Profile);
+                DeclareProfile(profile, coding);
+                AddElement(profile, "Coding");
+                DbElement code = AddTypedElement(profile, "Coding.code", "code");
+                code.MinCardinality = 0;
+                DbElement.Update(Connection, [code]);
+                if (commonRestriction || name == "AlternativeCodingB")
+                {
+                    ConfigureDefinition(profile, definition =>
+                        definition.Snapshot.Element.Single(element => element.Path == "Coding.code").Fixed = new Hl7.Fhir.Model.Code("selected"));
+                }
+                AddType(use, "Coding", coding, profile);
+                profiles.Add(profile.VersionedUrl);
+            }
+            if (alternatives == "profiles")
+            {
+                ConfigureDefinition(resource, definition =>
+                    definition.Snapshot.Element.Single(element => element.ElementId == use.Id).Type =
+                        [new() { Code = "Coding", Profile = profiles }]);
+            }
+        }
+        DbElement source = uses[pair.SourcePackageKey];
+        DbElement target = uses[pair.TargetPackageKey];
+        DbStructureOutcome owner = AddOutcome(pair, Structure(pair.SourcePackage, "Parameters"), Structure(pair.TargetPackage, "Parameters"));
+        Connect(pair, owner, source, target);
+        CompleteAuthoredArrangement(pair);
+        return (pair, owner, source, target);
     }
 
     private void InsertRepresentationGraph(bool includeOtherCarriers)
@@ -1007,7 +1426,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     {
         ArgumentOutOfRangeException.ThrowIfNegative(targetIndex);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(targetIndex, 1);
-        UnsafeCodeTestFixture fixture = new(initializeIndices: true, persistDatabase: true);
+        UnsafeCodeTestFixture fixture = new(initializeIndices: true, persistDatabase: true, publishDefinitions: false, includeLegacyPackages: true);
         fixture.InsertRepresentationGraph(includeOtherCarriers: false);
         if (includeLocalContexts)
         {
@@ -1162,6 +1581,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             fixture.WriteConfiguration("""[{"system":"urn:example:source","code":"unsafe"}]""");
         }
 
+        fixture.PublishAuthoredDefinitions();
         return fixture;
     }
 
@@ -1325,6 +1745,11 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
                 {
                     continue;
                 }
+                if (TryNormalizeInventoryValue(table, column, value, out object? inventoryValue))
+                {
+                    normalized[column] = inventoryValue;
+                    continue;
+                }
 
                 string? reference = references[table].GetValueOrDefault(column);
                 reference ??= column switch
@@ -1367,6 +1792,36 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         }
 
         string Identity(string table, long key) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Normalize(table, key))));
+    }
+
+    private bool TryNormalizeInventoryValue(string table, string column, object? value, out object? normalized)
+    {
+        normalized = value;
+        if (table == DbProfileMapOwnerFacts.DefaultTableName && column == nameof(DbProfileMapOwnerFacts.InputSnapshotId))
+        {
+            normalized = Equals(value, InputState.SnapshotId) ? "input-snapshot" : value;
+            return true;
+        }
+        if (table != DbDefinitionInventoryState.DefaultTableName)
+        {
+            return false;
+        }
+
+        DbDefinitionInventoryState inventory = DefinitionInventoryStore.ReadState(Connection)!;
+        if (column is nameof(DbDefinitionInventoryState.StartedRevision) or nameof(DbDefinitionInventoryState.CompletedRevision))
+        {
+            normalized = Equals(value, inventory.StartedRevision) ? "inventory-revision" : value;
+            return true;
+        }
+        if (column is nameof(DbDefinitionInventoryState.PendingMapInventoryBindingsJson) or nameof(DbDefinitionInventoryState.CompletedMapInventoryBindingsJson))
+        {
+            Dictionary<string, string> bindings = JsonSerializer.Deserialize<Dictionary<string, string>>((string)value!)!;
+            normalized = new SortedDictionary<string, string>(bindings.ToDictionary(
+                binding => binding.Key == InputState.SnapshotId ? "input-snapshot" : binding.Key,
+                binding => binding.Value == inventory.StartedRevision ? "inventory-revision" : binding.Value), StringComparer.Ordinal);
+            return true;
+        }
+        return false;
     }
 
     internal DbElement AddTypedElement(DbStructureDefinition structure, string id, string type)
@@ -1437,6 +1892,15 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         return outcome;
     }
 
+    internal DbValueSetOutcome AddVocabularyMapOutcome(FhirPackageComparisonPair pair, string name)
+    {
+        DbValueSet source = SetBinding(pair.SourcePackage);
+        DbValueSet target = SetBinding(pair.TargetPackage);
+        TestValueSetOutcome outcome = new(pair, source, target, name);
+        outcome.Key = DbValueSetOutcome.Insert(Connection, outcome);
+        return outcome;
+    }
+
     internal void WriteConfiguration(string json)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(ConfigurationFilename)!);
@@ -1448,6 +1912,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal void Capture(ConceptMap map, string category = "elements")
     {
+        UnsafeCodeInputStore.BeginInputs(Connection, "fixture", null);
         UnsafeCodeSourceReader.Capture(Connection, map, category, Path.Combine(SourceRoot, "test.json"), "input/test.json", Packages[2].Key, Packages[0].Key);
     }
 
@@ -1466,13 +1931,18 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     {
         foreach (DbFhirPackage package in Packages)
         {
-            TestElement row = new(package, DbStructureDefinition.SelectSingle(Connection, FhirPackageKey: package.Key, Id: "ValueSet")!.Key, FilterElement);
-            DbElement.Insert(Connection, row);
+            DbStructureDefinition owner = Structure(package);
+            AddElement(owner, "ValueSet.compose", "BackboneElement");
+            AddElement(owner, "ValueSet.compose.include", "BackboneElement");
+            AddElement(owner, "ValueSet.compose.include.filter", "BackboneElement");
+            AddElement(owner, FilterElement, "code", FilterValueSet);
         }
+        PublishAuthoredDefinitions();
     }
 
     internal FhirPackageComparisonPair PreparePair(int source = 2, int target = 0)
     {
+        PublishAuthoredDefinitions();
         UnsafeCodeInputStore.ReplaceWithEmptyInputs(Connection, Packages);
         DbComparisonClasses.CreateTables(Connection);
         DbOutcomeClasses.CreateTables(Connection, forValueSets: false);
@@ -1517,6 +1987,11 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal DbStructureDefinition AddStructure(DbFhirPackage package, string id, FhirArtifactClassEnum artifactClass = FhirArtifactClassEnum.ComplexType)
     {
+        DbStructureDefinition? existing = DbStructureDefinition.SelectSingle(Connection, FhirPackageKey: package.Key, Id: id);
+        if (existing is not null)
+        {
+            return existing;
+        }
         TestStructure row = new(package)
         {
             Id = id,
@@ -1526,6 +2001,12 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             VersionedUrl = "http://example.org/StructureDefinition/" + id + "|" + package.PackageVersion,
         };
         row.Key = DbStructureDefinition.Insert(Connection, row);
+        if (artifactClass != FhirArtifactClassEnum.Profile)
+        {
+            _authoredDefinitions.Add(row.Key, (id, artifactClass == FhirArtifactClassEnum.Resource
+                ? StructureDefinition.StructureDefinitionKind.Resource : artifactClass == FhirArtifactClassEnum.PrimitiveType
+                    ? StructureDefinition.StructureDefinitionKind.PrimitiveType : StructureDefinition.StructureDefinitionKind.ComplexType, null));
+        }
         return row;
     }
 
@@ -1535,7 +2016,16 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     internal DbElement AddElement(DbStructureDefinition structure, string id, string type = "", string? binding = null, BindingStrength strength = BindingStrength.Required)
     {
         DbFhirPackage package = Packages.Single(package => package.Key == structure.FhirPackageKey);
+        foreach (string name in type.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            AuthorNativeType(package, name);
+        }
         List<DbElement> siblings = DbElement.SelectList(Connection, StructureKey: structure.Key);
+        DbElement? existing = siblings.SingleOrDefault(element => element.Id == id);
+        if (existing is not null)
+        {
+            return existing;
+        }
         int separator = id.LastIndexOf('.');
         TestElement row = new(package, structure.Key, id)
         {
@@ -1556,6 +2046,40 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         }
 
         return row;
+    }
+
+    private void AuthorNativeType(DbFhirPackage package, string name)
+    {
+        if (DbStructureDefinition.SelectSingle(Connection, FhirPackageKey: package.Key, Id: name) is not null)
+        {
+            return;
+        }
+
+        if (name is not ("boolean" or "code" or "string" or "uri" or "decimal" or "Coding" or
+            "Reference" or "Quantity" or "Age" or "BackboneElement"))
+        {
+            return;
+        }
+
+        bool primitive = name is "boolean" or "code" or "string" or "uri" or "decimal";
+        DbStructureDefinition owner = AddStructure(package, name,
+            primitive ? FhirArtifactClassEnum.PrimitiveType : FhirArtifactClassEnum.ComplexType);
+        AddElement(owner, name);
+        if (primitive || name is "Reference" or "BackboneElement")
+        {
+            return;
+        }
+        AddElement(owner, name + ".system", "uri");
+        AddElement(owner, name + ".code", "code");
+        if (name == "Coding")
+        {
+            AddElement(owner, "Coding.version", "string");
+        }
+        if (name == "Age")
+        {
+            AuthorNativeType(package, "Quantity");
+            DeclareBaseDefinition(owner, Structure(package, "Quantity"));
+        }
     }
 
     internal void AddType(DbElement element, string typeName, DbStructureDefinition type, DbStructureDefinition? profile = null)
@@ -1584,6 +2108,33 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
         return row;
     }
 
+    internal DbValueSet BindRequired(DbElement element, string id, string version = "binding-1")
+    {
+        DbFhirPackage package = Packages.Single(package => package.Key == element.FhirPackageKey);
+        DbValueSet binding = AuthorBinding(package, id, version);
+        element.BindingValueSet = binding.VersionedUrl;
+        element.BindingValueSetKey = binding.Key;
+        DbElement.Update(Connection, [element]);
+        return binding;
+    }
+
+    internal DbValueSet AuthorBinding(DbFhirPackage package, string id, string version = "binding-1")
+    {
+        string url = "http://example.org/ValueSet/" + id;
+        DbValueSet? binding = DbValueSet.SelectSingle(Connection, FhirPackageKey: package.Key, UnversionedUrl: url, Version: version);
+        if (binding is null)
+        {
+            binding = new TestValueSet(package)
+            {
+                Id = id, Name = id.Replace("-", "", StringComparison.Ordinal), Version = version,
+                UnversionedUrl = url, VersionedUrl = url + "|" + version,
+                Compose = new() { Include = [new() { System = "urn:example:profile-values", Concept = [new() { Code = "selected" }] }] },
+            };
+            binding.Key = DbValueSet.Insert(Connection, binding);
+        }
+        return binding;
+    }
+
     internal DbStructureOutcome AddOutcome(FhirPackageComparisonPair pair, DbStructureDefinition source, DbStructureDefinition? target = null)
     {
         TestStructureOutcome row = new(pair, source, target);
@@ -1609,7 +2160,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
 
     internal void AddAnnotation(FhirPackageComparisonPair pair, DbElement source, DbElement target)
     {
-        DbUnsafeCodeElementAnnotation.Insert(Connection, new DbUnsafeCodeElementAnnotation
+        DbUnsafeCodeElementAnnotation annotation = new()
         {
             SourceFhirPackageKey = pair.SourcePackageKey,
             TargetFhirPackageKey = pair.TargetPackageKey,
@@ -1618,9 +2169,39 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             RequiresOmittedMandatoryCode = true,
             SourceRelativeFilename = "input/elements/test.json",
             GroupIndex = 0,
-            SourceIndex = 0,
+            SourceIndex = DbUnsafeCodeElementAnnotation.SelectList(Connection).Count,
             TargetIndex = 0,
-        });
+        };
+        annotation.Key = DbUnsafeCodeElementAnnotation.Insert(Connection, annotation);
+        DbElementMapping[] mappings = [.. DbElementMapping.SelectList(Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey,
+            SourceElementKey: source.Key, TargetElementKey: target.Key)];
+        foreach (int? mappingKey in mappings.Length == 0 ? new int?[] { null } : mappings.Select(mapping => (int?)mapping.Key))
+        {
+            DbProfileMapOwnerFacts.Insert(Connection, new DbProfileMapOwnerFacts
+            {
+                AnnotationKey = annotation.Key,
+                InputSnapshotId = InputState.SnapshotId,
+                SourceFhirPackageKey = pair.SourcePackageKey,
+                TargetFhirPackageKey = pair.TargetPackageKey,
+                SourceStructureKey = source.StructureKey,
+                TargetStructureKey = target.StructureKey,
+                SourceOwnerContext = source.Id,
+                TargetOwnerContext = target.Id,
+                GroupSourceCanonical = DbStructureDefinition.SelectSingle(Connection, Key: source.StructureKey)!.VersionedUrl,
+                GroupTargetCanonical = DbStructureDefinition.SelectSingle(Connection, Key: target.StructureKey)!.VersionedUrl,
+                GroupSourceVersion = DbStructureDefinition.SelectSingle(Connection, Key: source.StructureKey)!.Version,
+                GroupTargetVersion = DbStructureDefinition.SelectSingle(Connection, Key: target.StructureKey)!.Version,
+                ElementMappingKey = mappingKey,
+                ResolutionState = mappingKey is null ? ProfileMapOwnerResolution.Unnormalized : ProfileMapOwnerResolution.Resolved,
+                SourceElementId = source.Id,
+                TargetElementId = target.Id,
+                SourceRelativeFilename = annotation.SourceRelativeFilename,
+                GroupIndex = annotation.GroupIndex,
+                SourceIndex = annotation.SourceIndex,
+                TargetIndex = annotation.TargetIndex,
+            });
+        }
     }
 
     internal DbUnsafeCodeMapEvidence AddEvidence(FhirPackageComparisonPair pair, string code = "unsafe", string? sourceScope = FilterValueSet,
@@ -1651,6 +2232,15 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     {
         TestElementMapping mapping = new(pair, source, target);
         mapping.Key = DbElementMapping.Insert(Connection, mapping);
+        foreach (DbProfileMapOwnerFacts owner in DbProfileMapOwnerFacts.SelectList(Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey,
+            SourceStructureKey: source.StructureKey, TargetStructureKey: target.StructureKey,
+            SourceElementId: source.Id, TargetElementId: target.Id, ResolutionState: ProfileMapOwnerResolution.Unnormalized))
+        {
+            owner.ElementMappingKey = mapping.Key;
+            owner.ResolutionState = ProfileMapOwnerResolution.Resolved;
+            DbProfileMapOwnerFacts.Update(Connection, owner);
+        }
         TestElementComparison comparison = new(pair, source, target) { ElementMappingKey = mapping.Key };
         comparison.Key = DbElementComparison.Insert(Connection, comparison);
         DbElementOutcome elementOutcome = existing ?? new TestElementOutcome(pair, source);
@@ -1659,6 +2249,37 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             elementOutcome.Key = DbElementOutcome.Insert(Connection, elementOutcome);
         }
         DbElementOutcomeTarget.Insert(Connection, new TestElementTarget(pair, outcome, elementOutcome, comparison, target));
+    }
+
+    private sealed class TestValueSetOutcome : DbValueSetOutcome
+    {
+        [SetsRequiredMembers]
+        internal TestValueSetOutcome(FhirPackageComparisonPair pair, DbValueSet source, DbValueSet target, string name)
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey;
+            TargetFhirPackageKey = pair.TargetPackageKey;
+            SourceFhirSequence = pair.SourceFhirSequence;
+            TargetFhirSequence = pair.TargetFhirSequence;
+            SourceValueSetKey = source.Key;
+            TargetValueSetKey = target.Key;
+            SourceId = source.Id;
+            SourceName = source.Name;
+            SourceVersion = source.Version;
+            SourceCanonicalVersioned = source.VersionedUrl;
+            SourceCanonicalUnversioned = source.UnversionedUrl;
+            TargetId = target.Id;
+            TargetName = target.Name;
+            TargetVersion = target.Version;
+            TargetCanonicalVersioned = target.VersionedUrl;
+            TargetCanonicalUnversioned = target.UnversionedUrl;
+            RequiresXVerDefinition = true;
+            ConceptMapLongId = "Map-vocabulary-collision";
+            ConceptMapShortId = ConceptMapLongId;
+            ConceptMapUrl = "http://example.org/ConceptMap/vocabulary-collision";
+            ConceptMapName = name;
+            ConceptMapFileName = "ConceptMap-vocabulary-collision";
+            Comments = "";
+        }
     }
 
     private sealed class TestStructureOutcome : DbStructureOutcome
@@ -1684,9 +2305,15 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
             TargetCanonicalUnversioned = target?.UnversionedUrl;
             TargetCanonicalVersioned = target?.VersionedUrl;
             GenShortId = "profile-" + source.Id;
+            GenLongId = GenShortId;
             GenName = "Profile" + source.Name;
             GenUrl = "http://example.org/StructureDefinition/profile-" + source.Id;
             GenFileName = "StructureDefinition-profile-" + source.Id;
+            ElementConceptMapLongId = "elements-" + source.Id;
+            ElementConceptMapShortId = ElementConceptMapLongId;
+            ElementConceptMapName = "Elements" + source.Name;
+            ElementConceptMapUrl = "http://example.org/ConceptMap/" + ElementConceptMapLongId;
+            ElementConceptMapFileName = "ConceptMap-" + ElementConceptMapLongId;
             Comments = "";
         }
     }
@@ -1770,6 +2397,7 @@ internal sealed class UnsafeCodeTestFixture : IDisposable
     {
         TestStructure row = new(package);
         row.Key = DbStructureDefinition.Insert(Connection, row);
+        _authoredDefinitions.Add(row.Key, ("ValueSet", StructureDefinition.StructureDefinitionKind.Resource, null));
     }
 
     private void InsertValueSet(DbFhirPackage package)

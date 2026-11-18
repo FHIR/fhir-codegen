@@ -682,19 +682,59 @@ public class IgExporter
 
     internal XVerExportTrackingRecord CreateInitialXVerIgs(ExportSchedule schedule, bool includeScripts = true)
     {
-        Directory.CreateDirectory(_outputPath);
+        XVerExportTrackingRecord tr = PrepareXVerIgs(schedule);
+        MaterializeXVerIgs(tr, includeScripts);
+        return tr;
+    }
+
+    internal XVerExportTrackingRecord PrepareXVerIgs(ExportSchedule schedule)
+    {
         XVerExportTrackingRecord tr = new();
         foreach (FhirPackageComparisonPair packagePair in schedule.PackagePairs)
         {
-            tr.XVerIgs.Add(createInitialXVerIg(packagePair, includeScripts));
+            tr.XVerIgs.Add(prepareXVerIg(packagePair));
         }
 
         foreach (DbFhirPackage package in schedule.ValidationPackages)
         {
-            tr.ValidationIgs.Add(createInitialValidationIg(package, includeScripts));
+            tr.ValidationIgs.Add(prepareValidationIg(package));
         }
 
         return tr;
+    }
+
+    internal void MaterializeXVerIgs(XVerExportTrackingRecord tr, bool includeScripts = true)
+    {
+        Directory.CreateDirectory(_outputPath);
+        foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
+        {
+            createXVerIgDirectories(igTr);
+            igTr.XVerSourcePageContentFiles = copyIgSourceContent(igTr.InputDir!, igTr.PageContentDir!);
+            if (includeScripts)
+            {
+                writeScriptFiles(igTr.IgRootDir!);
+            }
+
+            if (!string.IsNullOrEmpty(_crossVersionSourcePath))
+            {
+                string sourceFile = Path.Combine(_crossVersionSourcePath, "input", "ig-support", "gitignore.txt");
+                string targetFile = Path.Combine(igTr.IgRootDir!, ".gitignore");
+                if (File.Exists(sourceFile) && !File.Exists(targetFile))
+                {
+                    File.Copy(sourceFile, targetFile);
+                }
+            }
+        }
+
+        foreach (ValidationIgExportTrackingRecord vTr in tr.ValidationIgs)
+        {
+            createValidationIgDirectories(vTr);
+            vTr.XVerSourcePageContentFiles = copyIgSourceContent(vTr.InputDir!, vTr.PageContentDir!);
+            if (includeScripts)
+            {
+                writeScriptFiles(vTr.IgRootDir!);
+            }
+        }
     }
 
     public void FinalizeXVerIgs(XVerExportTrackingRecord tr)
@@ -1842,9 +1882,7 @@ public class IgExporter
     private static string getValidationPackageId(DbFhirPackage package) =>
         $"hl7.fhir.uv.xver.{package.ShortName.ToLowerInvariant()}";
 
-    private XVerIgExportTrackingRecord createInitialXVerIg(
-        FhirPackageComparisonPair packagePair,
-        bool includeScripts = true)
+    private XVerIgExportTrackingRecord prepareXVerIg(FhirPackageComparisonPair packagePair)
     {
         string packageId = getXVerPackageId(packagePair);
 
@@ -1870,36 +1908,21 @@ public class IgExporter
             Description = $"Extensions for Using Data Elements from FHIR {igTr.PackagePair.SourceFhirSequence} in FHIR {igTr.PackagePair.TargetFhirSequence}",
         };
 
-        _logger.LogInformation($"Creating XVer IG Directories, output path: {_outputPath}...");
-
-        createXVerIgDirectories(igTr);
-        igTr.XVerSourcePageContentFiles = copyIgSourceContent(igTr.InputDir!, igTr.PageContentDir!);
-
-        if (includeScripts &&
-            (igTr.IgRootDir is not null))
-        {
-            writeScriptFiles(igTr.IgRootDir);
-        }
-
-        // write a .gitignore file if there is not one there already
-        if (!string.IsNullOrEmpty(_crossVersionSourcePath) &&
-            (igTr.IgRootDir is not null))
-        {
-            string sourceFile = Path.Combine(_crossVersionSourcePath, "input", "ig-support", "gitignore.txt");
-            string targetFile = Path.Combine(igTr.IgRootDir, ".gitignore");
-            if (File.Exists(sourceFile) &&
-                !File.Exists(targetFile))
-            {
-                File.Copy(sourceFile, targetFile);
-            }
-        }
+        igTr.IgRootDir = Path.Combine(_outputPath, igTr.PackageId);
+        igTr.InputDir = Path.Combine(igTr.IgRootDir, "input");
+        igTr.IncludesDir = Path.Combine(igTr.InputDir, "includes");
+        igTr.PageContentDir = Path.Combine(igTr.InputDir, "pagecontent");
+        igTr.VocabularyDir = Path.Combine(igTr.InputDir, "vocabulary");
+        igTr.VocabMapDir = igTr.VocabularyDir;
+        igTr.ExtensionDir = Path.Combine(igTr.InputDir, "resources");
+        igTr.ProfileDir = igTr.ExtensionDir;
+        igTr.ResourceMapDir = igTr.ExtensionDir;
+        igTr.ElementMapDir = igTr.ExtensionDir;
 
         return igTr;
     }
 
-    private ValidationIgExportTrackingRecord createInitialValidationIg(
-        DbFhirPackage package,
-        bool includeScripts = true)
+    private ValidationIgExportTrackingRecord prepareValidationIg(DbFhirPackage package)
     {
         string packageId = getValidationPackageId(package);
 
@@ -1922,14 +1945,10 @@ public class IgExporter
             Description = $"Extensions for Using Data Elements from any FHIR version in FHIR {package.DefinitionFhirSequence}",
         };
 
-        createValidationIgDirectories(vTr);
-        vTr.XVerSourcePageContentFiles = copyIgSourceContent(vTr.InputDir!, vTr.PageContentDir!);
-
-        if (includeScripts &&
-            (vTr.IgRootDir is not null))
-        {
-            writeScriptFiles(vTr.IgRootDir);
-        }
+        vTr.IgRootDir = Path.Combine(_outputPath, vTr.PackageId);
+        vTr.InputDir = Path.Combine(vTr.IgRootDir, "input");
+        vTr.IncludesDir = Path.Combine(vTr.InputDir, "includes");
+        vTr.PageContentDir = Path.Combine(vTr.InputDir, "pagecontent");
 
         return vTr;
     }

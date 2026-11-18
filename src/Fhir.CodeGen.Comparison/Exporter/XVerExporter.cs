@@ -82,16 +82,26 @@ public class XVerExporter
             UnsafeCodeInputStore.RequireExportReady(_db, schedule.PackagePairs);
         }
 
-        IgExporter.XVerExportTrackingRecord tr = igExporter.CreateInitialXVerIgs(schedule, includeIgScripts);
+        IgExporter.XVerExportTrackingRecord tr = igExporter.PrepareXVerIgs(schedule);
+        VocabularyFhirExporter vocabularyExporter = new(this, _db, _loggerFactory);
+        IReadOnlyList<VocabularyFhirExporter.BuiltFile> vocabulary = processVocabulary ? vocabularyExporter.Build(tr) : [];
+        StructureFhirExporter? structureExporter = null;
+        List<(IgExporter.XVerIgExportTrackingRecord Tracking, StructureFhirExporter.BuiltDefinitions Definitions)> structures = [];
+        if (processStructures)
+        {
+            structureExporter = new(this, _db, _loggerFactory);
+            foreach (IgExporter.XVerIgExportTrackingRecord igTr in tr.XVerIgs)
+            {
+                structures.Add((igTr, structureExporter.BuildDefinitions(igTr)));
+            }
+        }
+
+        igExporter.MaterializeXVerIgs(tr, includeIgScripts);
 
         // export vocabulary (if requested)
         if (processVocabulary)
         {
-            VocabularyFhirExporter vocabularyExporter = new VocabularyFhirExporter(
-                this,
-                _db,
-                _loggerFactory);
-            vocabularyExporter.Export(tr);
+            vocabularyExporter.Emit(vocabulary);
 
             VocabularyPageExporter vocabularyPageExporter = new VocabularyPageExporter(
                 this,
@@ -101,13 +111,12 @@ public class XVerExporter
         }
 
         // export structures (if requested)
-        if (processStructures)
+        if (structureExporter is not null)
         {
-            StructureFhirExporter structureExporter = new StructureFhirExporter(
-                this,
-                _db,
-                _loggerFactory);
-            structureExporter.Export(tr);
+            foreach ((IgExporter.XVerIgExportTrackingRecord igTr, StructureFhirExporter.BuiltDefinitions definitions) in structures)
+            {
+                structureExporter.Emit(igTr, definitions);
+            }
 
             StructurePageExporter structurePageExporter = new StructurePageExporter(
                 this,

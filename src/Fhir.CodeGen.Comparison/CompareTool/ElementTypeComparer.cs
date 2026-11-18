@@ -27,6 +27,7 @@ public class ElementTypeComparer
     private ILogger _logger;
 
     private DbComparisonCache<DbElementTypeComparison> _elementTypeComparisonCache;
+    private XVerStructureCatalog? _catalog;
 
     public class ElementTypeComparisonTrackingRecord
     {
@@ -66,54 +67,20 @@ public class ElementTypeComparer
         DbElement? targetElement,
         int elementComparisonKey)
     {
-        // only do type comparisons if the elements do not have children
-        if ((sourceElement.ChildElementCount > 0) || (targetElement?.ChildElementCount > 0))
-        {
-            if (targetElement is null)
-            {
-                return createCollatedNoMap(
-                    packagePair,
-                    sourceElement,
-                    [],
-                    elementComparisonKey);
-            }
+        // get the source types
+        List<DbElementType> sourceTypes = EffectiveTypes(sourceElement);
 
-            return new()
+        // Native backbone relationships continue to be determined by their children.
+        // A constrained datatype occurrence must also account for its local restrictions.
+        if ((sourceElement.ChildElementCount > 0 || targetElement?.ChildElementCount > 0) &&
+            !NeedsProfileProof(sourceTypes) && (targetElement is null || !NeedsProfileProof(EffectiveTypes(targetElement))))
+        {
+            return targetElement is null ? createCollatedNoMap(packagePair, sourceElement, [], elementComparisonKey) : new()
             {
-                PackagePair = packagePair,
-                SourceElement = sourceElement,
-                TargetElement = targetElement,
-                TypeRelationship = null,
-                TypeMessage = null,
-                TargetProfileRelationship = null,
-                TargetProfileMessage = null,
-                ElementTypeComparsions = []
+                PackagePair = packagePair, SourceElement = sourceElement, TargetElement = targetElement,
+                ElementTypeComparsions = [],
             };
         }
-
-
-        DbElement typeSourceElement = sourceElement;
-
-        // check for a base element key
-        if ((sourceElement.BaseElementKey is not null) &&
-            (sourceElement.BaseElementKey != sourceElement.Key) &&
-            (DbElement.SelectSingle(_db, Key: sourceElement.BaseElementKey) is DbElement sourceBaseElement))
-        {
-            typeSourceElement = sourceBaseElement;
-        }
-
-        DbElement? typeTargetElement = targetElement;
-
-        // check for a base element key
-        if ((targetElement?.BaseElementKey is not null) &&
-            (targetElement.BaseElementKey != targetElement.Key) &&
-            (DbElement.SelectSingle(_db, Key: targetElement.BaseElementKey) is DbElement targetBaseElement))
-        {
-            typeTargetElement = targetBaseElement;
-        }
-
-        // get the source types
-        List<DbElementType> sourceTypes = DbElementType.SelectList(_db, ElementKey: typeSourceElement.Key);
 
         // if there is no target, these are all no-maps
         if (targetElement is null)
@@ -134,6 +101,26 @@ public class ElementTypeComparer
             elementComparisonKey);
     }
 
+    private List<DbElementType> EffectiveTypes(DbElement element)
+    {
+        _catalog ??= new(_db);
+        HashSet<int> visited = [];
+        DbElement? current = element;
+        while (current is not null && visited.Add(current.Key))
+        {
+            List<DbElementType> types = DbElementType.SelectList(_db, ElementKey: current.Key);
+            if (types.Count > 0)
+            {
+                return types;
+            }
+            current = _catalog.ResolveBaseElement(current, required: false);
+        }
+        return [];
+    }
+
+    private bool NeedsProfileProof(IEnumerable<DbElementType> types) => types.Any(type =>
+        type.TypeProfile is not null || type.TargetProfile is not null || _catalog!.IsQuantityFamily(_catalog.ResolveTypeUse(type)));
+
 
     private ElementTypeComparisonTrackingRecord doTypeComparison(
         FhirPackageComparisonPair packagePair,
@@ -143,7 +130,7 @@ public class ElementTypeComparer
         int elementComparisonKey)
     {
         // get the target types
-        List<DbElementType> targetTypes = DbElementType.SelectList(_db, ElementKey: targetElement.Key);
+        List<DbElementType> targetTypes = EffectiveTypes(targetElement);
         ILookup<int, DbElementType> targetTypesByStructureKey = targetTypes.ToLookup(et => et.StructureKey);
         ILookup<int?, DbElementType> targetTypesByTypeStructureKey = targetTypes.ToLookup(et => et.TypeStructureKey);
 
@@ -341,11 +328,82 @@ public class ElementTypeComparer
             return null;
         }
 
-        // if either is a quantity type or there are no profiles, do a simple comparison
-        bool isSimple = sourceType.IsQuantityType() ||
-            targetType.IsQuantityType() ||
-            ((sourceType.TargetProfile is null) && (sourceType.TypeProfile is null)) ||
-            ((targetType.TargetProfile is null) && (targetType.TypeProfile is null));
+        _catalog ??= new(_db);
+        DbStructureDefinition sourceDefinition = _catalog.ResolveTypeUse(sourceType);
+        DbStructureDefinition targetDefinition = _catalog.ResolveTypeUse(targetType);
+        bool constrained = sourceType.TypeProfile is not null || targetType.TypeProfile is not null ||
+            sourceType.TargetProfile is not null && _catalog.ResolveTypeUse(sourceType, targetProfile: true).ArtifactClass == FhirArtifactClassEnum.Profile ||
+            targetType.TargetProfile is not null && _catalog.ResolveTypeUse(targetType, targetProfile: true).ArtifactClass == FhirArtifactClassEnum.Profile ||
+            _catalog.IsQuantityFamily(sourceDefinition) || _catalog.IsQuantityFamily(targetDefinition);
+        if (constrained)
+        {
+            using ProfileUseFacts facts = new(_catalog, packagePair.SourcePackageKey, packagePair.TargetPackageKey);
+            EffectiveProfileUse sourceUse = facts.AtUse(sourceElement, sourceType);
+            EffectiveProfileUse targetUse = facts.AtUse(targetElement, targetType);
+            if (!sourceUse.Diagnostics.IsEmpty || !targetUse.Diagnostics.IsEmpty ||
+                sourceUse.Branches.IsEmpty || targetUse.Branches.IsEmpty)
+            {
+                throw new InvalidOperationException($"Unresolved constrained comparison {sourceElement.Id}->{targetElement.Id}, pair {packagePair.SourcePackageKey}->{packagePair.TargetPackageKey}: {string.Join("; ", sourceUse.Diagnostics.Concat(targetUse.Diagnostics))}");
+            }
+
+            List<ProfileRepresentationProof> decisions = [];
+            foreach (EffectiveProfileBranch branch in sourceUse.Branches.Where(branch =>
+                branch.Key.ProfileAlternative == sourceType.TypeProfile && branch.Key.TargetProfileAlternative == sourceType.TargetProfile))
+            {
+                ProfileRepresentationProof[] alternatives = [.. targetUse.Branches.Where(target =>
+                    target.Key.ProfileAlternative == targetType.TypeProfile && target.Key.TargetProfileAlternative == targetType.TargetProfile)
+                    .Select(target => facts.Prove(branch, target.Definition, nativeContext: target))];
+                if (alternatives.Any(proof => !proof.IsAcceptedDecision))
+                {
+                    throw new InvalidOperationException($"Unclassified constrained comparison {sourceElement.Id}->{targetElement.Id}: {string.Join("; ", alternatives.SelectMany(proof => proof.Diagnostics))}");
+                }
+                ProfileRepresentationProof? decision = alternatives.FirstOrDefault(proof => proof.PreservesRestrictions) ??
+                    alternatives.FirstOrDefault(proof => proof.IsAcceptedDecision);
+                if (decision is null)
+                {
+                    throw new InvalidOperationException($"Unresolved constrained comparison {sourceElement.Id}->{targetElement.Id}: {string.Join("; ", alternatives.SelectMany(proof => proof.Diagnostics))}");
+                }
+                decisions.Add(decision);
+            }
+
+            if (decisions.Count == 0)
+            {
+                throw new InvalidOperationException($"Missing effective alternative for {sourceElement.Id}, type {sourceType.Literal}.");
+            }
+            bool preserves = decisions.All(proof => proof.PreservesRestrictions);
+            DbElementTypeComparison constrainedComparison = new()
+            {
+                Key = DbElementTypeComparison.GetIndex(),
+                Steps = Math.Abs(packagePair.SourceFhirSequence - packagePair.TargetFhirSequence),
+                ElementComparisonKey = elementComparisonKey,
+                SourceFhirPackageKey = packagePair.SourcePackageKey,
+                SourceFhirSequence = packagePair.SourceFhirSequence,
+                SourceElementKey = sourceElement.Key,
+                SourceElementId = sourceElement.Id,
+                SourceElementTypeKey = sourceType.Key,
+                SourceTypeLiteral = sourceType.Literal,
+                TargetFhirPackageKey = packagePair.TargetPackageKey,
+                TargetFhirSequence = packagePair.TargetFhirSequence,
+                TargetElementKey = targetElement.Key,
+                TargetElementId = targetElement.Id,
+                TargetElementTypeKey = targetType.Key,
+                TargetTypeLiteral = targetType.Literal,
+                NotMapped = !preserves,
+                IsIdentical = false,
+                Relationship = preserves ? typeStructureMapping.Relationship : CMR.SourceIsBroaderThanTarget,
+                TechnicalMessage = ProfileUseFacts.SerializeDecisions(decisions),
+                UserMessage = typeStructureMapping.Comments,
+                TargetProfileRelationship = preserves ? typeStructureMapping.Relationship : null,
+                TargetProfileMessage = null,
+                TypeProfileRelationship = preserves ? typeStructureMapping.Relationship : null,
+                TypeProfileMessage = null,
+            };
+            _elementTypeComparisonCache.CacheAdd(constrainedComparison);
+            return constrainedComparison;
+        }
+
+        bool isSimple = sourceType.TypeProfile is null && sourceType.TargetProfile is null &&
+            targetType.TypeProfile is null && targetType.TargetProfile is null;
 
         // if there are no profiles, comparison is simple
         if (isSimple)

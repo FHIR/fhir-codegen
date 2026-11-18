@@ -67,6 +67,7 @@ public class StructureComparer
     private List<DbFhirPackage> _packages = [];
 
     private ElementComparer? _elementComparer = null;
+    private XVerStructureCatalog _catalog = null!;
 
     public StructureComparer(
         IDbConnection db,
@@ -86,6 +87,8 @@ public class StructureComparer
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
+        UnsafeCodeInputStore.RequireInputs(_db);
+        _catalog = new(_db, XVerProcessor._exclusionSet);
         // get the list of packages
         _packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
 
@@ -191,10 +194,8 @@ public class StructureComparer
 
         foreach (FhirArtifactClassEnum artifactClass in getOrderedArtifactClasses())
         {
-            List<DbStructureDefinition> sourceStructures = DbStructureDefinition.SelectList(
-                _db,
-                FhirPackageKey: sourcePackage.Key,
-                ArtifactClass: artifactClass);
+            List<DbStructureDefinition> sourceStructures = [.. _catalog.GetProcessedStructures(sourcePackage.Key)
+                .Where(owner => owner.ArtifactClass == artifactClass)];
             _logger.LogInformation($" <<< processing {sourcePackage.ShortName} {artifactClass}s, count: {sourceStructures.Count}");
 
             // iterate over each structure in the source package
@@ -489,6 +490,8 @@ public class StructureComparer
                 SourceFhirPackageKey: fromPackage.Key,
                 TargetFhirPackageKey: toPackage.Key,
                 SourceStructureKeyValues: currentStructureKeys);
+            currentComparisons.RemoveAll(comparison => !_catalog.IsProcessed(comparison.SourceStructureKey) ||
+                comparison.TargetStructureKey is int targetKey && !_catalog.IsProcessed(targetKey));
 
             // add our current records to our dictionary to reconcile later
             stepComparisons[step] = currentComparisons;
@@ -642,6 +645,10 @@ public class StructureComparer
 
             if (targetSd is not null)
             {
+                if (!_catalog.IsProcessed(targetSd))
+                {
+                    continue;
+                }
                 targetIds.Add(targetSd.Id);
                 targetUrls.Add(targetSd.UnversionedUrl);
                 if (!targetKeys.Add(targetSd.Key))
@@ -672,10 +679,8 @@ public class StructureComparer
         }
 
         // check if there is a structure in the target package with the same ID
-        DbStructureDefinition? possibleTargetSd = DbStructureDefinition.SelectSingle(
-            _db,
-            FhirPackageKey: targetPackage.Key,
-            Id: sourceSd.Id);
+        DbStructureDefinition? possibleTargetSd = _catalog.GetProcessedStructures(targetPackage.Key)
+            .SingleOrDefault(owner => owner.Id == sourceSd.Id);
         if ((possibleTargetSd is not null) &&
             targetKeys.Add(possibleTargetSd.Key))
         {
@@ -700,10 +705,8 @@ public class StructureComparer
         }
 
         // check if there is a structure in the target package with the same URL
-        possibleTargetSd = DbStructureDefinition.SelectSingle(
-            _db,
-            FhirPackageKey: targetPackage.Key,
-            UnversionedUrl: sourceSd.UnversionedUrl);
+        possibleTargetSd = _catalog.GetProcessedStructures(targetPackage.Key)
+            .SingleOrDefault(owner => owner.UnversionedUrl == sourceSd.UnversionedUrl);
         if ((possibleTargetSd is not null) &&
             targetKeys.Add(possibleTargetSd.Key))
         {
@@ -730,10 +733,8 @@ public class StructureComparer
         // if we have no targets, check for a matching name too
         if (trackingRecords.Count == 0)
         {
-            possibleTargetSd = DbStructureDefinition.SelectSingle(
-                _db,
-                FhirPackageKey: targetPackage.Key,
-                Name: sourceSd.Name);
+            possibleTargetSd = _catalog.GetProcessedStructures(targetPackage.Key)
+                .SingleOrDefault(owner => owner.Name == sourceSd.Name);
             if ((possibleTargetSd is not null) &&
                 targetKeys.Add(possibleTargetSd.Key))
             {
@@ -775,6 +776,11 @@ public class StructureComparer
                 if (inverseSourceSd is null)
                 {
                     throw new Exception($"Unable to resolve structure with key {inverseMapping.SourceStructureKey} for mapping {inverseMapping.Key}");
+                }
+
+                if (!_catalog.IsProcessed(inverseSourceSd))
+                {
+                    continue;
                 }
 
                 targetIds.Add(inverseSourceSd.Id);

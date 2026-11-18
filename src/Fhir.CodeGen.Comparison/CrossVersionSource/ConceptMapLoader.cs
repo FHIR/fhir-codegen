@@ -32,6 +32,7 @@ public class ConceptMapLoader
     private PackageLoader _loader;
 
     private List<DbFhirPackage> _packages = [];
+    private readonly XVerStructureCatalog _catalog;
 
     public ConceptMapLoader(
         MappingLoader mappingLoader,
@@ -49,6 +50,7 @@ public class ConceptMapLoader
         _db = db;
         _loader = loader;
         _packages = packages;
+        _catalog = new(db, XVerProcessor._exclusionSet);
     }
 
     public void LoadInternalTypeMaps(bool loadPrimitives = true, bool loadComplex = true)
@@ -247,16 +249,12 @@ public class ConceptMapLoader
             return [];
         }
 
-        List<DbStructureDefinition> sourceTypes = DbStructureDefinition.SelectList(
-            _db,
-            FhirPackageKey: sourcePackage.Key,
-            ArtifactClass: FhirArtifactClassEnum.ComplexType);
+        List<DbStructureDefinition> sourceTypes = [.. _catalog.GetProcessedStructures(sourcePackage.Key)
+            .Where(owner => owner.ArtifactClass is FhirArtifactClassEnum.ComplexType or FhirArtifactClassEnum.Profile)];
 
-        Dictionary<string, DbStructureDefinition> targetTypes = DbStructureDefinition.SelectList(
-            _db,
-            FhirPackageKey: targetPackage.Key,
-            ArtifactClass: FhirArtifactClassEnum.ComplexType)
-            .ToDictionary(sd => sd.Id, sd => sd);
+        Dictionary<string, DbStructureDefinition> targetTypes = _catalog.GetProcessedStructures(targetPackage.Key)
+            .Where(owner => owner.ArtifactClass is FhirArtifactClassEnum.ComplexType or FhirArtifactClassEnum.Profile)
+            .ToDictionary(owner => owner.Id);
 
         List<DbStructureMapping> toAdd = [];
 
@@ -475,9 +473,13 @@ public class ConceptMapLoader
                 continue;
             }
 
+            string sourceRelativeFilename = Path.GetRelativePath(basePath, filename);
+            int? elementSourceFileKey = sourceMapType == SourceMapTypeCodes.Elements
+                ? _mappingLoader.getOrCreateMappingSourceFileKey(filename, MappingLoader.SourceFileTypeCodes.ConceptMap, cm.Url)
+                : null;
             UnsafeCodeSourceReader.Capture(
-                _db, cm, relativePath, filename, Path.GetRelativePath(basePath, filename),
-                sourcePackage.Key, targetPackage.Key);
+                _db, cm, relativePath, filename, sourceRelativeFilename,
+                sourcePackage.Key, targetPackage.Key, elementSourceFileKey);
 
             // process the map
             switch (sourceMapType)
@@ -524,7 +526,9 @@ public class ConceptMapLoader
                             sourcePackage,
                             targetPackage,
                             cm,
-                            Path.GetFileName(filename));
+                            Path.GetFileName(filename),
+                            sourceRelativeFilename,
+                            elementSourceFileKey!.Value);
                         elementMapCount += addedMapCount;
                     }
                     break;
@@ -565,25 +569,35 @@ public class ConceptMapLoader
         DbFhirPackage sourcePackage,
         DbFhirPackage targetPackage,
         ConceptMap cm,
-        string conceptMapFilename)
+        string conceptMapFilename,
+        string sourceRelativeFilename,
+        int sourceFileKey)
     {
         List<DbElementMapping> elementMapsToAdd = [];
-
-        int sourceFileKey = _mappingLoader.getOrCreateMappingSourceFileKey(
-            conceptMapFilename,
-            MappingLoader.SourceFileTypeCodes.ConceptMap,
-            cm.Url);
+        DbUnsafeCodeInputState input = DbUnsafeCodeInputState.SelectSingle(_db, Key: 1)
+            ?? throw new InvalidOperationException("Element annotation association requires a started map-input snapshot.");
+        List<DbProfileMapOwnerFacts> annotationOwners = DbProfileMapOwnerFacts.SelectList(_db,
+            SourceFhirPackageKey: sourcePackage.Key, TargetFhirPackageKey: targetPackage.Key)
+            .Where(row => row.InputSnapshotId == input.SnapshotId && row.SourceRelativeFilename == sourceRelativeFilename &&
+                row.ConceptMapUrl == cm.Url && row.ConceptMapId == cm.Id).ToList();
+        if (annotationOwners.Any(row => row.MappingSourceFileKey != sourceFileKey || row.ElementMappingKey is not null) ||
+            annotationOwners.GroupBy(row => (row.GroupIndex, row.SourceIndex, row.TargetIndex)).Any(group => group.Count() > 1))
+        {
+            throw new InvalidDataException($"Ambiguous annotation association in '{sourceRelativeFilename}', ConceptMap '{cm.Url}' ({cm.Id}), input snapshot '{input.SnapshotId}'. Reload maps with unique file/position provenance.");
+        }
 
         // there *should* only be one group, but iterate just in case
         foreach (ConceptMap.GroupComponent group in cm.Group)
         {
             // ensure we are in a valid element grouping
-            if (!group.Source.EndsWith("element-names", StringComparison.Ordinal))
+            if (!group.Source.EndsWith("element-names", StringComparison.Ordinal) &&
+                _catalog.ResolveDefinition(sourcePackage.Key, group.Source, required: false) is null)
             {
                 throw new Exception($"Invalid source group: {group.Source} in map: {cm.Url} ({cm.Id})!");
             }
 
-            if (!group.Target.EndsWith("element-names", StringComparison.Ordinal))
+            if (!group.Target.EndsWith("element-names", StringComparison.Ordinal) &&
+                _catalog.ResolveDefinition(targetPackage.Key, group.Target, required: false) is null)
             {
                 throw new Exception($"Invalid target group: {group.Target} in map: {cm.Url} ({cm.Id})!");
             }
@@ -592,10 +606,13 @@ public class ConceptMapLoader
             foreach (ConceptMap.SourceElementComponent groupSourceElement in group.Element)
             {
                 // resolve the source element
-                DbElement? sourceElement = DbElement.SelectSingle(
-                    _db,
-                    FhirPackageKey: sourcePackage.Key,
-                    Id: groupSourceElement.Code);
+                DbStructureDefinition? sourceOwner = UnsafeCodeSourceReader.ResolveOwner(_catalog, sourcePackage.Key,
+                    group.Source, (cm.SourceScope as PrimitiveType)?.ObjectValue as string, groupSourceElement.Code);
+                if (sourceOwner is null || !_catalog.IsProcessed(sourceOwner))
+                {
+                    continue;
+                }
+                DbElement? sourceElement = _catalog.ResolveOwnedElement(sourceOwner, groupSourceElement.Code, required: false);
                 if (sourceElement is null)
                 {
                     _logger.LogWarning($"Invalid source element: `{groupSourceElement.Code}` in map: {cm.Url} ({cm.Id})!");
@@ -673,10 +690,13 @@ public class ConceptMapLoader
                 foreach (ConceptMap.TargetElementComponent elementTarget in groupSourceElement.Target)
                 {
                     // resolve the target type
-                    DbElement? targetElement = DbElement.SelectSingle(
-                        _db,
-                        FhirPackageKey: targetPackage.Key,
-                        Id: elementTarget.Code);
+                    DbStructureDefinition? targetOwner = UnsafeCodeSourceReader.ResolveOwner(_catalog, targetPackage.Key,
+                        group.Target, (cm.TargetScope as PrimitiveType)?.ObjectValue as string, elementTarget.Code);
+                    if (targetOwner is null || !_catalog.IsProcessed(targetOwner))
+                    {
+                        continue;
+                    }
+                    DbElement? targetElement = _catalog.ResolveOwnedElement(targetOwner, elementTarget.Code, required: false);
 
                     // see if there are maps we can apply this to
                     DbStructureMapping? relevantMap;
@@ -786,12 +806,27 @@ public class ConceptMapLoader
                     };
 
                     elementMapsToAdd.Add(mapRec);
+                    foreach (DbProfileMapOwnerFacts annotation in annotationOwners.Where(row =>
+                        row.GroupIndex == cm.Group.IndexOf(group) && row.SourceIndex == group.Element.IndexOf(groupSourceElement) &&
+                        row.TargetIndex == groupSourceElement.Target.IndexOf(elementTarget)))
+                    {
+                        if (annotation.SourceElementId != groupSourceElement.Code || annotation.TargetElementId != elementTarget.Code ||
+                            annotation.GroupSourceCanonical != group.Source || annotation.GroupTargetCanonical != group.Target)
+                        {
+                            throw new InvalidDataException($"Inconsistent annotation position in '{sourceRelativeFilename}', ConceptMap '{cm.Url}' ({cm.Id}), annotation {annotation.AnnotationKey}.");
+                        }
+                        annotation.SourceStructureKey = sourceOwner.Key;
+                        annotation.TargetStructureKey = targetOwner.Key;
+                        annotation.ElementMappingKey = mapRec.Key;
+                        annotation.ResolutionState = ProfileMapOwnerResolution.Resolved;
+                    }
                 }
             }
         }
 
         // insert into the database
         elementMapsToAdd.Insert(_db, ignoreDuplicates: true, insertPrimaryKey: true);
+        annotationOwners.Update(_db);
         //_logger.LogInformation($"Inserted {elementMapsToAdd.Count} Type Definition Map records");
 
         return elementMapsToAdd.Count;
@@ -933,6 +968,8 @@ public class ConceptMapLoader
         }
 
         // insert into the database
+        resourceMapsToAdd.RemoveAll(mapping => !_catalog.IsProcessed(mapping.SourceStructureKey) ||
+            mapping.TargetStructureKey is int targetKey && !_catalog.IsProcessed(targetKey));
         resourceMapsToAdd.Insert(_db, ignoreDuplicates: true, insertPrimaryKey: true);
         //_logger.LogInformation($"Inserted {elementMapsToAdd.Count} Type Definition Map records");
 
@@ -1379,6 +1416,8 @@ public class ConceptMapLoader
         }
 
         // insert into the database
+        typeDefinitionMapsToAdd.RemoveAll(mapping => !_catalog.IsProcessed(mapping.SourceStructureKey) ||
+            mapping.TargetStructureKey is int targetKey && !_catalog.IsProcessed(targetKey));
         typeDefinitionMapsToAdd.Insert(_db, ignoreDuplicates: true, insertPrimaryKey: true);
         //_logger.LogInformation($"Inserted {elementMapsToAdd.Count} Type Definition Map records");
 
@@ -1400,9 +1439,7 @@ public class ConceptMapLoader
         List<HashSet<string>> typesPerPackage = [];
         foreach (DbFhirPackage package in _packages)
         {
-            List<DbStructureDefinition> structures = DbStructureDefinition.SelectList(
-                _db,
-                FhirPackageKey: package.Key);
+            List<DbStructureDefinition> structures = [.. _catalog.GetProcessedStructures(package.Key)];
 
             HashSet<string> packageTypes = [];
 
@@ -1568,6 +1605,8 @@ public class ConceptMapLoader
         }
 
         // insert into the database
+        fallbackMappingsToAdd.RemoveAll(mapping => !_catalog.IsProcessed(mapping.SourceStructureKey) ||
+            mapping.TargetStructureKey is int targetKey && !_catalog.IsProcessed(targetKey));
         fallbackMappingsToAdd.Insert(_db, ignoreDuplicates: true, insertPrimaryKey: true);
         //_logger.LogInformation($"Inserted {elementMapsToAdd.Count} Type Definition Map records");
 

@@ -34,7 +34,11 @@ public class XVerDatabaseTests : IDisposable
         foreach (XVerProcessor processor in _processors)
         {
             ComparisonDatabase? database = GetDatabase(processor);
-            ((IDisposable?)database)?.Dispose();
+            if (database is not null)
+            {
+                SqliteConnection.ClearPool((SqliteConnection)database.DbConnection);
+                ((IDisposable)database).Dispose();
+            }
         }
 
         foreach (string dbFile in _dbFiles)
@@ -42,7 +46,18 @@ public class XVerDatabaseTests : IDisposable
             ClearDatabasePools(dbFile);
         }
 
-        Directory.Delete(_tempDir, recursive: true);
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                Directory.Delete(_tempDir, recursive: true);
+                break;
+            }
+            catch (IOException) when (attempt < 5)
+            {
+                Thread.Sleep(100);
+            }
+        }
         GC.SuppressFinalize(this);
     }
 
@@ -69,6 +84,9 @@ public class XVerDatabaseTests : IDisposable
             [CreateDefinitions()], Path.GetDirectoryName(dbFile)!, Path.GetFileName(dbFile), NullLoggerFactory.Instance))
         {
             seed.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+            using SqliteConnection connection = OpenConnection(dbFile, SqliteOpenMode.ReadWrite);
+            // This authored collection intentionally contains no definitions.
+            UnsafeCodeTestFixture.PublishAuthoredDefinitions(connection, []);
         }
 
         using (SqliteConnection connection = OpenConnection(dbFile, SqliteOpenMode.ReadWrite))
@@ -192,6 +210,31 @@ public class XVerDatabaseTests : IDisposable
     }
 
     [Fact]
+    public void NamedDatabaseReuseDoesNotRepairAnIncompleteDefinitionInventory()
+    {
+        string dbFile = GetDatabaseFile();
+        using (ComparisonDatabase seed = new(
+            [CreateDefinitions()], Path.GetDirectoryName(dbFile)!, Path.GetFileName(dbFile), NullLoggerFactory.Instance))
+        {
+            seed.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        }
+
+        string revision;
+        using (SqliteConnection connection = OpenConnection(dbFile, SqliteOpenMode.ReadWrite))
+        {
+            DbFhirPackage package = DbFhirPackage.SelectList(connection).ShouldHaveSingleItem();
+            revision = DefinitionInventoryStore.BeginInventory(connection, [new(package.Key, 0, 0, 0, 0, 0, 0, 0)]);
+        }
+
+        CreateProcessor(dbFile).LoadDatabase(false);
+        using SqliteConnection reopened = OpenConnection(dbFile, SqliteOpenMode.ReadOnly);
+        DbDefinitionInventoryState state = DefinitionInventoryStore.ReadState(reopened)!;
+        state.StartedRevision.ShouldBe(revision);
+        state.CompletedRevision.ShouldBeNull();
+        Should.Throw<InvalidOperationException>(() => DefinitionInventoryStore.RequireReady(reopened)).Message.ShouldContain("Reload");
+    }
+
+    [Fact]
     public void ForceCreateInitializesExistingEmptyNamedDatabase()
     {
         string dbFile = GetDatabaseFile();
@@ -252,6 +295,7 @@ public class XVerDatabaseTests : IDisposable
         {
             DataSource = dbFile,
             Mode = mode,
+            Pooling = false,
         }.ToString());
         connection.Open();
         return connection;

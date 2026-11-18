@@ -18,11 +18,12 @@ internal static class UnsafeCodeSourceReader
         string filename,
         string sourceRelativeFilename,
         int sourcePackageKey,
-        int targetPackageKey)
+        int targetPackageKey,
+        int? mappingSourceFileKey = null)
     {
         if (category == "elements")
         {
-            CaptureAnnotations(db, map, filename, sourceRelativeFilename, sourcePackageKey, targetPackageKey);
+            CaptureAnnotations(db, map, filename, sourceRelativeFilename, sourcePackageKey, targetPackageKey, mappingSourceFileKey);
         }
         else if (category == "codes")
         {
@@ -30,7 +31,8 @@ internal static class UnsafeCodeSourceReader
         }
     }
 
-    private static void CaptureAnnotations(IDbConnection db, ConceptMap map, string filename, string relativeFilename, int sourceKey, int targetKey)
+    private static void CaptureAnnotations(
+        IDbConnection db, ConceptMap map, string filename, string relativeFilename, int sourceKey, int targetKey, int? mappingSourceFileKey)
     {
         List<ConceptMap.PropertyComponent> declarations = map.Property
             .Where(property => property.Code == UnsafeCodeConstants.PropertyCode).ToList();
@@ -50,6 +52,7 @@ internal static class UnsafeCodeSourceReader
         }
 
         List<DbUnsafeCodeElementAnnotation> rows = [];
+        List<DbProfileMapOwnerFacts> owners = [];
         for (int groupIndex = 0; groupIndex < map.Group.Count; groupIndex++)
         {
             ConceptMap.GroupComponent group = map.Group[groupIndex];
@@ -87,11 +90,71 @@ internal static class UnsafeCodeSourceReader
                         SourceIndex = sourceIndex,
                         TargetIndex = targetIndex,
                     });
+                    DbUnsafeCodeInputState input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1)
+                        ?? throw new InvalidOperationException("Annotation capture requires a started map-input snapshot.");
+                    UnsafeCodeCanonical sourceCanonical = UnsafeCodeCanonical.Parse(group.Source);
+                    UnsafeCodeCanonical targetCanonical = UnsafeCodeCanonical.Parse(group.Target);
+                    owners.Add(new()
+                    {
+                        Key = DbProfileMapOwnerFacts.GetIndex(),
+                        AnnotationKey = rows[^1].Key,
+                        InputSnapshotId = input.SnapshotId,
+                        SourceFhirPackageKey = sourceKey,
+                        TargetFhirPackageKey = targetKey,
+                        GroupSourceCanonical = group.Source,
+                        GroupSourceVersion = sourceCanonical.Version,
+                        GroupTargetCanonical = group.Target,
+                        GroupTargetVersion = targetCanonical.Version,
+                        SourceOwnerContext = (map.SourceScope as PrimitiveType)?.ObjectValue as string,
+                        TargetOwnerContext = (map.TargetScope as PrimitiveType)?.ObjectValue as string,
+                        ResolutionState = ProfileMapOwnerResolution.Unresolved,
+                        SourceElementId = source.Code,
+                        TargetElementId = target.Code,
+                        MappingSourceFileKey = mappingSourceFileKey,
+                        SourceRelativeFilename = relativeFilename,
+                        ConceptMapId = map.Id,
+                        ConceptMapUrl = map.Url,
+                        GroupIndex = groupIndex,
+                        SourceIndex = sourceIndex,
+                        TargetIndex = targetIndex,
+                    });
                 }
             }
         }
 
         rows.Insert(db, insertPrimaryKey: true);
+        owners.Insert(db, insertPrimaryKey: true);
+    }
+
+    internal static DbStructureDefinition? ResolveOwner(
+        XVerStructureCatalog catalog, int packageKey, string? groupCanonical, string? scope, string elementId)
+    {
+        string? canonical = scope is not null && UnsafeCodeCanonical.Parse(scope).Url?.Contains("/StructureDefinition/", StringComparison.Ordinal) == true
+            ? scope : groupCanonical;
+        if (UnsafeCodeCanonical.Parse(canonical).Url?.EndsWith("/element-names", StringComparison.Ordinal) != true)
+        {
+            return catalog.ResolveDefinition(packageKey, canonical, required: false, context: elementId);
+        }
+
+        string nativeName = elementId.Split('.')[0];
+        return catalog.ResolveNativeType(packageKey, nativeName, required: false, context: elementId);
+    }
+
+    internal static void ResolveOwners(IDbConnection db)
+    {
+        XVerStructureCatalog catalog = new(db, XVer.XVerProcessor._exclusionSet);
+        List<DbProfileMapOwnerFacts> rows = DbProfileMapOwnerFacts.SelectList(db);
+        foreach (DbProfileMapOwnerFacts row in rows)
+        {
+            DbStructureDefinition? source = ResolveOwner(catalog, row.SourceFhirPackageKey, row.GroupSourceCanonical, row.SourceOwnerContext, row.SourceElementId);
+            DbStructureDefinition? target = ResolveOwner(catalog, row.TargetFhirPackageKey, row.GroupTargetCanonical, row.TargetOwnerContext, row.TargetElementId);
+            row.SourceStructureKey = source?.Key;
+            row.TargetStructureKey = target?.Key;
+            row.ResolutionState = source is null || target is null ? ProfileMapOwnerResolution.Unresolved :
+                !catalog.IsProcessed(source) || !catalog.IsProcessed(target) ? ProfileMapOwnerResolution.Passive :
+                row.ElementMappingKey is null ? ProfileMapOwnerResolution.Unnormalized : ProfileMapOwnerResolution.Resolved;
+        }
+        rows.Update(db);
     }
 
     private static void CaptureCodeEvidence(IDbConnection db, ConceptMap map, string relativeFilename, int sourceKey, int targetKey)

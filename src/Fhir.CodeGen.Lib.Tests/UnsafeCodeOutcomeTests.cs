@@ -21,6 +21,93 @@ namespace Fhir.CodeGen.Lib.Tests;
 
 public class UnsafeCodeOutcomeTests
 {
+    [Fact]
+    public void UnmatchedQuantityProfileNegativeRetainsSlicedRootAndOccurrenceOwnerSeparately()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true);
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        DbStructureDefinition? sourceProfile = null;
+        DbElement? sourceUse = null;
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            DbStructureDefinition quantity = fixture.Structure(package, "Quantity");
+            DbStructureDefinition profile = fixture.AddStructure(package, "RestrictedQ", FhirArtifactClassEnum.Profile);
+            fixture.DeclareProfile(profile, quantity);
+            DbElement root = fixture.AddElement(profile, package.Key == pair.SourcePackageKey ? "Quantity:simplequantity" : "Quantity");
+            root.Path = "Quantity";
+            DbElement.Update(fixture.Connection, root);
+            DbElement use = fixture.AddElement(fixture.Structure(package), "ValueSet.measure", "Quantity");
+            fixture.AddType(use, "Quantity", quantity, profile);
+            if (package.Key == pair.SourcePackageKey)
+            {
+                sourceProfile = profile;
+                sourceUse = use;
+                fixture.ConfigureDefinition(profile, definition => definition.Snapshot.Element[0].Constraint.Add(new()
+                {
+                    Key = "retained-opaque-invariant", Severity = ConstraintSeverity.Error,
+                    Expression = "code.exists()", Human = "An exact required source-only constraint.",
+                }));
+            }
+        }
+        fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        fixture.CompleteAuthoredArrangement(pair);
+        fixture.GenerateSafety(pair);
+        fixture.ReopenPersistedDatabase();
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        DbElementOutcome rootOutcome = DbElementOutcome.SelectList(fixture.Connection, SourceStructureKey: sourceProfile!.Key)
+            .ShouldHaveSingleItem();
+        rootOutcome.SourceId.ShouldBe("Quantity:simplequantity");
+        rootOutcome.GenUrl.ShouldBeNull();
+        rootOutcome.IsEquivalent.ShouldBeFalse();
+        PersistedProfileDecision rootDecision = ProfileUseFacts.ReadDecisions(rootOutcome.ExtensionProhibitionReason!).ShouldHaveSingleItem();
+        rootDecision.InputOwnerRoot!.ElementId.ShouldBe("Quantity:simplequantity");
+        rootDecision.SourceRoot.ElementId.ShouldBe("Quantity:simplequantity");
+        rootDecision.TargetRoot!.ElementId.ShouldBe("Quantity");
+        rootDecision.Input.TypeUseToken.ShouldBe(-1);
+        rootDecision.Input.SliceContext.ShouldBe("Quantity:simplequantity");
+        rootDecision.RequiredFacts[""].Invariants.ShouldContain(invariant => invariant.Expression == "code.exists()");
+        DbElementOutcome occurrence = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: sourceUse!.Key,
+            TargetFhirPackageKey: pair.TargetPackageKey)!;
+        PersistedProfileDecision useDecision = ProfileUseFacts.ReadDecisions(occurrence.ExtensionProhibitionReason!).ShouldHaveSingleItem();
+        useDecision.InputOwnerRoot!.ElementId.ShouldBe("ValueSet");
+        useDecision.SourceRoot.ElementId.ShouldBe("Quantity:simplequantity");
+        useDecision.Input.ProfileAlternative.ShouldBe(sourceProfile.VersionedUrl);
+        useDecision.Input.SliceContext.ShouldBe(".measure");
+        DbStructureOutcome.SelectList(fixture.Connection).ShouldAllBe(outcome => outcome.SourceStructureKey != sourceProfile.Key);
+        DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UnnormalizedAnnotationsRequireUniquePersistedAuthority(bool ambiguous)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        (DbStructureOutcome outcome, DbElement source, DbElement target) = BoundElements(fixture, pair);
+        fixture.AddAnnotation(pair, source, target);
+        if (ambiguous)
+        {
+            fixture.AddAnnotation(pair, source, target);
+        }
+        fixture.AddEvidence(pair, sourceVersion: "source-vs", targetVersion: "target-vs");
+        fixture.CompleteAuthoredArrangement(pair);
+        if (ambiguous)
+        {
+            Should.Throw<InvalidOperationException>(() => Generate(fixture, pair)).Message.ShouldContain("authority");
+            Triggers(fixture).ShouldBeEmpty();
+            fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
+        }
+        else
+        {
+            Generate(fixture, pair);
+            DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
+            trigger.StructureOutcomeKey.ShouldBe(outcome.Key);
+            JsonSerializer.Deserialize<int[]>(trigger.AnnotationKeysJson)!.ShouldHaveSingleItem()
+                .ShouldBe(DbProfileMapOwnerFacts.SelectList(fixture.Connection).ShouldHaveSingleItem().AnnotationKey);
+        }
+    }
+
     [Theory]
     [InlineData(0, true, false, false)]
     [InlineData(1, true, false, false)]
@@ -73,15 +160,12 @@ public class UnsafeCodeOutcomeTests
             SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
             .Where(outcome => outcome.SourceId is "Coding" or "SelectedCoding" or "UnmappedCoding")];
         outcomes.ShouldContain(outcome => outcome.SourceId == "Coding" && outcome.TargetId == "Coding");
-        if (sourceProfile)
-        {
-            outcomes.ShouldContain(outcome => outcome.SourceId == "SelectedCoding" && outcome.TargetId == (targetProfile ? "SelectedCoding" : "Coding"));
-            outcomes.ShouldContain(outcome => outcome.SourceId == "UnmappedCoding" && outcome.TargetStructureKey == null);
-        }
-        else
-        {
-            outcomes.ShouldContain(outcome => outcome.SourceId == "Coding" && outcome.TargetId == "SelectedCoding");
-        }
+        outcomes.ShouldHaveSingleItem();
+        DbStructureMapping.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey,
+            TargetFhirPackageKey: pair.TargetPackageKey).Where(mapping =>
+                DbStructureDefinition.SelectSingle(fixture.Connection, Key: mapping.SourceStructureKey)!.ArtifactClass == FhirArtifactClassEnum.Profile ||
+                mapping.TargetStructureKey is int targetKey &&
+                    DbStructureDefinition.SelectSingle(fixture.Connection, Key: targetKey)!.ArtifactClass == FhirArtifactClassEnum.Profile).ShouldBeEmpty();
 
         foreach (DbStructureOutcome outcome in outcomes)
         {
@@ -131,10 +215,12 @@ public class UnsafeCodeOutcomeTests
         fixture.LoadProfileMaps();
         FhirPackageComparisonPair pair = new(fixture.Packages[2], fixture.Packages[targetIndex]);
         fixture.CompareProfilePair(pair);
+        DbOutcomeClasses.CreateTables(fixture.Connection, forValueSets: false);
         DbStructureDefinition owner = fixture.Structure(source ? pair.SourcePackage : pair.TargetPackage, "Coding");
         fixture.AddDuplicateMixedChoiceRoot(owner);
-        ArgumentException failure = Should.Throw<ArgumentException>(() => fixture.GenerateProfileOutcomes(pair));
-        failure.Message.ShouldBe("An item with the same key has already been added. Key: " + owner.Key);
+        InvalidOperationException failure = Should.Throw<InvalidOperationException>(() => fixture.GenerateProfileOutcomes(pair));
+        failure.Message.ShouldContain("Definition inventory available element projection");
+        failure.Message.ShouldContain(owner.VersionedUrl);
         DbUnsafeCodePairState state = fixture.PairState(pair);
         state.ComparisonRevision.ShouldNotBeNull();
         state.OutcomeInputRevision.ShouldBeNull();
@@ -326,8 +412,8 @@ public class UnsafeCodeOutcomeTests
             }
         }
 
-        UnsafeCodeConstants.OutcomeFormatVersion.ShouldBe(1);
-        fixture.InputState.FormatVersion.ShouldBe(1);
+        UnsafeCodeConstants.OutcomeFormatVersion.ShouldBe(2);
+        fixture.InputState.FormatVersion.ShouldBe(2);
         using (SqliteCommand columns = fixture.Connection.CreateCommand())
         {
             columns.CommandText = "PRAGMA table_info(UnsafeCodeTriggers)";
@@ -699,6 +785,7 @@ public class UnsafeCodeOutcomeTests
             sharedEvidence.SourceSystem.Url.ShouldBeNull();
         }
 
+        fixture.CompleteAuthoredArrangement(pair);
         if (expected == "ambiguous")
         {
             InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Generate(fixture, pair));
@@ -784,6 +871,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddEvidence(pair, sourceVersion: "source-vs", targetVersion: "target-vs");
         fixture.Connect(pair, outcome, source, target);
 
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
         trigger.StructureOutcomeKey.ShouldBe(outcome.Key);
@@ -841,6 +929,7 @@ public class UnsafeCodeOutcomeTests
             annotations.Update(fixture.Connection);
         }
 
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldBeEmpty();
         AssertCompleted(fixture, pair);
@@ -858,6 +947,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddEvidence(pair);
         fixture.AddEvidence(pair, targetScope: "http://example.org/unrelated", noMap: false, relationship: ConceptMap.ConceptMapRelationship.Equivalent);
         fixture.AddEvidence(new(pair.TargetPackage, pair.SourcePackage), noMap: false, relationship: ConceptMap.ConceptMapRelationship.Equivalent);
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldHaveSingleItem();
 
@@ -878,6 +968,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddEvidence(pair);
         fixture.AddEvidence(pair, code: "other-code");
         fixture.AddRule(code: "other-code", excludedVersions: pair.TargetFhirSequence.ToLongVersion());
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldHaveSingleItem().Code.ShouldBe("unsafe");
     }
@@ -892,6 +983,7 @@ public class UnsafeCodeOutcomeTests
         DbElement unrelated = fixture.AddElement(fixture.Structure(pair.TargetPackage), "ValueSet.other", "code", UnsafeCodeTestFixture.FilterValueSet);
         fixture.AddAnnotation(pair, source, unrelated);
         fixture.AddEvidence(pair);
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldBeEmpty();
         AssertCompleted(fixture, pair);
@@ -906,6 +998,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddAnnotation(pair, source, target);
         fixture.AddEvidence(pair);
         DbElementMapping.SelectList(fixture.Connection).ShouldBeEmpty();
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldHaveSingleItem();
     }
@@ -922,6 +1015,7 @@ public class UnsafeCodeOutcomeTests
         DbElement.Update(fixture.Connection, [source]);
         fixture.AddAnnotation(pair, source, target);
         fixture.AddEvidence(pair);
+        fixture.CompleteAuthoredArrangement(pair);
         Should.Throw<InvalidOperationException>(() => Generate(fixture, pair)).Message.ShouldContain("ambiguous");
         fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
     }
@@ -963,6 +1057,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddAnnotation(pair, source, target);
         fixture.AddEvidence(pair, sourceVersion: "source-vs", targetVersion: "target-vs");
 
+        fixture.CompleteAuthoredArrangement(pair);
         InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Generate(fixture, pair));
         error.Message.ShouldContain("ambiguous");
         error.Message.ShouldContain(source.Id);
@@ -997,6 +1092,7 @@ public class UnsafeCodeOutcomeTests
             sourceVersion: !missingSource && versionMismatch ? "wrong" : "source-vs",
             targetVersion: missingSource && versionMismatch ? "wrong" : "target-vs");
 
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldBeEmpty();
         AssertCompleted(fixture, pair);
@@ -1018,6 +1114,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddRule(noMapOnly: true);
         fixture.AddEvidence(pair);
 
+        fixture.CompleteAuthoredArrangement(pair);
         Should.Throw<InvalidOperationException>(() => Generate(fixture, pair)).Message.ShouldContain("ambiguous");
         Triggers(fixture).ShouldBeEmpty();
         fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
@@ -1035,6 +1132,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddRule();
         fixture.AddEvidence(pair);
 
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldHaveSingleItem();
         AssertCompleted(fixture, pair);
@@ -1050,6 +1148,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddElement(resource, "ValueSet.op", "code");
         fixture.AddOutcome(pair, resource);
         fixture.AddRule(noMapOnly: true, excludedVersions: pair.TargetFhirSequence.ToLongVersion());
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldBeEmpty();
         AssertCompleted(fixture, pair);
@@ -1065,6 +1164,7 @@ public class UnsafeCodeOutcomeTests
         DbUnsafeCodeMapEvidence evidence = fixture.AddEvidence(pair);
         evidence.SourceSystem = null;
         DbUnsafeCodeMapEvidence.Update(fixture.Connection, [evidence]);
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldHaveSingleItem().System.ShouldBe(UnsafeCodeTestFixture.FilterSystem);
     }
@@ -1093,6 +1193,7 @@ public class UnsafeCodeOutcomeTests
         fixture.Connect(pair, fixture.AddOutcome(pair, concept, targetConcept), coding, targetCoding);
         fixture.AddAnnotation(pair, use, targetUse);
         fixture.AddEvidence(pair);
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
         trigger.SourceElementId.ShouldBe(use.Id);
@@ -1146,6 +1247,7 @@ public class UnsafeCodeOutcomeTests
         DbElement.Update(fixture.Connection, [scalar]);
         fixture.AddOutcome(pair, resource);
         fixture.AddRule(version: "v,1");
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldHaveSingleItem().SourceVersion.ShouldBe("v,1");
     }
@@ -1161,6 +1263,7 @@ public class UnsafeCodeOutcomeTests
         DbUnsafeCodeMapEvidence evidence = fixture.AddEvidence(pair, noMap: false, relationship: ConceptMap.ConceptMapRelationship.Equivalent);
         evidence.TargetSystem = "http://example.org/other-system";
         DbUnsafeCodeMapEvidence.Update(fixture.Connection, [evidence]);
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldHaveSingleItem();
     }
@@ -1179,6 +1282,7 @@ public class UnsafeCodeOutcomeTests
         codingBinding.VersionedUrl = codingBinding.UnversionedUrl + "|" + codingBinding.Version;
         codingBinding.Key = DbValueSet.Insert(fixture.Connection, codingBinding);
         fixture.AddElement(fixture.Structure(pair.SourcePackage), "ValueSet.otherCoding", "Coding", codingBinding.VersionedUrl);
+        fixture.CompleteAuthoredArrangement(pair);
         Should.Throw<InvalidOperationException>(() => Generate(fixture, pair)).Message.ShouldContain("ambiguous");
         fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
     }
@@ -1193,6 +1297,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddElement(resource, "ValueSet.concept", "CodeableConcept");
         fixture.AddOutcome(pair, resource);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         Should.Throw<InvalidOperationException>(() => Generate(fixture, pair)).Message.ShouldContain("type graph");
         fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
     }
@@ -1211,8 +1316,14 @@ public class UnsafeCodeOutcomeTests
         fixture.AddElement(resource, "ValueSet");
         DbElement use = fixture.AddElement(resource, "ValueSet.value", typeName);
         AddTypedGraph(fixture, pair.SourcePackage, use, typeName);
+        if (typeName is "Quantity" or "Age")
+        {
+            DbElement targetUse = fixture.AddElement(fixture.Structure(pair.TargetPackage), "ValueSet.value", typeName);
+            AddTypedGraph(fixture, pair.TargetPackage, targetUse, typeName);
+        }
         DbStructureOutcome outcome = fixture.AddOutcome(pair, resource);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
         trigger.StructureOutcomeKey.ShouldBe(outcome.Key);
@@ -1241,6 +1352,8 @@ public class UnsafeCodeOutcomeTests
         DbStructureDefinition resource = fixture.Structure(pair.SourcePackage);
         fixture.AddElement(resource, "ValueSet");
         DbElement quantity = fixture.AddElement(resource, "ValueSet.quantity", "Quantity");
+        DbElement targetQuantity = fixture.AddElement(fixture.Structure(pair.TargetPackage), "ValueSet.quantity", "Quantity");
+        AddTypedGraph(fixture, pair.TargetPackage, targetQuantity, "Quantity");
         DbStructureDefinition fields = resource;
         string prefix = quantity.Id;
         if (!inline)
@@ -1265,6 +1378,7 @@ public class UnsafeCodeOutcomeTests
         DbStructureOutcome outcome = fixture.AddOutcome(pair, resource);
         fixture.AddRule(system: comparatorSystem, code: "<");
 
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         List<DbUnsafeCodeTrigger> triggers = Triggers(fixture);
         triggers.Count.ShouldBe(2);
@@ -1306,6 +1420,7 @@ public class UnsafeCodeOutcomeTests
         }
 
         fixture.AddRule(version: scenario == "unknown-exact-version" ? "v1" : null);
+        fixture.CompleteAuthoredArrangement(pair);
         InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Generate(fixture, pair));
         error.Message.ShouldContain("ValueSet.op");
         error.Message.ShouldContain("ambiguous");
@@ -1321,6 +1436,7 @@ public class UnsafeCodeOutcomeTests
         BoundElements(fixture, pair, "v2");
         fixture.AddRule(version: "v1");
         fixture.AddRule(system: "http://example.org/other");
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldBeEmpty();
         AssertCompleted(fixture, pair);
@@ -1337,6 +1453,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddOutcome(pair, resource);
         fixture.AddRule();
         fixture.AddRule(version: "v,1", excludedVersions: pair.TargetFhirSequence.ToLongVersion());
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
         trigger.IsWildcardVersion.ShouldBeTrue();
@@ -1353,8 +1470,12 @@ public class UnsafeCodeOutcomeTests
         DbStructureDefinition basis = fixture.AddStructure(pair.SourcePackage, "BaseType");
         DbElement baseRoot = fixture.AddElement(basis, "BaseType");
         fixture.AddElement(basis, "BaseType.coding", "Coding");
+        DbStructureDefinition targetBasis = fixture.AddStructure(pair.TargetPackage, "BaseType");
+        fixture.AddElement(targetBasis, "BaseType");
+        fixture.AddElement(targetBasis, "BaseType.coding", "Coding");
         DbStructureDefinition profile = fixture.AddStructure(pair.SourcePackage, "ProfileType", FhirArtifactClassEnum.Profile);
-        DbElement profileRoot = fixture.AddElement(profile, "ProfileType");
+        fixture.DeclareProfile(profile, basis);
+        DbElement profileRoot = fixture.AddElement(profile, "BaseType");
         profileRoot.BaseElementKey = baseRoot.Key;
         DbElement.Update(fixture.Connection, [profileRoot]);
         DbStructureDefinition wrapper = fixture.AddStructure(pair.SourcePackage, "Wrapper");
@@ -1369,8 +1490,8 @@ public class UnsafeCodeOutcomeTests
 
         DbStructureOutcome owner = fixture.AddOutcome(pair, resource);
         fixture.AddOutcome(pair, basis);
-        fixture.AddOutcome(pair, profile);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         List<DbUnsafeCodeTrigger> triggers = Triggers(fixture);
         triggers.Count.ShouldBe(2);
@@ -1401,6 +1522,7 @@ public class UnsafeCodeOutcomeTests
         binding.Compose!.Include.Add(new() { ValueSet = [imported.VersionedUrl] });
         DbValueSet.Update(fixture.Connection, [binding]);
         fixture.AddEvidence(pair, sourceScope: imported.UnversionedUrl, sourceVersion: imported.Version);
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldBeEmpty();
         AssertCompleted(fixture, pair);
@@ -1415,16 +1537,29 @@ public class UnsafeCodeOutcomeTests
         fixture.AddElement(resource, "ValueSet");
         fixture.AddElement(resource, "ValueSet.coding", "Coding");
         DbStructureDefinition profile = fixture.AddStructure(pair.SourcePackage, "ValueSetProfile", FhirArtifactClassEnum.Profile);
-        DbElement root = fixture.AddElement(profile, profile.Id);
+        fixture.DeclareProfile(profile, resource);
+        DbElement root = fixture.AddElement(profile, "ValueSet");
         root.BaseStructureKey = resource.Key;
         DbElement.Update(fixture.Connection, [root]);
-        DbStructureOutcome owner = fixture.AddOutcome(pair, profile);
+        DbStructureDefinition parameters = fixture.AddStructure(pair.SourcePackage, "Parameters", FhirArtifactClassEnum.Resource);
+        fixture.AddElement(parameters, "Parameters");
+        DbElement use = fixture.AddElement(parameters, "Parameters.resource", "ValueSet");
+        fixture.AddType(use, "ValueSet", resource, profile);
+        fixture.AddOutcome(pair, parameters);
+        DbStructureOutcome owner = fixture.AddOutcome(pair, resource);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
+        XVerStructureCatalog catalog = new(fixture.Connection);
+        using ProfileUseFacts facts = new(catalog, pair.SourcePackageKey, pair.TargetPackageKey);
+        EffectiveProfileBranch branch = facts.AtUse(parameters, use, 0).Branches.ShouldHaveSingleItem();
+        branch.Definition.Key.ShouldBe(profile.Key);
+        branch.Elements[".coding"].Origins.ShouldContain(origin => origin.OwnerKey == resource.Key);
+        branch.Diagnostics.ShouldBeEmpty();
         Generate(fixture, pair);
         DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
         trigger.StructureOutcomeKey.ShouldBe(owner.Key);
-        trigger.SourcePathJson.ShouldContain("ValueSetProfile");
         trigger.SourcePathJson.ShouldContain("ValueSet.coding");
+        DbStructureOutcome.SelectList(fixture.Connection).ShouldNotContain(outcome => outcome.SourceStructureKey == profile.Key);
     }
 
     [Fact]
@@ -1447,6 +1582,7 @@ public class UnsafeCodeOutcomeTests
         DbElement.Update(fixture.Connection, [first, second]);
         fixture.AddOutcome(pair, resource);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         List<DbUnsafeCodeTrigger> triggers = Triggers(fixture);
         triggers.Count.ShouldBe(2);
@@ -1461,7 +1597,7 @@ public class UnsafeCodeOutcomeTests
         FhirPackageComparisonPair pair = fixture.PreparePair();
         DbStructureDefinition resource = fixture.Structure(pair.SourcePackage);
         fixture.AddElement(resource, "ValueSet");
-        DbElement block = fixture.AddElement(resource, "ValueSet.block");
+        DbElement block = fixture.AddElement(resource, "ValueSet.block", "BackboneElement");
         fixture.AddElement(resource, "ValueSet.block.coding", "Coding");
         DbElement repeat = fixture.AddElement(resource, "ValueSet.block.repeat");
         repeat.ContentReferenceSourceKey = block.Key;
@@ -1472,6 +1608,7 @@ public class UnsafeCodeOutcomeTests
         DbElement.Update(fixture.Connection, [repeat, reuse]);
         fixture.AddOutcome(pair, resource);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         List<DbUnsafeCodeTrigger> triggers = Triggers(fixture);
         triggers.Count.ShouldBeGreaterThanOrEqualTo(4);
@@ -1494,6 +1631,7 @@ public class UnsafeCodeOutcomeTests
         }
 
         fixture.AddElement(current, current.Id + ".coding", "Coding");
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         Triggers(fixture).ShouldContain(trigger => JsonSerializer.Deserialize<UnsafeCodePathStep[]>(trigger.SourcePathJson)!.Length > 70);
     }
@@ -1513,6 +1651,7 @@ public class UnsafeCodeOutcomeTests
         DbStructureOutcome owner = fixture.AddOutcome(pair, resource);
         DbStructureOutcome otherOwner = fixture.AddOutcome(pair, other);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         List<DbUnsafeCodeTrigger> triggers = Triggers(fixture);
         triggers.ShouldNotContain(trigger => trigger.StructureOutcomeKey == owner.Key);
@@ -1536,6 +1675,7 @@ public class UnsafeCodeOutcomeTests
         fixture.AddElement(resource, "ValueSet.coding", "Coding");
         fixture.AddOutcome(pair, resource);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         List<DbUnsafeCodeTrigger> triggers = Triggers(fixture);
         triggers.Count.ShouldBe(4);
@@ -1604,6 +1744,7 @@ public class UnsafeCodeOutcomeTests
         FhirPackageComparisonPair pair = fixture.PreparePair();
         BoundElements(fixture, pair);
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         Generate(fixture, pair);
         DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
         DbUnsafeCodePairState before = fixture.PairState(pair);
@@ -1676,9 +1817,13 @@ public class UnsafeCodeOutcomeTests
         fixture.PairState(pair).ComparisonRevision.ShouldNotBeNullOrEmpty();
         fixture.PairState(other).ComparisonRevision.ShouldBeNull();
         DbUnsafeCodeInputState.Delete(fixture.Connection);
-        new StructureComparer(fixture.Connection, NullLoggerFactory.Instance).CompareStructures(specificPairs: Pairs(pair));
+        string before = fixture.SafetyPersistenceSnapshot();
+        string comparisons = JsonSerializer.Serialize(DbStructureComparison.SelectList(fixture.Connection));
+        Should.Throw<InvalidOperationException>(() => new StructureComparer(fixture.Connection, NullLoggerFactory.Instance)
+            .CompareStructures(specificPairs: Pairs(pair))).Message.ShouldContain("inputs");
         DbUnsafeCodeInputState.SelectList(fixture.Connection).ShouldBeEmpty();
-        fixture.PairState(pair).ComparisonRevision.ShouldBeNull();
+        fixture.SafetyPersistenceSnapshot().ShouldBe(before);
+        JsonSerializer.Serialize(DbStructureComparison.SelectList(fixture.Connection)).ShouldBe(comparisons);
     }
 
     [Fact]
@@ -1704,7 +1849,8 @@ public class UnsafeCodeOutcomeTests
         using SqliteCommand command = fixture.Connection.CreateCommand();
         command.CommandText = "CREATE TRIGGER invalidate_input AFTER INSERT ON StructureComparisons BEGIN UPDATE UnsafeCodeInputState SET CompletedInputRevision = NULL; END";
         command.ExecuteNonQuery();
-        new StructureComparer(fixture.Connection, NullLoggerFactory.Instance).CompareStructures(specificPairs: Pairs(pair));
+        Should.Throw<InvalidOperationException>(() => new StructureComparer(fixture.Connection, NullLoggerFactory.Instance)
+            .CompareStructures(specificPairs: Pairs(pair))).Message.ShouldContain("inputs");
         DbStructureComparison.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey).ShouldNotBeEmpty();
         fixture.PairState(pair).ComparisonRevision.ShouldBeNull();
         fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
@@ -1758,6 +1904,7 @@ public class UnsafeCodeOutcomeTests
         }
 
         fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
         new StructureComparer(fixture.Connection, NullLoggerFactory.Instance).CompareStructures(specificPairs: Pairs(pair));
         new OutcomeGenerator(fixture.Connection, NullLoggerFactory.Instance).GenerateOutcomes(processValueSets: false, specificPairs: Pairs(pair));
         DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
@@ -1775,6 +1922,7 @@ public class UnsafeCodeOutcomeTests
         using SqliteCommand command = fixture.Connection.CreateCommand();
         command.CommandText = "CREATE TRIGGER fail_safety BEFORE INSERT ON UnsafeCodeTriggers BEGIN SELECT RAISE(FAIL, 'injected'); END";
         command.ExecuteNonQuery();
+        fixture.CompleteAuthoredArrangement(pair);
         Should.Throw<SqliteException>(() => Generate(fixture, pair)).Message.ShouldContain("injected");
         fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
         command.CommandText = "DROP TRIGGER fail_safety";

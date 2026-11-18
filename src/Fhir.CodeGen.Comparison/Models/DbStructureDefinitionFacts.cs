@@ -165,7 +165,7 @@ internal static class StructureDefinitionFactsStore
 internal static class DefinitionInventoryStore
 {
     internal const int FormatVersion = 1;
-    internal const int PolicyVersion = 1;
+    internal const int PolicyVersion = 2;
 
     internal static DbDefinitionInventoryState? ReadState(IDbConnection db)
     {
@@ -433,10 +433,54 @@ internal static class DefinitionInventoryStore
             ?? throw new InvalidOperationException("Definition inventory import was not started.");
         if (state.FormatVersion != FormatVersion || state.PolicyVersion != PolicyVersion || state.StartedRevision != revision)
         {
-            throw new InvalidOperationException($"Definition inventory '{revision}' is missing, incompatible, or stale.");
+            throw new InvalidOperationException($"Definition inventory '{revision}' is missing, incompatible, or stale. Reload the database, load maps, compare, generate outcomes, then export.");
         }
 
         return state;
+    }
+
+    internal static string RequireReady(IDbConnection db)
+    {
+        const string recovery = "Reload the database, load maps, compare, generate outcomes, then export.";
+        if (!TableExists(db, DbDefinitionInventoryState.DefaultTableName) ||
+            !TableExists(db, DbStructureDefinitionFacts.DefaultTableName))
+        {
+            throw new InvalidOperationException($"Definition catalog is missing or incompatible. {recovery}");
+        }
+
+        DbDefinitionInventoryState? state = ReadState(db);
+        if (state is null || state.FormatVersion != FormatVersion || state.PolicyVersion != PolicyVersion ||
+            string.IsNullOrEmpty(state.CompletedRevision) || state.CompletedRevision != state.StartedRevision)
+        {
+            throw new InvalidOperationException($"Definition catalog is incomplete, incompatible, or stale. {recovery}");
+        }
+
+        ValidateInventory(db, state);
+        return state.CompletedRevision;
+    }
+
+    internal static void RequireMapBinding(IDbConnection db, string snapshotId)
+    {
+        string revision = RequireReady(db);
+        DbDefinitionInventoryState state = RequireCompletedState(db, revision);
+        if (!ReadBindings(state.CompletedMapInventoryBindingsJson).TryGetValue(snapshotId, out string? bound) ||
+            bound != revision)
+        {
+            throw new InvalidOperationException("Map inputs are not bound to the completed definition catalog. Reload the database if incompatible, load maps, compare, generate outcomes, then export.");
+        }
+    }
+
+    internal static string RequirePendingMapBinding(IDbConnection db, string snapshotId)
+    {
+        string revision = RequireReady(db);
+        DbDefinitionInventoryState state = RequireCompletedState(db, revision);
+        if (!ReadBindings(state.PendingMapInventoryBindingsJson).TryGetValue(snapshotId, out string? bound) ||
+            bound != revision)
+        {
+            throw new InvalidOperationException("Definition inventory changed during map loading. Reload the database, load maps, compare, generate outcomes, then export.");
+        }
+
+        return revision;
     }
 
     private static DbDefinitionInventoryState RequireCompletedState(IDbConnection db, string revision)

@@ -10,6 +10,7 @@ extern alias stu3;
 using System.Collections.Immutable;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.FhirExtensions;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.Exporter;
@@ -37,6 +38,63 @@ public sealed class UnsafeCodeProfileCollection
 [Collection(UnsafeCodeProfileCollection.Name)]
 public class UnsafeCodeProfileTests
 {
+    [Fact]
+    public void PassiveProfileAlternativesRetainTheirOwnConstraintsAndExactNativeReferences()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        Dictionary<int, DbElement> uses = [];
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            DbStructureDefinition resource = fixture.Structure(package);
+            DbStructureDefinition coding = fixture.Structure(package, "Coding");
+            DbElement use = fixture.AddElement(resource, "ValueSet.selected", "Coding");
+            List<string> alternatives = [];
+            foreach (string code in new[] { "a", "b" })
+            {
+                DbStructureDefinition profile = fixture.AddStructure(package, "Coding-" + code, FhirArtifactClassEnum.Profile);
+                fixture.DeclareProfile(profile, coding);
+                fixture.AddElement(profile, "Coding");
+                fixture.AddTypedElement(profile, "Coding.code", "code");
+                fixture.ConfigureDefinition(profile, definition =>
+                    definition.Snapshot.Element.Single(element => element.Path == "Coding.code").Fixed = new Code(code));
+                fixture.AddType(use, "Coding", coding, profile);
+                alternatives.Add(profile.VersionedUrl);
+            }
+            fixture.ConfigureDefinition(resource, definition =>
+                definition.Snapshot.Element.Single(element => element.ElementId == use.Id).Type =
+                    [new() { Code = "Coding", Profile = alternatives }]);
+            uses.Add(package.Key, use);
+        }
+        fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElementOutcome outcome = fixture.AddRepresentationOutcome(pair, uses[pair.SourcePackageKey], "ValueSet");
+        fixture.CompleteAuthoredArrangement(pair);
+        fixture.GenerateSafety(pair);
+        XVerStructureCatalog catalog = new(fixture.Connection);
+        using ProfileUseFacts facts = new(catalog, pair.SourcePackageKey, pair.TargetPackageKey);
+        EffectiveProfileUse effective = facts.AtUse(fixture.Structure(pair.SourcePackage), uses[pair.SourcePackageKey], 0);
+        effective.Branches.Length.ShouldBe(2);
+        effective.Branches.ShouldAllBe(branch => !catalog.IsProcessed(branch.Definition));
+        effective.Branches.Select(branch => branch.Elements[".code"].Restrictions.Single(restriction =>
+            restriction.Kind == ProfileRestrictionKind.Fixed).Value.GetString()).Order().ShouldBe(["a", "b"]);
+        DbStructureOutcome.SelectList(fixture.Connection).ShouldAllBe(row => catalog.IsProcessed(row.SourceStructureKey));
+        DbElementOutcome.SelectSingle(fixture.Connection, Key: outcome.Key)!.ExtensionDefinitionIsProhibited.ShouldBeFalse();
+
+        StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
+        StructureDefinition extension = built.Extensions.Single(item => item.OutcomeKey == outcome.Key).Definition;
+        ElementDefinition.TypeRefComponent value = extension.Differential.Element.Single(element => element.Path == "Extension.value[x]")
+            .Type.ShouldHaveSingleItem();
+        value.Code.ShouldBe("Coding");
+        value.Profile.Order().ShouldBe(new[] { "a", "b" }.Select(code =>
+            fixture.Structure(pair.TargetPackage, "Coding-" + code).VersionedUrl).Order());
+        built.Profiles.ShouldAllBe(item => item.Definition.Type == "ValueSet");
+        string json = extension.ToJson();
+        json.ShouldContain(fixture.Structure(pair.TargetPackage, "Coding-a").VersionedUrl);
+        json.ShouldContain(fixture.Structure(pair.TargetPackage, "Coding-b").VersionedUrl);
+        catalog.GetDefinitions(pair.TargetPackageKey).Where(owner => owner.ArtifactClass == FhirArtifactClassEnum.Profile)
+            .ShouldAllBe(owner => catalog.ReadPayload(owner).Snapshot.Element.Any(element => element.Fixed is Code));
+    }
+
     private const string MixedCodingExpression = "($this.parameter.value.ofType(Coding).where($this.code.where($this = 'unsafe').exists() and " +
         "$this.system.where($this = 'urn:example:codes').exists()).exists() implies implicitRules.where($this = " +
         "'https://hl7.org/fhir/implicit-rules/omitted-mandatory-interversion-code').exists())";
@@ -220,11 +278,19 @@ public class UnsafeCodeProfileTests
         else
         {
             InvalidOperationException failure = Should.Throw<InvalidOperationException>(() => fixture.BuildDefinitions(pair));
-            failure.Message.ShouldContain(alternative == "code" ? "AmbiguousSourceUse" : "InvalidSourceUse");
-            failure.Message.ShouldContain(JsonSerializer.Serialize(old[0].SourcePath));
-            failure.Message.ShouldContain(old[0].ProfileCanonical);
-            failure.Message.ShouldContain(old[0].Provenance);
-            failure.Message.ShouldEndWith("Regenerate load, compare, outcomes, and export after resolving the source-value representation.");
+            if (facts == "missing-root")
+            {
+                failure.Message.ShouldContain(fixture.Structure(pair.SourcePackage, "Coding").VersionedUrl);
+                failure.Message.ShouldContain("expected one owner-scoped field-order-zero root");
+            }
+            else
+            {
+                failure.Message.ShouldContain(alternative == "code" ? "AmbiguousSourceUse" : "InvalidSourceUse");
+                failure.Message.ShouldContain(JsonSerializer.Serialize(old[0].SourcePath));
+                failure.Message.ShouldContain(old[0].ProfileCanonical);
+                failure.Message.ShouldContain(old[0].Provenance);
+                failure.Message.ShouldEndWith("Regenerate load, compare, outcomes, and export after resolving the source-value representation.");
+            }
         }
         fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
         JsonSerializer.Serialize(UnsafeCodeInputStore.ReadConstraintPlans(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey))
@@ -1208,12 +1274,14 @@ public class UnsafeCodeProfileTests
             }
             DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
             DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "Coding");
+            fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.jurisdiction", "CodeableConcept");
             DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.jurisdiction.coding", "Coding");
             fixture.Connect(pair, outcome, source, target);
             foreach (string code in reordered ? new[] { "quoted'\\code", "unsafe", "unsafe" } : new[] { "unsafe", "quoted'\\code" })
             {
                 fixture.AddTrigger(outcome, SourcePath(source.Id), code: code, versions: reordered ? ["b", "a", "a"] : ["a", "b"]);
             }
+            fixture.CompleteAuthoredArrangement(pair);
             StructureDefinition profile = Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition;
             string[] expressions = RecoveredExpressions(profile, targetIndex);
             string constraintJson = JsonNode.Parse(profile.ToJson())!["differential"]!["element"]![0]!["constraint"]!.ToJsonString();
@@ -1257,6 +1325,7 @@ public class UnsafeCodeProfileTests
             path = SourcePath(source.Id);
         }
         fixture.AddTrigger(outcome, path);
+        fixture.CompleteAuthoredArrangement(pair);
         InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Exporter(fixture).BuildDefinitions(Tracking(pair)));
         error.Message.ShouldContain(outcome.GenUrl!);
         error.Message.ShouldContain(path[^1].ElementId);
@@ -1287,6 +1356,7 @@ public class UnsafeCodeProfileTests
         DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "Coding");
         DbElementOutcome extension = fixture.AddRepresentationOutcome(pair, source, "ValueSet");
         fixture.AddTrigger(outcome, SourcePath(source.Id), versions: ["exempt"]);
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         string expression = RecoveredExpressions(built.Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
         expression.ShouldContain(UnsafeCodeConstraintEmitter.Literal(ProfileRepresentationIndex.DatatypeMetadataUrl));
@@ -1333,6 +1403,7 @@ public class UnsafeCodeProfileTests
         childOutcome.GenSliceName = "local'child\\url";
         DbElementOutcome.Update(fixture.Connection, [childOutcome]);
         fixture.AddTrigger(outcome, SourcePath(parent.Id, child.Id));
+        fixture.CompleteAuthoredArrangement(pair);
         string expression = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
         expression.ShouldContain(UnsafeCodeConstraintEmitter.Literal(childOutcome.GenSliceName));
         foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
@@ -1369,7 +1440,7 @@ public class UnsafeCodeProfileTests
             DbStructureDefinition structure = fixture.AddStructure(package, "Questionnaire", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Resource);
             fixture.AddElement(structure, "Questionnaire");
             if (extension && package.Key == pair.TargetPackageKey) continue;
-            DbElement node = fixture.AddElement(structure, "Questionnaire.item");
+            DbElement node = fixture.AddElement(structure, "Questionnaire.item", "BackboneElement");
             fixture.AddTypedElement(structure, "Questionnaire.item.type", "code");
             DbElement child = fixture.AddElement(structure, "Questionnaire.item.item");
             child.ContentReferenceSourceKey = node.Key;
@@ -1396,6 +1467,7 @@ public class UnsafeCodeProfileTests
         fixture.AddTrigger(outcome, initial.Add(new(typeSource.Id, null, false)), code: "group");
         fixture.AddTrigger(outcome, initial.Add(new(childSource.Id, null, false)).Add(new(nodeSource.Id, null, true))
             .Add(new(typeSource.Id, null, false)), code: "group");
+        fixture.CompleteAuthoredArrangement(pair);
         string[] expressions = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex);
         expressions.ShouldContain(expression => expression.Contains(".repeat("));
         foreach (int unsafeDepth in new[] { -1, 0, 1, 40 })
@@ -1446,6 +1518,7 @@ public class UnsafeCodeProfileTests
         fixture.AddTrigger(outcome, initial.Add(new("CodeableConcept.coding", "CodeableConcept", false)));
         fixture.AddTrigger(outcome, initial.Add(new("CodeableConcept.extension", "CodeableConcept", false))
             .Add(new("Extension.value[x]", "Extension", false)).Add(new("CodeableConcept.coding", "CodeableConcept", false)));
+        fixture.CompleteAuthoredArrangement(pair);
         string[] expressions = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex);
         expressions.ShouldContain(expression => expression.Contains(".repeat("));
         foreach (int unsafeDepth in new[] { -1, 0, 1, 20 })
@@ -1487,6 +1560,7 @@ public class UnsafeCodeProfileTests
         }
         DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage, "Observation"), fixture.Structure(pair.TargetPackage, "Observation"));
         DbStructureDefinition typeProfile = fixture.AddStructure(pair.SourcePackage, "ConceptProfile", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Profile);
+        fixture.DeclareProfile(typeProfile, fixture.Structure(pair.SourcePackage, "CodeableConcept"));
         DbElement profileRoot = fixture.AddElement(typeProfile, "CodeableConcept");
         profileRoot.BaseStructureKey = fixture.Structure(pair.SourcePackage, "CodeableConcept").Key;
         DbElement.Update(fixture.Connection, [profileRoot]);
@@ -1501,6 +1575,7 @@ public class UnsafeCodeProfileTests
             fixture.AddTrigger(outcome, [new("Observation", null, false),
                 .. use.Select(id => new UnsafeCodePathStep(id, null, false)), new("CodeableConcept.coding", typeProfile.VersionedUrl, false)]);
         }
+        fixture.CompleteAuthoredArrangement(pair);
         string[] expressions = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex);
         expressions.Length.ShouldBe(2);
         foreach (int unsafeSite in new[] { -1, 0, 1 })
@@ -1540,6 +1615,7 @@ public class UnsafeCodeProfileTests
         }
         DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage, "Parameters"), fixture.Structure(pair.TargetPackage, "Parameters"));
         fixture.AddTrigger(outcome, [new("Parameters", null, false), new("Parameters.parameter", null, false), new("Parameters.parameter.value[x]", null, false)]);
+        fixture.CompleteAuthoredArrangement(pair);
         string[] expressions = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex);
         expressions.ShouldContain(expression => expression.Contains(".all("));
         foreach (int unsafeOwner in new[] { -1, 0, 1, 2 })
@@ -1574,6 +1650,7 @@ public class UnsafeCodeProfileTests
         fixture.AddTrigger(outcomes[1], [new("Parameters", null, false), new("Parameters.parameter", null, false),
             new("Parameters.parameter.value[x]", null, false)]);
         fixture.AddTrigger(outcomes[0], [new("Bundle", null, false), new("Bundle.type", null, false)], code: "document");
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         Dictionary<string, string[]> expressions = built.Profiles.ToDictionary(profile => profile.Definition.Type,
             profile => RecoveredExpressions(profile.Definition, targetIndex));
@@ -1656,6 +1733,7 @@ public class UnsafeCodeProfileTests
             string[] resourceTypes = new[] { "Observation", "Patient", "Organization", "Practitioner", "Device" }[..size];
             DbStructureOutcome[] outcomes = fixture.AddResourceOwnerGraph(pair, resourceTypes);
             fixture.AddTrigger(outcomes[0], [new("Observation", null, false), new("Observation.code", null, false)]);
+            fixture.CompleteAuthoredArrangement(pair);
             StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
             string[][] expressions = [.. built.Profiles.Select(profile => RecoveredExpressions(profile.Definition, targetIndex))];
             int count = expressions.Sum(value => value.Length);
@@ -1699,6 +1777,7 @@ public class UnsafeCodeProfileTests
                 DbElement duplicate = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage, "Observation"), "Observation.otherContained", "Resource");
                 fixture.Connect(pair, outcomes[0], duplicate,
                     DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.TargetPackageKey, Id: "Observation.contained")!);
+                fixture.CompleteAuthoredArrangement(pair);
                 StructureFhirExporter.BuiltDefinitions duplicated = Exporter(fixture).BuildDefinitions(Tracking(pair));
                 foreach (StructureFhirExporter.BuiltDefinition profile in duplicated.Profiles)
                 {
@@ -1717,6 +1796,7 @@ public class UnsafeCodeProfileTests
                 DbStructureOutcome observation = reorderedOutcomes.Single(outcome => outcome.SourceId == "Observation");
                 observation.Key.ShouldNotBe(outcomes[0].Key);
                 reorderedFixture.AddTrigger(observation, [new("Observation", null, false), new("Observation.code", null, false)]);
+                reorderedFixture.CompleteAuthoredArrangement(reorderedPair);
                 StructureFhirExporter.BuiltDefinitions reordered = Exporter(reorderedFixture).BuildDefinitions(Tracking(reorderedPair));
                 foreach (StructureFhirExporter.BuiltDefinition profile in reordered.Profiles)
                 {
@@ -1832,6 +1912,7 @@ public class UnsafeCodeProfileTests
         fixture.AddTypedElement(target, UnsafeCodeTestFixture.FilterElement, "code");
         DbElementOutcome extension = fixture.AddRepresentationOutcome(pair, source, UnsafeCodeTestFixture.FilterElement);
         fixture.AddTrigger(outcome, SourcePath(source.Id));
+        fixture.CompleteAuthoredArrangement(pair);
         string expression = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
         foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
         {
@@ -1852,6 +1933,7 @@ public class UnsafeCodeProfileTests
         FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
         DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
         DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "CodeableConcept");
+        fixture.AddElement(fixture.Structure(pair.TargetPackage), "ValueSet.useContext", "BackboneElement");
         DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.useContext.value[x]", "CodeableConcept");
         target.IsChoiceType = true;
         DbElement.Update(fixture.Connection, [target]);
@@ -1859,6 +1941,7 @@ public class UnsafeCodeProfileTests
         fixture.Connect(pair, outcome, source, target, ext);
         fixture.AddTrigger(outcome, SourcePath(source.Id).Add(new("CodeableConcept.coding", "CodeableConcept", false)),
             wildcard: true, versions: ["exempt"]);
+        fixture.CompleteAuthoredArrangement(pair);
         string expression = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
         foreach (string? uri in new[] { null, "wrong", UnsafeCodeConstants.ImplicitRules })
         {
@@ -1891,9 +1974,11 @@ public class UnsafeCodeProfileTests
         FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
         DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
         DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "Coding");
+        fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.jurisdiction", "CodeableConcept");
         DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.jurisdiction.coding", "Coding");
         fixture.Connect(pair, outcome, source, target);
         fixture.AddTrigger(outcome, SourcePath(source.Id), wildcard: false, versions: ["exact"]);
+        fixture.CompleteAuthoredArrangement(pair);
         string expression = RecoveredExpressions(Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition, targetIndex).ShouldHaveSingleItem();
         foreach (string? version in new[] { null, "other", "exact" })
         {
@@ -1925,6 +2010,7 @@ public class UnsafeCodeProfileTests
         DbElementOutcome.Update(fixture.Connection, [ext]);
         fixture.Connect(pair, outcome, source, target, ext);
         fixture.AddTrigger(outcome, SourcePath(source.Id), code: "draft");
+        fixture.CompleteAuthoredArrangement(pair);
         StructureDefinition profile = Exporter(fixture).BuildDefinitions(Tracking(pair)).Profiles.ShouldHaveSingleItem().Definition;
         string expression = RecoveredExpressions(profile, targetIndex).ShouldHaveSingleItem();
         foreach (bool native in new[] { false, true })
@@ -1973,6 +2059,7 @@ public class UnsafeCodeProfileTests
             DbUnsafeCodeMapEvidence.Update(fixture.Connection, [evidence]);
         }
         fixture.AddTrigger(outcome, SourcePath(source.Id));
+        fixture.CompleteAuthoredArrangement(pair);
         InvalidOperationException error = Should.Throw<InvalidOperationException>(() => Exporter(fixture).BuildDefinitions(Tracking(pair)));
         error.Message.ShouldContain(outcome.GenUrl!);
         error.Message.ShouldContain("R5->" + pair.TargetFhirSequence.ToRLiteral());
@@ -2138,6 +2225,7 @@ public class UnsafeCodeProfileTests
         DbElement.Update(fixture.Connection, [target]);
         fixture.Connect(pair, outcome, source, target);
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         built.Profiles.ShouldHaveSingleItem().Definition.Differential.Element.ShouldHaveSingleItem().Path.ShouldBe("ValueSet");
         ImmutableArray<RepresentationLocation> locations = built.Representations.Resolve(outcome.Key, SourcePath(source.Id));
@@ -2166,6 +2254,7 @@ public class UnsafeCodeProfileTests
         fixture.Connect(pair, outcome, source, target, element);
 
         IgExporter.XVerIgExportTrackingRecord tracking = Tracking(pair);
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(tracking);
         StructureDefinition profile = built.Profiles.ShouldHaveSingleItem().Definition;
         ElementDefinition slice = profile.Differential.Element.Single(ed => ed.SliceName is not null);
@@ -2196,6 +2285,7 @@ public class UnsafeCodeProfileTests
         childOutcome.GenSliceName = "not-the-source-name";
         DbElementOutcome.Update(fixture.Connection, [childOutcome]);
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         StructureDefinition extension = built.Extensions.ShouldHaveSingleItem().Definition;
         extension.Differential.Element.Single(element => element.ElementId == "Extension.extension:op.url")
@@ -2230,6 +2320,7 @@ public class UnsafeCodeProfileTests
         DbElementOutcome element = fixture.AddRepresentationOutcome(pair, source, nested ? null : "ValueSet", parent);
         element.ExtensionSubstitutionUrl = "http://example.org/opaque/substitution";
         DbElementOutcome.Update(fixture.Connection, [element]);
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         RepresentationLocation location = built.Representations.Resolve(outcome.Key,
             nested ? SourcePath("ValueSet.group", source.Id) : SourcePath(source.Id)).ShouldHaveSingleItem();
@@ -2252,6 +2343,7 @@ public class UnsafeCodeProfileTests
         DbElementOutcome rootOutcome = fixture.AddRepresentationOutcome(pair, root, "Basic");
         fixture.AddRepresentationOutcome(pair, code, parent: rootOutcome);
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         built.Profiles.ShouldHaveSingleItem().Definition.Type.ShouldBe("Basic");
         RepresentationLocation location = built.Representations.Resolve(outcome.Key, SourcePath(code.Id)).ShouldHaveSingleItem();
@@ -2280,6 +2372,7 @@ public class UnsafeCodeProfileTests
 
         DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.extra", typeName);
         DbElementOutcome element = fixture.AddRepresentationOutcome(pair, source, "ValueSet");
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         StructureDefinition extension = built.Extensions.Single(extension => extension.Definition.Url == element.GenUrl).Definition;
         ImmutableArray<UnsafeCodePathStep> path = valid ? SourcePath(source.Id) :
@@ -2321,6 +2414,7 @@ public class UnsafeCodeProfileTests
 
         DbElement extra = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage, "Inner"), "Inner.extra", "code");
         DbElementOutcome extraOutcome = fixture.AddRepresentationOutcome(pair, extra, "Inner");
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         foreach (string use in new[] { "first", "second" })
         {
@@ -2337,6 +2431,44 @@ public class UnsafeCodeProfileTests
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
+    public void InheritedChildrenKeepContainerRelativeSliceIdentity(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            DbStructureDefinition basis = fixture.AddStructure(package, "Inner");
+            DbElement basisRoot = fixture.AddElement(basis, "Inner");
+            foreach (string slice in new[] { "first", "second" })
+            {
+                DbElement child = fixture.AddTypedElement(basis, "Inner.status:" + slice, "code");
+                child.Path = "Inner.status";
+                DbElement.Update(fixture.Connection, child);
+            }
+            DbStructureDefinition derived = fixture.AddStructure(package, "LongInheritedInner");
+            fixture.DeclareBaseDefinition(derived, basis);
+            DbElement root = fixture.AddElement(derived, "LongInheritedInner");
+            root.BaseStructureKey = basis.Key;
+            root.BaseElementKey = basisRoot.Key;
+            root.BasePath = basisRoot.Path;
+            DbElement.Update(fixture.Connection, root);
+            fixture.AddTypedElement(fixture.Structure(package), "ValueSet.nested", derived.Id);
+        }
+
+        fixture.CompleteAuthoredArrangement(pair);
+        StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
+        RepresentationOccurrence[] occurrences = [.. built.Representations.Occurrences(outcome.Key)];
+        foreach (string slice in new[] { "first", "second" })
+        {
+            occurrences.Where(occurrence => occurrence.SourcePath[^1].ElementId == "Inner.status:" + slice)
+                .ShouldHaveSingleItem();
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
     public void ContentReferencesIncludeInitialAndUnboundedDescendantUses(int targetIndex)
     {
         using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
@@ -2345,7 +2477,7 @@ public class UnsafeCodeProfileTests
         foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
         {
             DbStructureDefinition structure = fixture.Structure(package);
-            DbElement node = fixture.AddElement(structure, "ValueSet.node");
+            DbElement node = fixture.AddElement(structure, "ValueSet.node", "BackboneElement");
             fixture.AddTypedElement(structure, "ValueSet.node.op", "code");
             DbElement recursive = fixture.AddElement(structure, "ValueSet.node.child");
             recursive.ContentReferenceSourceKey = node.Key;
@@ -2353,6 +2485,7 @@ public class UnsafeCodeProfileTests
             DbElement.Update(fixture.Connection, [recursive]);
         }
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         built.Representations.Resolve(outcome.Key, SourcePath("ValueSet.node", "ValueSet.node.op")).ShouldHaveSingleItem()
             .Steps.OfType<MemberStep>().Select(step => step.Name).ShouldBe(["node", "op"]);
@@ -2362,7 +2495,9 @@ public class UnsafeCodeProfileTests
             path = path.Add(new("ValueSet.node.child", null, false)).Add(new("ValueSet.node", null, true));
         }
 
-        RepresentationLocation descendant = built.Representations.Resolve(outcome.Key, path.Add(new("ValueSet.node.op", null, false))).ShouldHaveSingleItem();
+        ImmutableArray<RepresentationLocation> descendants = built.Representations.Resolve(outcome.Key, path.Add(new("ValueSet.node.op", null, false)));
+        descendants.Length.ShouldBe(1, string.Join("; ", descendants.Select(location => string.Join("/", location.Steps))));
+        RepresentationLocation descendant = descendants.ShouldHaveSingleItem();
         descendant.State.ShouldBe(RepresentationState.Observable);
         descendant.Steps.OfType<RepeatStep>().ShouldNotBeEmpty();
         descendant.Steps.OfType<RepeatStep>().ShouldAllBe(repeat => repeat.IncludeInitial);
@@ -2390,6 +2525,7 @@ public class UnsafeCodeProfileTests
         fixture.Connect(pair, outcome,
             DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: "ValueSet.child")!,
             DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.TargetPackageKey, Id: "ValueSet.child")!);
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         RepresentationLocation location = built.Representations.Resolve(outcome.Key, SourcePath("ValueSet.child")).ShouldHaveSingleItem();
         location.Steps.ShouldContain(new ResourceOwnerStep("Child"));
@@ -2411,6 +2547,7 @@ public class UnsafeCodeProfileTests
         fixture.AddElement(target, "ValueSet.compose.include.filter");
         fixture.AddTypedElement(target, UnsafeCodeTestFixture.FilterElement, "code");
         DbElementOutcome element = fixture.AddRepresentationOutcome(pair, source, UnsafeCodeTestFixture.FilterElement);
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         RepresentationLocation location = built.Representations.Resolve(outcome.Key, SourcePath(source.Id)).ShouldHaveSingleItem();
         location.Steps.OfType<MemberStep>().Select(step => step.Name).ShouldBe(["compose", "include", "filter", "op", "value"]);
@@ -2431,10 +2568,11 @@ public class UnsafeCodeProfileTests
         FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
         DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
         DbStructureDefinition source = fixture.Structure(pair.SourcePackage);
-        DbElement node = fixture.AddElement(source, "ValueSet.node");
+        DbElement node = fixture.AddElement(source, "ValueSet.node", "BackboneElement");
         DbElement op = fixture.AddTypedElement(source, "ValueSet.node.op", "code");
         DbElement child = fixture.AddElement(source, "ValueSet.node.child");
         child.ContentReferenceSourceKey = node.Key;
+        child.DefinedAsContentReference = true;
         DbElement.Update(fixture.Connection, [child]);
         DbElementOutcome parentOutcome = fixture.AddRepresentationOutcome(pair, node, "ValueSet");
         fixture.AddRepresentationOutcome(pair, op, parent: parentOutcome);
@@ -2443,6 +2581,7 @@ public class UnsafeCodeProfileTests
         childOutcome.ContentReferenceExtensionUrl = parentOutcome.GenUrl;
         DbElementOutcome.Update(fixture.Connection, [childOutcome]);
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         StructureDefinition extension = built.Extensions.ShouldHaveSingleItem().Definition;
         extension.Differential.Element.Single(ed => ed.ElementId == "Extension.extension:child.url")
@@ -2465,10 +2604,11 @@ public class UnsafeCodeProfileTests
         DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
         foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
         {
-            DbElement node = fixture.AddElement(fixture.Structure(package), "ValueSet.node");
+            DbElement node = fixture.AddElement(fixture.Structure(package), "ValueSet.node", "BackboneElement");
             fixture.AddTypedElement(fixture.Structure(package), "ValueSet.node.op", "code");
             DbElement child = fixture.AddElement(fixture.Structure(package), "ValueSet.node.child");
             child.ContentReferenceSourceKey = node.Key;
+            child.DefinedAsContentReference = true;
             DbElement.Update(fixture.Connection, [child]);
         }
 
@@ -2484,6 +2624,7 @@ public class UnsafeCodeProfileTests
         childOutcome.ContentReferenceExtensionUrl = rootOutcome.GenUrl;
         DbElementOutcome.Update(fixture.Connection, [childOutcome]);
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         ImmutableArray<UnsafeCodePathStep> path = SourcePath(source.Id, childSource.Id).Add(new(source.Id, null, true)).Add(new(code.Id, null, false));
         ImmutableArray<RepresentationLocation> locations = built.Representations.Resolve(outcome.Key, path);
@@ -2514,6 +2655,7 @@ public class UnsafeCodeProfileTests
             fixture.AddTypedElement(fixture.Structure(package), "ValueSet.entry", "A");
         }
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         ImmutableArray<UnsafeCodePathStep> initial = SourcePath("ValueSet.entry").Add(new("A.op", "A", false));
         built.Representations.Resolve(outcome.Key, initial).ShouldHaveSingleItem().Steps.OfType<RepeatStep>().ShouldBeEmpty();
@@ -2537,6 +2679,7 @@ public class UnsafeCodeProfileTests
         DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.original", "Coding");
         DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.renamed", targetType);
         fixture.Connect(pair, outcome, source, target);
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         RepresentationLocation location = built.Representations.Resolve(outcome.Key, SourcePath(source.Id)).ShouldHaveSingleItem();
         location.SourceElementId.ShouldBe(source.Id);
@@ -2564,6 +2707,7 @@ public class UnsafeCodeProfileTests
         evidence.TargetSystemVersion = "replacement-version";
         evidence.TargetCode = "changed";
         DbUnsafeCodeMapEvidence.Update(fixture.Connection, [evidence]);
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         RepresentationLocation location = built.Representations.Resolve(outcome.Key, SourcePath(source.Id)).ShouldHaveSingleItem();
         CodeTransformation transformation = location.Transformations.ShouldHaveSingleItem();
@@ -2586,6 +2730,7 @@ public class UnsafeCodeProfileTests
         DbElementOutcome element = fixture.AddRepresentationOutcome(pair, code, "ValueSet");
         element.GenName = "Collision";
         DbElementOutcome.Update(fixture.Connection, [element]);
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         built.Extensions.ShouldHaveSingleItem().Definition.Name.ShouldBe("Collision");
         built.Profiles.ShouldHaveSingleItem().Definition.Name.ShouldBe("ProfileValueSet");
@@ -2610,6 +2755,7 @@ public class UnsafeCodeProfileTests
         element.ExtensionSubstitutionUrl = reference ? CommonDefinitions.ExtUrlAlternateReference : CommonDefinitions.ExtUrlAlternateCanonical;
         DbElementOutcome.Update(fixture.Connection, [element]);
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         ElementDefinition slice = built.Profiles.ShouldHaveSingleItem().Definition.Differential.Element.Single(ed => ed.SliceName is not null);
         slice.Path.ShouldBe(reference ? "ValueSet.answerReference.extension" : "ValueSet.answerCanonical.extension");
@@ -2642,6 +2788,7 @@ public class UnsafeCodeProfileTests
 
         DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.extra", "Coding");
         DbElementOutcome element = fixture.AddRepresentationOutcome(pair, source, "ValueSet");
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         RepresentationLocation location = built.Representations.Resolve(outcome.Key, SourcePath(source.Id)).ShouldHaveSingleItem();
         location.State.ShouldBe(RepresentationState.Observable);
@@ -2679,6 +2826,7 @@ public class UnsafeCodeProfileTests
         }
 
         DbElementOutcome element = fixture.AddRepresentationOutcome(pair, source, "ValueSet");
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         foreach (string typeName in new[] { "NewA", "NewB" })
         {
@@ -2688,6 +2836,404 @@ public class UnsafeCodeProfileTests
             location.Steps.OfType<ExtensionStep>().Select(step => step.Url).ShouldBe([element.GenUrl!, "value" + typeName, "fixed-local-code"]);
             location.Steps.OfType<DatatypeStep>().ShouldHaveSingleItem().Name.ShouldBe(typeName);
         }
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("other-source-owner")]
+    [InlineData("other-target-owner")]
+    [InlineData("other-slice")]
+    [InlineData("missing-authority")]
+    [InlineData("opaque-invariant")]
+    public void MappedProfileChildrenRequireAuthorityInTheirExactInheritedContext(string mapping)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        DbStructureDefinition source = fixture.AddStructure(pair.SourcePackage, "Inner");
+        fixture.AddElement(source, "Inner");
+        DbElement field = fixture.AddTypedElement(source, "Inner.status", "code");
+        DbStructureDefinition profile = fixture.AddStructure(pair.SourcePackage, "SelectedInner", FhirArtifactClassEnum.Profile);
+        fixture.DeclareProfile(profile, source);
+        fixture.AddElement(profile, "Inner");
+        DbElement use = fixture.AddElement(fixture.Structure(pair.SourcePackage), "ValueSet.first", "Inner");
+        fixture.AddType(use, "Inner", source, profile);
+        DbStructureDefinition target = fixture.AddStructure(pair.TargetPackage, "Inner");
+        fixture.AddElement(target, "Inner");
+        DbElement renamed = fixture.AddTypedElement(target, "Inner.renamed", "code");
+        fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.first", "Inner");
+        if (mapping != "missing")
+        {
+            if (mapping == "other-source-owner")
+            {
+                DbStructureDefinition unrelated = fixture.AddStructure(pair.SourcePackage, "UnrelatedInner");
+                fixture.AddElement(unrelated, "Inner");
+                field = fixture.AddTypedElement(unrelated, "Inner.status", "code");
+            }
+            if (mapping == "other-target-owner")
+            {
+                DbStructureDefinition unrelated = fixture.AddStructure(pair.TargetPackage, "UnrelatedInner");
+                fixture.AddElement(unrelated, "Inner");
+                renamed = fixture.AddTypedElement(unrelated, "Inner.renamed", "code");
+            }
+            if (mapping == "other-slice")
+            {
+                field = fixture.AddTypedElement(source, "Inner.status:other", "code");
+                field.Path = "Inner.status";
+                field.SliceName = "other";
+                DbElement.Update(fixture.Connection, [field]);
+            }
+            DbStructureOutcome outcome = fixture.AddOutcome(pair,
+                DbStructureDefinition.SelectSingle(fixture.Connection, Key: field.StructureKey)!,
+                DbStructureDefinition.SelectSingle(fixture.Connection, Key: renamed.StructureKey)!);
+            fixture.Connect(pair, outcome, field, renamed);
+            if (mapping == "missing-authority")
+            {
+                DbElementComparison comparison = DbElementComparison.SelectSingle(fixture.Connection, SourceElementKey: field.Key)!;
+                comparison.ElementMappingKey = null;
+                DbElementComparison.Update(fixture.Connection, [comparison]);
+            }
+            if (mapping == "opaque-invariant")
+            {
+                fixture.ConfigureDefinition(profile, definition => definition.Snapshot.Element[0].Constraint.Add(new()
+                {
+                    Key = "opaque-1", Severity = ConstraintSeverity.Error, Human = "Status is required.", Expression = "status.exists()",
+                }));
+                fixture.ConfigureDefinition(target, definition => definition.Snapshot.Element[0].Constraint.Add(new()
+                {
+                    Key = "opaque-1", Severity = ConstraintSeverity.Error, Human = "Renamed status is required.", Expression = "renamed.exists()",
+                }));
+            }
+        }
+        fixture.CompleteAuthoredArrangement(pair);
+        ProfileRepresentationProof decision = ProfileUseFacts.ClassifyPair(fixture.Connection, pair)
+            .Single(proof => proof.Input.ElementKey == use.Key);
+        decision.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        if (mapping == "opaque-invariant")
+        {
+            decision.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.InvariantTransformation);
+            decision.RequiredFacts[""].Invariants.ShouldHaveSingleItem().Expression.ShouldBe("status.exists()");
+            decision.NativeFacts[""].Invariants.ShouldHaveSingleItem().Expression.ShouldBe("renamed.exists()");
+        }
+        else
+        {
+            decision.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.MissingTargetField && reason.RelativeId == ".status");
+        }
+        decision.RequiredFacts.ShouldContainKey(".status");
+        decision.NativeFacts.ShouldContainKey(".renamed");
+        decision.NativeFacts.ShouldNotContainKey(".status");
+    }
+
+    [Theory]
+    [InlineData(0, "profiles")]
+    [InlineData(1, "profiles")]
+    [InlineData(0, "type-uses")]
+    [InlineData(1, "type-uses")]
+    [InlineData(0, "unprofiled-type")]
+    [InlineData(1, "unprofiled-type")]
+    [InlineData(0, "other-type")]
+    [InlineData(1, "other-type")]
+    public void ScheduledOwnerProjectionCannotNarrowThePermittedAlternativeUnion(int targetIndex, string alternatives)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true);
+        (FhirPackageComparisonPair pair, DbStructureOutcome owner, DbElement source, DbElement target) =
+            fixture.AddOwnerProjectionAlternatives(targetIndex, alternatives);
+        fixture.GenerateSafety(pair);
+        fixture.ReopenPersistedDatabase();
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        XVerStructureCatalog catalog = new(fixture.Connection);
+        StructureDefinition native = RoundTripProjectionDefinition(catalog.ReadPayload(fixture.Structure(pair.TargetPackage, "Coding")), targetIndex);
+        ElementDefinition nativeCode = native.Snapshot.Element.Single(element => element.Path == "Coding.code");
+        nativeCode.Fixed.ShouldBeNull();
+        nativeCode.Min.ShouldBe(0);
+        nativeCode.Max.ShouldBe("1");
+        if (alternatives is "profiles" or "type-uses")
+        {
+            StructureDefinition permitted = catalog.ReadPayload(fixture.Structure(pair.SourcePackage, "AlternativeCodingA"));
+            permitted.Snapshot.Element.Single(element => element.Path == "Coding.code").Fixed.ShouldBeNull();
+            ProfileUseFacts.ClassifyPair(fixture.Connection, pair).Single(proof => proof.Input.ElementKey == source.Key &&
+                proof.Input.ProfileAlternative == permitted.Url + "|" + permitted.Version).Kind.ShouldBe(ProfileProofKind.NativeReuse);
+        }
+        StructureDefinition selected = catalog.ReadPayload(fixture.Structure(pair.SourcePackage, "AlternativeCodingB"));
+        selected.Snapshot.Element.Single(element => element.Path == "Coding.code").Fixed.ShouldBeOfType<Code>().Value.ShouldBe("selected");
+        string witnessJson = alternatives == "other-type"
+            ? """{"resourceType":"Parameters","parameter":[{"name":"example","valueCodeableConcept":{"coding":[{"system":"urn:example:profile-values","code":"other"}]}}]}"""
+            : """{"resourceType":"Parameters","parameter":[{"name":"example","valueCoding":{"system":"urn:example:profile-values","code":"other"}}]}""";
+        ITypedElement witness = targetIndex == 0
+            ? new r4::Hl7.Fhir.Serialization.FhirJsonParser().Parse<Parameters>(witnessJson).ToTypedElement(r4::Hl7.Fhir.Model.ModelInfo.ModelInspector)
+            : new r4b::Hl7.Fhir.Serialization.FhirJsonParser().Parse<Parameters>(witnessJson).ToTypedElement(r4b::Hl7.Fhir.Model.ModelInfo.ModelInspector);
+        ITypedElement occurrence = witness.Children("parameter").Single().Children("value").Single();
+        ITypedElement coding = alternatives == "other-type" ? occurrence.Children("coding").Single() : occurrence;
+        coding.Children("code").Single().Value.ShouldBe("other");
+        coding.Children("code").Count().ShouldBeLessThanOrEqualTo(int.Parse(nativeCode.Max));
+        coding.Children("code").Single().Value.ShouldNotBe(((Code)selected.Snapshot.Element.Single(element => element.Path == "Coding.code").Fixed).Value);
+
+        DbElementOutcome persistedOutcome = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: source.Key)!;
+        string nativeDecisions = persistedOutcome.ExtensionProhibitionReason!;
+        PersistedProfileDecision negative = ProfileUseFacts.ReadDecisions(nativeDecisions).ShouldHaveSingleItem();
+        negative.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        negative.Input.ProfileAlternative.ShouldBe(selected.Url + "|" + selected.Version);
+        negative.NativeInput!.ElementKey.ShouldBe(target.Key);
+        using ProfileUseFacts facts = new(catalog, pair.SourcePackageKey, pair.TargetPackageKey,
+            DbElementComparison.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey));
+        ProfileRepresentationProof decision = ProfileUseFacts.ClassifyPair(fixture.Connection, pair)
+            .Single(proof => proof.Input == negative.Input);
+        ProfileRepresentationProof projection = facts.ProveInOwner(decision, fixture.Structure(pair.TargetPackage, "Parameters"),
+            new HashSet<int> { owner.TargetStructureKey!.Value });
+        projection.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        projection.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.TypeAlternatives);
+        projection.Projection.ShouldBeEmpty();
+        projection.PreservesRestrictions.ShouldBeFalse();
+        InvalidOperationException buildFailure = Should.Throw<InvalidOperationException>(() => Exporter(fixture).BuildDefinitions(Tracking(pair)));
+        buildFailure.Message.ShouldContain("Unrepresentable scheduled");
+        buildFailure.Message.ShouldContain("complete permitted alternative union");
+        ConfigXVer config = new()
+        {
+            OutputDirectory = Path.Combine(fixture.SourceRoot, "alternative-union-prewrite"),
+            ExportR2 = false, ExportR3 = false, ExportR4 = targetIndex == 0, ExportR4B = targetIndex == 1,
+            ExportR5 = false, ExportR6 = false, LogFactory = NullLoggerFactory.Instance,
+        };
+        Should.Throw<InvalidOperationException>(() => new XVerExporter(fixture.Connection, config).Export(
+            includeIgScripts: false, processVocabulary: false, specificPairs: [pair.SequencePair]))
+            .Message.ShouldContain("Unrepresentable scheduled");
+        Directory.Exists(config.OutputDirectory).ShouldBeFalse();
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+        persistedOutcome = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: source.Key)!;
+        persistedOutcome.ExtensionDefinitionIsProhibited.ShouldBeTrue();
+        persistedOutcome.ExtensionProhibitionReason.ShouldBe(nativeDecisions);
+        persistedOutcome.IsEquivalent.ShouldBeFalse();
+        persistedOutcome.GenUrl.ShouldBeNull();
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void OwnerProjectionDoesNotTreatInvalidUnrequiredAlternativesAsEmpty(bool unknownRestriction)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        (FhirPackageComparisonPair pair, DbStructureOutcome owner, DbElement source, DbElement _) =
+            fixture.AddOwnerProjectionAlternatives(0, "other-type");
+        ProfileRepresentationProof decision = ProfileUseFacts.ClassifyPair(fixture.Connection, pair)
+            .Single(proof => proof.Input.ElementKey == source.Key);
+        decision.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        decision.IsAcceptedDecision.ShouldBeTrue();
+        decision.Input.ProfileAlternative.ShouldBe(fixture.Structure(pair.SourcePackage, "AlternativeCodingB").VersionedUrl);
+        DbStructureDefinition alternative = fixture.Structure(pair.SourcePackage, "CodeableConcept");
+        fixture.ConfigureDefinition(alternative, definition =>
+        {
+            if (unknownRestriction)
+            {
+                definition.Snapshot.Element[0].Extension.Add(new("http://example.org/StructureDefinition/required-semantics", new FhirString("retained")));
+            }
+            else
+            {
+                definition.Snapshot.Element.Single(element => element.Path == "CodeableConcept.coding").Max = null;
+            }
+        });
+        fixture.PublishAuthoredDefinitions();
+        fixture.InputState.CompletedInputRevision.ShouldBeNull();
+        DbUnsafeCodePairState.SelectSingle(fixture.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)!.ComparisonRevision.ShouldBeNull();
+        string before = fixture.SafetyPersistenceSnapshot();
+        string inventoryBefore = JsonSerializer.Serialize(DefinitionInventoryStore.ReadState(fixture.Connection));
+        XVerStructureCatalog catalog = new(fixture.Connection);
+        using ProfileUseFacts facts = new(catalog, pair.SourcePackageKey, pair.TargetPackageKey);
+        ProfileRepresentationProof proof = facts.ProveInOwner(decision, fixture.Structure(pair.TargetPackage, "Parameters"),
+            new HashSet<int> { owner.TargetStructureKey!.Value });
+        proof.IsAcceptedDecision.ShouldBeFalse();
+        proof.PreservesRestrictions.ShouldBeFalse();
+        proof.Projection.ShouldBeEmpty();
+        proof.Reasons.ShouldContain(reason => reason.Category == (unknownRestriction
+            ? ProfileReasonCategory.UnclassifiedRestriction : ProfileReasonCategory.InvalidFacts) &&
+            reason.Origin.OwnerKey == alternative.Key && reason.Origin.Canonical == alternative.UnversionedUrl);
+        fixture.SafetyPersistenceSnapshot().ShouldBe(before);
+        JsonSerializer.Serialize(DefinitionInventoryStore.ReadState(fixture.Connection)).ShouldBe(inventoryBefore);
+    }
+
+    [Theory]
+    [InlineData(0, "profiles")]
+    [InlineData(1, "profiles")]
+    [InlineData(0, "type-uses")]
+    [InlineData(1, "type-uses")]
+    public void ScheduledOwnerProjectionPreservesARestrictionEntailedByEveryAlternative(int targetIndex, string alternatives)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true);
+        (FhirPackageComparisonPair pair, DbStructureOutcome owner, DbElement source, DbElement _) =
+            fixture.AddOwnerProjectionAlternatives(targetIndex, alternatives, commonRestriction: true);
+        fixture.GenerateSafety(pair);
+        fixture.ReopenPersistedDatabase();
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        string nativeDecisions = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: source.Key)!.ExtensionProhibitionReason!;
+        StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
+        StructureFhirExporter.BuiltDefinition emitted = built.Profiles.Single(item => item.OutcomeKey == owner.Key);
+        emitted.Projections.ShouldNotBeEmpty();
+        emitted.Projections.ShouldAllBe(proof => proof.Kind == ProfileProofKind.OwnerProjection);
+        StructureDefinition recovered = RoundTripProjectionDefinition(emitted.Definition, targetIndex);
+        ElementDefinition code = recovered.Differential.Element.Single(element => element.ElementId == UnsafeCodeTestFixture.MixedChoiceElement + ".code");
+        code.Fixed.ShouldBeOfType<Code>().Value.ShouldBe("selected");
+        code.Min.ShouldBe(0);
+        code.Max.ShouldBe("1");
+        foreach ((string value, bool allowed) in new[] { ("selected", true), ("other", false) })
+        {
+            string json = """{"resourceType":"Parameters","parameter":[{"name":"example","valueCoding":{"code":""" +
+                JsonSerializer.Serialize(value) + "}}]}";
+            ITypedElement instance = targetIndex == 0
+                ? new r4::Hl7.Fhir.Serialization.FhirJsonParser().Parse<Parameters>(json).ToTypedElement(r4::Hl7.Fhir.Model.ModelInfo.ModelInspector)
+                : new r4b::Hl7.Fhir.Serialization.FhirJsonParser().Parse<Parameters>(json).ToTypedElement(r4b::Hl7.Fhir.Model.ModelInfo.ModelInspector);
+            ITypedElement coding = instance.Children("parameter").Single().Children("value").Single();
+            bool conforms = coding.Children("code").Count() >= code.Min && coding.Children("code").Count() <= int.Parse(code.Max) &&
+                Equals(coding.Children("code").Single().Value, ((Code)code.Fixed).Value);
+            conforms.ShouldBe(allowed);
+        }
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+        DbElementOutcome negative = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: source.Key)!;
+        negative.ExtensionDefinitionIsProhibited.ShouldBeTrue();
+        negative.ExtensionProhibitionReason.ShouldBe(nativeDecisions);
+        ProfileUseFacts.ReadDecisions(negative.ExtensionProhibitionReason!).Count.ShouldBe(2);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+    }
+
+    private static StructureDefinition RoundTripProjectionDefinition(StructureDefinition definition, int targetIndex)
+    {
+        ParserSettings settings = new() { PermissiveParsing = true };
+        return targetIndex == 0
+            ? new r4::Hl7.Fhir.Serialization.FhirJsonParser(settings).Parse<StructureDefinition>(
+                new r4::Hl7.Fhir.Serialization.FhirJsonSerializer().SerializeToString(definition))
+            : new r4b::Hl7.Fhir.Serialization.FhirJsonParser(settings).Parse<StructureDefinition>(
+                new r4b::Hl7.Fhir.Serialization.FhirJsonSerializer().SerializeToString(definition));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void ScheduledResourceOwnerEmitsProjectedTypedRestrictionsInTheTargetVersion(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+        Dictionary<int, DbElement> uses = [];
+        foreach (DbFhirPackage package in new[] { pair.SourcePackage, pair.TargetPackage })
+        {
+            DbStructureDefinition coding = fixture.Structure(package, "Coding");
+            foreach (DbElement element in DbElement.SelectList(fixture.Connection, StructureKey: coding.Key).Where(element => element.Id.Contains('.')))
+            {
+                element.MinCardinality = 0;
+                DbElement.Update(fixture.Connection, [element]);
+            }
+            DbStructureDefinition resource = fixture.AddStructure(package, "Parameters", FhirArtifactClassEnum.Resource);
+            fixture.AddElement(resource, "Parameters");
+            fixture.AddTypedElement(resource, "Parameters.parameter", "BackboneElement");
+            DbElement use = fixture.AddElement(resource, "Parameters.parameter.value[x]", "Coding");
+            use.IsChoiceType = true;
+            use.MinCardinality = package.Key == pair.TargetPackageKey ? 0 : 1;
+            DbElement.Update(fixture.Connection, [use]);
+            DbStructureDefinition? profile = null;
+            if (package.Key == pair.SourcePackageKey)
+            {
+                profile = fixture.AddStructure(package, "SelectedCoding", FhirArtifactClassEnum.Profile);
+                fixture.DeclareProfile(profile, coding);
+                fixture.AddElement(profile, "Coding");
+                DbElement code = fixture.AddTypedElement(profile, "Coding.code", "code");
+                fixture.BindRequired(code, "selected-codes");
+                fixture.AddTypedElement(profile, "Coding.system", "uri");
+                fixture.ConfigureDefinition(profile, definition =>
+                {
+                    definition.Snapshot.Element.Single(element => element.Path == "Coding.code").Fixed = new Code("selected");
+                    definition.Snapshot.Element.Single(element => element.Path == "Coding.system").Pattern = new FhirUri("urn:example:profile-values");
+                    definition.Snapshot.Element[0].Constraint.Add(new()
+                    {
+                        Key = "selected-1", Severity = ConstraintSeverity.Error, Human = "Code requires system.",
+                        Expression = "code.empty() or system.exists()", Source = profile.VersionedUrl,
+                    });
+                });
+            }
+            else
+            {
+                fixture.AuthorBinding(package, "selected-codes");
+            }
+            fixture.AddType(use, "Coding", coding, profile);
+            uses.Add(package.Key, use);
+        }
+        DbStructureOutcome owner = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage, "Parameters"), fixture.Structure(pair.TargetPackage, "Parameters"));
+        fixture.Connect(pair, owner, uses[pair.SourcePackageKey], uses[pair.TargetPackageKey]);
+        fixture.CompleteAuthoredArrangement(pair);
+        fixture.GenerateSafety(pair);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        string persisted = fixture.SafetyPersistenceSnapshot();
+        ProfileRepresentationProof native = ProfileUseFacts.ClassifyPair(fixture.Connection, pair)
+            .Single(proof => proof.Input.ElementKey == uses[pair.SourcePackageKey].Key);
+        native.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        native.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.OwnerProjectionRequired);
+        StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
+        StructureFhirExporter.BuiltDefinition emitted = built.Profiles.Single(item => item.OutcomeKey == owner.Key);
+        emitted.Projections.ShouldHaveSingleItem().Kind.ShouldBe(ProfileProofKind.OwnerProjection);
+        emitted.Projections[0].ProjectionOwner!.OwnerKey.ShouldBe(owner.TargetStructureKey!.Value);
+        built.Profiles.ShouldNotContain(item => item.Definition.Type == "Coding");
+        string json = targetIndex == 0
+            ? new r4::Hl7.Fhir.Serialization.FhirJsonSerializer().SerializeToString(emitted.Definition)
+            : new r4b::Hl7.Fhir.Serialization.FhirJsonSerializer().SerializeToString(emitted.Definition);
+        ParserSettings settings = new() { PermissiveParsing = true };
+        StructureDefinition recovered = targetIndex == 0
+            ? new r4::Hl7.Fhir.Serialization.FhirJsonParser(settings).Parse<StructureDefinition>(json)
+            : new r4b::Hl7.Fhir.Serialization.FhirJsonParser(settings).Parse<StructureDefinition>(json);
+        ElementDefinition occurrence = recovered.Differential.Element.Single(element => element.ElementId == "Parameters.parameter.value[x]");
+        recovered.Differential.Element.Where(element => element.ElementId.StartsWith(occurrence.ElementId, StringComparison.Ordinal))
+            .Select(element => element.ElementId).ShouldBe(
+            [
+                occurrence.ElementId, occurrence.ElementId + ".system", occurrence.ElementId + ".version", occurrence.ElementId + ".code",
+            ]);
+        occurrence.Min.ShouldBe(1);
+        occurrence.Max.ShouldBe("1");
+        ElementDefinition.ConstraintComponent invariant = occurrence.Constraint.Single(constraint => constraint.Key == "selected-1");
+        invariant.Expression.ShouldBe("code.empty() or system.exists()");
+        invariant.Source.ShouldBe(fixture.Structure(pair.SourcePackage, "SelectedCoding").VersionedUrl);
+        ElementDefinition codeDefinition = recovered.Differential.Element.Single(element => element.ElementId == occurrence.ElementId + ".code");
+        codeDefinition.Min.ShouldBe(1);
+        codeDefinition.Fixed.ShouldBeOfType<Code>().Value.ShouldBe("selected");
+        codeDefinition.Binding.Strength.ShouldBe(BindingStrength.Required);
+        codeDefinition.Binding.ValueSet.ShouldBe("http://example.org/ValueSet/selected-codes|binding-1");
+        ElementDefinition systemDefinition = recovered.Differential.Element.Single(element => element.ElementId == occurrence.ElementId + ".system");
+        systemDefinition.Pattern.ShouldBeOfType<FhirUri>().Value.ShouldBe("urn:example:profile-values");
+        DbValueSet domain = DbValueSet.SelectSingle(fixture.Connection, FhirPackageKey: pair.TargetPackageKey,
+            VersionedUrl: codeDefinition.Binding.ValueSet)!;
+        (string Coding, bool Valid, bool SatisfiesInvariant)[] instances =
+        [
+            ("""{"system":"urn:example:profile-values","code":"selected"}""", true, true),
+            ("""{"system":"urn:example:profile-values","code":"other"}""", false, true),
+            ("""{"system":"urn:example:other","code":"selected"}""", false, true),
+            ("""{"code":"selected"}""", false, false),
+            ("""{"system":"urn:example:profile-values"}""", false, true),
+        ];
+        foreach ((string coding, bool valid, bool satisfiesInvariant) in instances)
+        {
+            string instanceJson = """{"resourceType":"Parameters","parameter":[{"name":"example","valueCoding":""" + coding + "}]}";
+            ITypedElement instance = targetIndex == 0
+                ? new r4::Hl7.Fhir.Serialization.FhirJsonParser().Parse<Parameters>(instanceJson)
+                    .ToTypedElement(r4::Hl7.Fhir.Model.ModelInfo.ModelInspector)
+                : new r4b::Hl7.Fhir.Serialization.FhirJsonParser().Parse<Parameters>(instanceJson)
+                    .ToTypedElement(r4b::Hl7.Fhir.Model.ModelInfo.ModelInspector);
+            ITypedElement value = instance.Children("parameter").Single().Children("value").Single();
+            Evaluate(invariant.Expression, value).ShouldBe(satisfiesInvariant);
+            bool cardinality = value.Children("code").Count() >= codeDefinition.Min && value.Children("code").Count() <= int.Parse(codeDefinition.Max) &&
+                value.Children("system").Count() >= systemDefinition.Min;
+            string? code = (string?)value.Children("code").SingleOrDefault()?.Value;
+            string? system = (string?)value.Children("system").SingleOrDefault()?.Value;
+            bool conforms = cardinality && code == ((Code)codeDefinition.Fixed).Value &&
+                system == ((FhirUri)systemDefinition.Pattern).Value &&
+                domain.Compose!.Include.Any(include => include.Concept.Any(concept => concept.Code == code)) &&
+                Evaluate(invariant.Expression, value);
+            conforms.ShouldBe(valid, coding);
+        }
+        fixture.SafetyPersistenceSnapshot().ShouldBe(persisted);
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [pair]);
+        DbElementOutcome negative = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: uses[pair.SourcePackageKey].Key)!;
+        negative.ExtensionDefinitionIsProhibited.ShouldBeTrue();
+        ProfileUseFacts.ReadDecisions(negative.ExtensionProhibitionReason!).ShouldHaveSingleItem().Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        XVerStructureCatalog catalog = new(fixture.Connection);
+        using ProfileUseFacts facts = new(catalog, pair.SourcePackageKey, pair.TargetPackageKey);
+        facts.ProveInOwner(native, fixture.Structure(pair.TargetPackage, "Parameters"), new HashSet<int>()).PreservesRestrictions.ShouldBeFalse();
+        catalog.ReadPayload(fixture.Structure(pair.TargetPackage, "Coding")).Snapshot.Element.ShouldAllBe(element =>
+            element.Fixed == null && element.Pattern == null && element.Binding == null && element.Constraint.Count == 0);
     }
 
     [Theory]
@@ -2702,17 +3248,22 @@ public class UnsafeCodeProfileTests
         {
             DbStructureDefinition inner = fixture.AddStructure(package, "Inner");
             fixture.AddElement(inner, "Inner");
-            fixture.AddTypedElement(inner, "Inner.status", "code");
+            DbElement status = fixture.AddTypedElement(inner, "Inner.status", "code");
+            if (package.Key == pair.TargetPackageKey)
+            {
+                fixture.BindRequired(status, "profile-only");
+            }
             fixture.AddTypedElement(fixture.Structure(package), "ValueSet.first", "Inner");
             fixture.AddTypedElement(fixture.Structure(package), "ValueSet.second", "Inner");
         }
 
         DbStructureDefinition profile = fixture.AddStructure(pair.SourcePackage, "InnerProfile", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Profile);
+        fixture.DeclareProfile(profile, fixture.Structure(pair.SourcePackage, "Inner"));
         fixture.AddElement(profile, "Inner");
         DbElement inherited = fixture.AddTypedElement(profile, "Inner.status", "code");
         inherited.IsInherited = true;
         inherited.BasePath = "Inner.status";
-        inherited.BindingValueSet = "http://example.org/ValueSet/profile-only";
+        fixture.BindRequired(inherited, "profile-only");
         DbElement.Update(fixture.Connection, [inherited]);
         foreach (DbElementType type in DbElementType.SelectList(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, TypeName: "Inner"))
         {
@@ -2721,13 +3272,14 @@ public class UnsafeCodeProfileTests
             DbElementType.Update(fixture.Connection, [type]);
         }
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         foreach (string use in new[] { "first", "second" })
         {
             RepresentationLocation location = built.Representations.Resolve(outcome.Key,
                 SourcePath("ValueSet." + use).Add(new("Inner.status", profile.VersionedUrl, false))).ShouldHaveSingleItem();
             location.State.ShouldBe(RepresentationState.Observable);
-            location.SourceBinding!.Url.ShouldBe(inherited.BindingValueSet);
+            location.SourceBinding.ShouldBe(UnsafeCodeCanonical.Parse(inherited.BindingValueSet));
             location.Steps.OfType<MemberStep>().Select(step => step.Name).ShouldBe([use, "status"]);
         }
     }
@@ -2745,13 +3297,15 @@ public class UnsafeCodeProfileTests
         DbStructureDefinition sourceType = fixture.AddStructure(pair.SourcePackage, "Inner");
         DbElement sourceRoot = fixture.AddElement(sourceType, "Inner");
         DbElement inherited = fixture.AddTypedElement(sourceType, "Inner.status", "code");
-        inherited.BindingValueSet = "http://example.org/ValueSet/base";
+        fixture.BindRequired(inherited, "base");
         DbElement.Update(fixture.Connection, [inherited]);
         DbStructureDefinition intermediate = fixture.AddStructure(pair.SourcePackage, "IntermediateProfile", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Profile);
+        fixture.DeclareProfile(intermediate, sourceType);
         DbElement intermediateRoot = fixture.AddElement(intermediate, "Inner");
         intermediateRoot.BaseStructureKey = sourceType.Key;
         DbElement.Update(fixture.Connection, [intermediateRoot]);
         DbStructureDefinition profile = fixture.AddStructure(pair.SourcePackage, "InnerProfile", Fhir.CodeGen.Common.Models.FhirArtifactClassEnum.Profile);
+        fixture.DeclareProfile(profile, intermediate);
         DbElement profileRoot = fixture.AddElement(profile, "Inner");
         profileRoot.BaseElementKey = intermediateRoot.Key;
         DbElement.Update(fixture.Connection, [profileRoot]);
@@ -2760,24 +3314,53 @@ public class UnsafeCodeProfileTests
         {
             effective = fixture.AddTypedElement(profile, "Inner.status", "code");
             effective.BaseElementKey = inherited.Key;
-            effective.BindingValueSet = "http://example.org/ValueSet/override";
+            fixture.BindRequired(effective, "override");
             DbElement.Update(fixture.Connection, [effective]);
         }
 
         DbStructureDefinition targetType = fixture.AddStructure(pair.TargetPackage, "Inner");
         fixture.AddElement(targetType, "Inner");
         DbElement target = fixture.AddTypedElement(targetType, "Inner.renamed", "code");
+        fixture.BindRequired(target, "base");
+        DbStructureDefinition? targetProfile = null;
+        if (overrideField)
+        {
+            targetProfile = fixture.AddStructure(pair.TargetPackage, "InnerProfile", FhirArtifactClassEnum.Profile);
+            fixture.DeclareProfile(targetProfile, targetType);
+            DbElement targetProfileRoot = fixture.AddElement(targetProfile, "Inner");
+            targetProfileRoot.BaseElementKey = DbElement.SelectSingle(fixture.Connection, StructureKey: targetType.Key, Id: "Inner")!.Key;
+            DbElement.Update(fixture.Connection, [targetProfileRoot]);
+            DbElement targetOverride = fixture.AddTypedElement(targetProfile, "Inner.renamed", "code");
+            targetOverride.BaseElementKey = target.Key;
+            fixture.BindRequired(targetOverride, "override");
+            DbElement.Update(fixture.Connection, [targetOverride]);
+        }
         DbStructureOutcome typeOutcome = fixture.AddOutcome(pair, sourceType, targetType);
         fixture.Connect(pair, typeOutcome, inherited, target);
         DbElement use = fixture.AddElement(fixture.Structure(pair.SourcePackage), "ValueSet.first", "Inner");
         fixture.AddType(use, "Inner", sourceType, profile);
-        fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.first", "Inner");
+        DbElement targetUse = fixture.AddElement(fixture.Structure(pair.TargetPackage), "ValueSet.first", "Inner");
+        fixture.AddType(targetUse, "Inner", targetType, targetProfile);
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         ImmutableArray<UnsafeCodePathStep> path = SourcePath(use.Id).Add(new(effective.Id, profile.VersionedUrl, false));
         RepresentationLocation location = built.Representations.Resolve(outcome.Key, path).ShouldHaveSingleItem();
         location.State.ShouldBe(RepresentationState.Observable);
-        location.SourceBinding!.Url.ShouldBe(effective.BindingValueSet);
+        location.SourceBinding.ShouldBe(UnsafeCodeCanonical.Parse(effective.BindingValueSet));
+        XVerStructureCatalog catalog = new(fixture.Connection);
+        using ProfileUseFacts facts = new(catalog, pair.SourcePackageKey, pair.TargetPackageKey,
+            DbElementComparison.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey));
+        ProfileRepresentationProof proof = facts.ClassifyRequiredUses().Single(proof => proof.Input.ElementKey == use.Key);
+        proof.Kind.ShouldBe(ProfileProofKind.NativeReuse);
+        proof.SourceRoot.OwnerKey.ShouldBe(profile.Key);
+        proof.TargetRoot!.OwnerKey.ShouldBe(targetProfile?.Key ?? targetType.Key);
+        proof.TargetCanonical.ShouldBe(targetProfile?.VersionedUrl ?? targetType.VersionedUrl);
+        proof.NativeInput!.OwnerKey.ShouldBe(targetUse.StructureKey);
+        proof.NativeInput.ElementKey.ShouldBe(targetUse.Key);
+        proof.RequiredFacts[".status"].Origins.ShouldContain(origin => origin.OwnerKey == (overrideField ? profile.Key : sourceType.Key));
+        proof.NativeFacts[".renamed"].ElementId.ShouldBe("Inner.renamed");
+        proof.NativeFacts.ShouldNotContainKey(".status");
         location.Steps.OfType<MemberStep>().Select(step => step.Name).ShouldBe(["first", "renamed"]);
         built.Representations.Occurrences(outcome.Key).ShouldContain(occurrence =>
             occurrence.SourcePath.SequenceEqual(path) && occurrence.Locations.Any(candidate => candidate.State == RepresentationState.Observable));
@@ -2814,6 +3397,7 @@ public class UnsafeCodeProfileTests
         DbElement coding = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: "CodeableConcept.coding")!;
         fixture.AddRepresentationOutcome(pair, coding, "CodeableConcept");
 
+        fixture.CompleteAuthoredArrangement(pair);
         StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
         foreach (string use in new[] { "mapped", "unrelated" })
         {
@@ -2863,8 +3447,11 @@ public class UnsafeCodeProfileTests
         if (sourceType != "Quantity")
         {
             DbStructureDefinition type = fixture.AddStructure(pair.SourcePackage, sourceType);
+            fixture.DeclareBaseDefinition(type, fixture.Structure(pair.SourcePackage, "Quantity"));
             DbElement root = fixture.AddElement(type, sourceType);
             root.BaseStructureKey = fixture.Structure(pair.SourcePackage, "Quantity").Key;
+            root.BasePath = "Quantity";
+            root.BaseElementKey = DbElement.SelectSingle(fixture.Connection, StructureKey: root.BaseStructureKey, ResourceFieldOrder: 0)!.Key;
             DbElement.Update(fixture.Connection, [root]);
         }
 
@@ -2890,12 +3477,19 @@ public class UnsafeCodeProfileTests
         }
 
         fixture.Connect(pair, outcome, source, target);
-        StructureFhirExporter.BuiltDefinitions built = Exporter(fixture).BuildDefinitions(Tracking(pair));
-        RepresentationLocation location = built.Representations.Resolve(outcome.Key, SourcePath(source.Id)).ShouldHaveSingleItem();
+        fixture.CompleteAuthoredArrangement(pair);
+        // The index can describe a lossy native mapping without advertising it as a
+        // usable scheduled representation of the complete Quantity occurrence.
+        ProfileRepresentationIndex index = new(fixture.Connection, pair);
+        index.AddProfile(outcome, DbElement.SelectSingle(fixture.Connection,
+            StructureKey: outcome.TargetStructureKey, ResourceFieldOrder: 0)!);
+        index.AddNative(outcome, target);
+        RepresentationLocation location = index.Resolve(outcome.Key, SourcePath(source.Id)).ShouldHaveSingleItem();
         location.SourceType.ShouldBe(sourceType);
         location.TargetType.ShouldBe("code");
         location.State.ShouldBe(bound && !ambiguous ? RepresentationState.Observable : RepresentationState.ErasedIdentity);
-        built.Profiles.SelectMany(profile => profile.Definition.Differential.Element).SelectMany(element => element.Constraint).ShouldBeEmpty();
+        Should.Throw<InvalidOperationException>(() => Exporter(fixture).BuildDefinitions(Tracking(pair)))
+            .Message.ShouldContain("Unrepresentable scheduled");
     }
 
     private static IEnumerable<ITypedElement> Locate(ITypedElement root, ImmutableArray<RepresentationStep> steps)

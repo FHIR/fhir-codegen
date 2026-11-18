@@ -81,6 +81,7 @@ public class MappingLoader : IDisposable
         });
 
         ImmutableArray<UnsafeCodeRule> unsafeCodeRules = UnsafeCodeConfigurationLoader.Load(_fhirCrossVersionRepoPath);
+        DefinitionInventoryStore.RequireReady(_db);
 
         // ensure our tables exist and are empty
         DbMappingClasses.DropTables(_db);
@@ -155,6 +156,7 @@ public class MappingLoader : IDisposable
         // check for inverses of all mappings
         //checkInversions();
 
+        UnsafeCodeSourceReader.ResolveOwners(_db);
         UnsafeCodeInputStore.CompleteInputs(_db, _packages);
         return true;
     }
