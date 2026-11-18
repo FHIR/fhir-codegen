@@ -11,16 +11,18 @@ using Hl7.Fhir.Utility;
 
 namespace Fhir.CodeGen.Comparison.Models;
 
-internal sealed class XVerStructureCatalog
+internal sealed class XVerStructureCatalog : IDisposable
 {
-    private readonly IDbConnection _db;
+    private readonly IDbConnection? _db;
+    private readonly XVerOperandEvidence? _evidence;
+    private bool _disposed;
     private readonly Dictionary<int, DbStructureDefinition> _structures;
     private readonly Dictionary<int, DbFhirPackage> _packages;
     private readonly Dictionary<int, DbElement> _elements;
     private readonly Dictionary<int, DbStructureDefinitionFacts> _facts;
-    private readonly ILookup<int, DbElement> _elementsByOwner;
-    private readonly ILookup<int, DbElementType> _typesByElement;
-    private readonly Dictionary<(int, int, string), DbElement> _ownedElements;
+    private ILookup<int, DbElement> _elementsByOwner;
+    private ILookup<int, DbElementType> _typesByElement;
+    private Dictionary<(int, int, string), DbElement> _ownedElements;
     private readonly Dictionary<int, IReadOnlyList<DbStructureDefinition>> _ancestors = [];
     private readonly Dictionary<int, StructureDefinition> _payloads = [];
     private readonly Dictionary<int, Dictionary<string, ElementDefinition>> _payloadElements = [];
@@ -29,13 +31,39 @@ internal sealed class XVerStructureCatalog
     private readonly List<string> _diagnostics = [];
 
     internal XVerStructureCatalog(IDbConnection db, HashSet<string>? exclusions = null, string? elementTableName = null)
+        : this(db, DbStructureDefinition.SelectList(db), DbFhirPackage.SelectList(db),
+            DbElement.SelectList(db, dbTableName: elementTableName), DbStructureDefinitionFacts.SelectList(db),
+            DbElementType.SelectList(db), exclusions ?? [], null)
+    {
+    }
+
+    internal XVerStructureCatalog(XVerOperandEvidence evidence)
+        : this(null, evidence.Rows<DbStructureDefinition>(DbStructureDefinition.DefaultTableName),
+            evidence.Rows<DbFhirPackage>(DbFhirPackage.DefaultTableName),
+            evidence.Rows<DbElement>(evidence.Options.Kind is XVerPreparationKind.Comparison or XVerPreparationKind.Outcomes or XVerPreparationKind.Export
+                ? DbElement.DefaultTableName : evidence.Options.ElementTableName),
+            evidence.Rows<DbStructureDefinitionFacts>(DbStructureDefinitionFacts.DefaultTableName),
+            evidence.Rows<DbElementType>(DbElementType.DefaultTableName), [.. evidence.Options.Exclusions], evidence)
+    {
+    }
+
+    private XVerStructureCatalog(
+        IDbConnection? db,
+        IEnumerable<DbStructureDefinition> structures,
+        IEnumerable<DbFhirPackage> packages,
+        IEnumerable<DbElement> elements,
+        IEnumerable<DbStructureDefinitionFacts> facts,
+        IEnumerable<DbElementType> types,
+        HashSet<string> exclusions,
+        XVerOperandEvidence? evidence)
     {
         _db = db;
-        _structures = DbStructureDefinition.SelectList(db).ToDictionary(row => row.Key);
-        _packages = DbFhirPackage.SelectList(db).ToDictionary(row => row.Key);
-        _elements = DbElement.SelectList(db, dbTableName: elementTableName).ToDictionary(row => row.Key);
-        _facts = DbStructureDefinitionFacts.SelectList(db).ToDictionary(row => row.StructureKey);
-        _exclusions = exclusions ?? [];
+        _evidence = evidence;
+        _structures = structures.ToDictionary(row => row.Key);
+        _packages = packages.ToDictionary(row => row.Key);
+        _elements = elements.ToDictionary(row => row.Key);
+        _facts = facts.ToDictionary(row => row.StructureKey);
+        _exclusions = exclusions;
         foreach (IGrouping<(int, string, string), DbStructureDefinition> group in _structures.Values
             .GroupBy(row => (row.FhirPackageKey, row.UnversionedUrl, row.Version)))
         {
@@ -45,12 +73,12 @@ internal sealed class XVerStructureCatalog
             }
         }
 
-        foreach (DbStructureDefinitionFacts facts in _facts.Values)
+        foreach (DbStructureDefinitionFacts row in _facts.Values)
         {
-            if (!_structures.TryGetValue(facts.StructureKey, out DbStructureDefinition? owner) ||
-                owner.FhirPackageKey != facts.FhirPackageKey)
+            if (!_structures.TryGetValue(row.StructureKey, out DbStructureDefinition? owner) ||
+                owner.FhirPackageKey != row.FhirPackageKey)
             {
-                throw new InvalidOperationException($"Definition facts {facts.Key} have an invalid owner {facts.FhirPackageKey}/{facts.StructureKey}.");
+                throw new InvalidOperationException($"Definition facts {row.Key} have an invalid owner {row.FhirPackageKey}/{row.StructureKey}.");
             }
         }
 
@@ -64,29 +92,49 @@ internal sealed class XVerStructureCatalog
         }
 
         _elementsByOwner = _elements.Values.ToLookup(row => row.StructureKey);
-        _typesByElement = DbElementType.SelectList(db).ToLookup(row => row.ElementKey);
+        _typesByElement = types.ToLookup(row => row.ElementKey);
         _ownedElements = _elements.Values.ToDictionary(row => (row.FhirPackageKey, row.StructureKey, row.Id));
     }
 
-    internal IReadOnlyList<string> Diagnostics => _diagnostics;
+    internal IReadOnlyList<string> Diagnostics
+    {
+        get
+        {
+            RequireActive();
+            return _diagnostics;
+        }
+    }
 
-    internal DbElementMapping? GetElementMapping(int key) => DbElementMapping.SelectSingle(_db, Key: key);
+    internal DbElementMapping? GetElementMapping(int key)
+    {
+        RequireActive();
+        return _evidence is null ? DbElementMapping.SelectSingle(_db!, Key: key) :
+            _evidence.Rows<DbElementMapping>(DbElementMapping.DefaultTableName).SingleOrDefault(row => row.Key == key);
+    }
 
     internal bool HasValueSet(int packageKey, string canonical)
     {
+        RequireActive();
         UnsafeCodeCanonical identity = UnsafeCodeCanonical.Parse(canonical);
         return identity.Url is not null && identity.Version is not null &&
-            DbValueSet.SelectList(_db, FhirPackageKey: packageKey, UnversionedUrl: identity.Url, Version: identity.Version).Count == 1;
+            (_evidence is null
+                ? DbValueSet.SelectList(_db!, FhirPackageKey: packageKey, UnversionedUrl: identity.Url, Version: identity.Version).Count
+                : _evidence.Rows<DbValueSet>(DbValueSet.DefaultTableName).Count(row => row.FhirPackageKey == packageKey &&
+                    row.UnversionedUrl == identity.Url && row.Version == identity.Version)) == 1;
     }
 
     internal IReadOnlyList<DbStructureDefinition> GetDefinitions(int fhirPackageKey) =>
-        [.. _structures.Values.Where(row => row.FhirPackageKey == fhirPackageKey).OrderBy(row => row.Key)];
+        [.. ActiveStructures().Where(row => row.FhirPackageKey == fhirPackageKey).OrderBy(row => row.Key)];
 
     internal IReadOnlyList<DbStructureDefinition> GetProcessedStructures(int fhirPackageKey) =>
         [.. GetDefinitions(fhirPackageKey).Where(IsProcessed)];
 
-    internal DbStructureDefinition GetStructure(int key) => _structures.TryGetValue(key, out DbStructureDefinition? owner)
-        ? owner : throw new InvalidOperationException($"Definition catalog owner {key} is missing.");
+    internal DbStructureDefinition GetStructure(int key)
+    {
+        RequireActive();
+        return _structures.TryGetValue(key, out DbStructureDefinition? owner)
+            ? owner : throw new InvalidOperationException($"Definition catalog owner {key} is missing.");
+    }
 
     internal bool IsProcessed(int key) => IsProcessed(GetStructure(key));
 
@@ -137,6 +185,7 @@ internal sealed class XVerStructureCatalog
 
     internal bool IsProcessed(DbStructureDefinition owner)
     {
+        RequireActive();
         if (_exclusions.Contains(owner.UnversionedUrl) || owner.Message == "Manually excluded")
         {
             return false;
@@ -174,7 +223,7 @@ internal sealed class XVerStructureCatalog
 
     internal DbStructureDefinition? ResolveDefinition(
         int fhirPackageKey, string? canonical, int? existingKey = null, bool required = true, string? context = null) =>
-        ResolveDefinition(_structures.Values, fhirPackageKey, canonical, existingKey, required, context);
+        ResolveDefinition(ActiveStructures(), fhirPackageKey, canonical, existingKey, required, context);
 
     internal static DbStructureDefinition? ResolveDefinition(
         IEnumerable<DbStructureDefinition> structures, int fhirPackageKey, string? canonical,
@@ -205,7 +254,7 @@ internal sealed class XVerStructureCatalog
 
     internal DbStructureDefinition? ResolveNativeType(
         int fhirPackageKey, string? name, int? existingKey = null, bool required = true, string? context = null) =>
-        ResolveNativeType(_structures.Values, fhirPackageKey, name, existingKey, required, context);
+        ResolveNativeType(ActiveStructures(), fhirPackageKey, name, existingKey, required, context);
 
     internal static DbStructureDefinition? ResolveNativeType(
         IEnumerable<DbStructureDefinition> structures, int fhirPackageKey, string? name,
@@ -234,6 +283,7 @@ internal sealed class XVerStructureCatalog
 
     internal DbElement ResolveRoot(DbStructureDefinition owner)
     {
+        RequireActive();
         if (_roots.TryGetValue(owner.Key, out DbElement? cached))
         {
             return cached;
@@ -271,6 +321,7 @@ internal sealed class XVerStructureCatalog
     internal DbElement? ResolveOwnedElement(
         DbStructureDefinition owner, string elementId, int? existingKey = null, bool required = true)
     {
+        RequireActive();
         _ownedElements.TryGetValue((owner.FhirPackageKey, owner.Key, elementId), out DbElement? match);
         if (existingKey is int key && match?.Key != key)
         {
@@ -292,6 +343,7 @@ internal sealed class XVerStructureCatalog
 
     internal IReadOnlyList<DbStructureDefinition> GetAncestors(DbStructureDefinition owner)
     {
+        RequireActive();
         if (_ancestors.TryGetValue(owner.Key, out IReadOnlyList<DbStructureDefinition>? cached))
         {
             return cached;
@@ -411,6 +463,11 @@ internal sealed class XVerStructureCatalog
 
     internal void ResolveImportLinks(IDbConnection db, bool validateProcessedRoots)
     {
+        RequireActive();
+        if (_evidence is not null)
+        {
+            throw new InvalidOperationException("A captured definition catalog cannot write import links.");
+        }
         HashSet<int> processed = [];
         foreach (DbStructureDefinition owner in _structures.Values)
         {
@@ -488,6 +545,7 @@ internal sealed class XVerStructureCatalog
 
     internal void ValidateStoredLinks(IEnumerable<DbElementType> types)
     {
+        RequireActive();
         foreach (DbElement element in _elements.Values)
         {
             if (element.BaseElementKey is not null || element.BaseStructureKey is not null)
@@ -568,6 +626,7 @@ internal sealed class XVerStructureCatalog
 
     internal StructureDefinition ReadPayload(DbStructureDefinition owner)
     {
+        RequireActive();
         if (!_structures.TryGetValue(owner.Key, out DbStructureDefinition? recorded) ||
             recorded.FhirPackageKey != owner.FhirPackageKey || recorded.UnversionedUrl != owner.UnversionedUrl ||
             recorded.Version != owner.Version)
@@ -600,12 +659,79 @@ internal sealed class XVerStructureCatalog
         _payloads.Clear();
     }
 
-    internal DbFhirPackage GetPackage(int key) => _packages.TryGetValue(key, out DbFhirPackage? package)
-        ? package : throw new InvalidOperationException($"Definition catalog package {key} is missing.");
+    internal void SelectCapturedElementView()
+    {
+        RequireActive();
+        if (_evidence is null || _evidence.Options.ElementTableName == DbElement.DefaultTableName)
+        {
+            return;
+        }
+        List<DbElement> elements = _evidence.Rows<DbElement>(_evidence.Options.ElementTableName);
+        foreach (IGrouping<(int, int, string), DbElement> group in elements.GroupBy(row => (row.FhirPackageKey, row.StructureKey, row.Id)))
+        {
+            if (group.Count() != 1)
+            {
+                throw new InvalidOperationException($"Duplicate owned element {group.Key}.");
+            }
+        }
+        _elements.Clear();
+        foreach (DbElement element in elements)
+        {
+            _elements.Add(element.Key, element);
+        }
+        _elementsByOwner = _elements.Values.ToLookup(row => row.StructureKey);
+        _ownedElements = _elements.Values.ToDictionary(row => (row.FhirPackageKey, row.StructureKey, row.Id));
+        _roots.Clear();
+        ReleasePayloads();
+    }
 
-    internal IReadOnlyList<DbElement> GetOwnedElements(DbStructureDefinition owner) =>
-        [.. _elementsByOwner[owner.Key].Where(row => row.FhirPackageKey == owner.FhirPackageKey)
+    private IEnumerable<DbStructureDefinition> ActiveStructures()
+    {
+        RequireActive();
+        return _structures.Values;
+    }
+
+    private void RequireActive()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _evidence?.RequireActive();
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+        ReleasePayloads();
+        _roots.Clear();
+        _ancestors.Clear();
+        _structures.Clear();
+        _packages.Clear();
+        _elements.Clear();
+        _facts.Clear();
+        _ownedElements.Clear();
+        _diagnostics.Clear();
+        DbElement[] noElements = [];
+        DbElementType[] noTypes = [];
+        _elementsByOwner = noElements.ToLookup(row => row.StructureKey);
+        _typesByElement = noTypes.ToLookup(row => row.ElementKey);
+    }
+
+    internal DbFhirPackage GetPackage(int key)
+    {
+        RequireActive();
+        return _packages.TryGetValue(key, out DbFhirPackage? package)
+            ? package : throw new InvalidOperationException($"Definition catalog package {key} is missing.");
+    }
+
+    internal IReadOnlyList<DbElement> GetOwnedElements(DbStructureDefinition owner)
+    {
+        RequireActive();
+        return [.. _elementsByOwner[owner.Key].Where(row => row.FhirPackageKey == owner.FhirPackageKey)
             .OrderBy(row => row.ResourceFieldOrder)];
+    }
 
     internal IReadOnlyList<DbElement> GetOwnedChildren(DbElement parent) =>
         [.. GetOwnedElements(RequireOwner(parent)).Where(row => row.ParentElementKey == parent.Key)];
@@ -681,13 +807,19 @@ internal sealed class XVerStructureCatalog
         return $"{RequireOwner(element).VersionedUrl}#{element.Id} (element type {type.Key})";
     }
 
-    private DbStructureDefinitionFacts RequireFacts(DbStructureDefinition owner) =>
-        _facts.TryGetValue(owner.Key, out DbStructureDefinitionFacts? facts) && facts.FhirPackageKey == owner.FhirPackageKey
+    private DbStructureDefinitionFacts RequireFacts(DbStructureDefinition owner)
+    {
+        RequireActive();
+        return _facts.TryGetValue(owner.Key, out DbStructureDefinitionFacts? facts) && facts.FhirPackageKey == owner.FhirPackageKey
             ? facts : throw Error(owner, "missing normalized definition facts");
+    }
 
-    private DbStructureDefinition RequireOwner(DbElement element) =>
-        _structures.TryGetValue(element.StructureKey, out DbStructureDefinition? owner) && owner.FhirPackageKey == element.FhirPackageKey
+    private DbStructureDefinition RequireOwner(DbElement element)
+    {
+        RequireActive();
+        return _structures.TryGetValue(element.StructureKey, out DbStructureDefinition? owner) && owner.FhirPackageKey == element.FhirPackageKey
             ? owner : throw new InvalidOperationException($"Element {element.Key} '{element.Id}' has invalid owner {element.FhirPackageKey}/{element.StructureKey}.");
+    }
 
     private static DbElement ValidateBase(DbElement element, DbElement inherited, DbStructureDefinition owner)
     {

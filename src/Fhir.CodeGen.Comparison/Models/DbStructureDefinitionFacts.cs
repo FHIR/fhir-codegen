@@ -230,20 +230,58 @@ internal static class DefinitionInventoryStore
 
     private static void ValidateInventory(IDbConnection db, DbDefinitionInventoryState state)
     {
-        DefinitionInventoryPackageCounts[] expected = JsonSerializer.Deserialize<DefinitionInventoryPackageCounts[]>(state.ExpectedPackageCountsJson)
-            ?? throw new InvalidOperationException("Definition inventory expected source counts are missing.");
+        DefinitionInventoryPackageCounts[] expected = ReadExpectedPackageCounts(state);
         List<DbFhirPackage> packages = DbFhirPackage.SelectList(db);
-        if (!packages.Select(row => row.Key).Order().SequenceEqual(expected.Select(row => row.FhirPackageKey).Order()) ||
-            expected.Select(row => row.FhirPackageKey).Distinct().Count() != expected.Length)
-        {
-            throw new InvalidOperationException("Definition inventory package set does not match the expected source package set.");
-        }
-
+        ValidatePackageSet(packages, expected);
         List<DbStructureDefinition> structures = DbStructureDefinition.SelectList(db);
         List<DbStructureDefinitionFacts> facts = DbStructureDefinitionFacts.SelectList(db);
         List<DbElement> elements = DbElement.SelectList(db);
         List<DbElementType> types = DbElementType.SelectList(db);
         List<DbElementAdditionalBinding> bindings = DbElementAdditionalBinding.SelectList(db);
+        ValidateInventoryRows(expected, packages, structures, facts, elements, types, bindings);
+        XVerStructureCatalog catalog = new(db);
+        catalog.ValidateStoredLinks(types);
+    }
+
+    internal static void ValidateInventory(
+        DbDefinitionInventoryState state,
+        IReadOnlyList<DbFhirPackage> packages,
+        IReadOnlyList<DbStructureDefinition> structures,
+        IReadOnlyList<DbStructureDefinitionFacts> facts,
+        IReadOnlyList<DbElement> elements,
+        IReadOnlyList<DbElementType> types,
+        IReadOnlyList<DbElementAdditionalBinding> bindings,
+        XVerStructureCatalog catalog)
+    {
+        DefinitionInventoryPackageCounts[] expected = ReadExpectedPackageCounts(state);
+        ValidatePackageSet(packages, expected);
+        ValidateInventoryRows(expected, packages, structures, facts, elements, types, bindings);
+        catalog.ValidateStoredLinks(types);
+    }
+
+    private static DefinitionInventoryPackageCounts[] ReadExpectedPackageCounts(DbDefinitionInventoryState state) =>
+        JsonSerializer.Deserialize<DefinitionInventoryPackageCounts[]>(state.ExpectedPackageCountsJson)
+            ?? throw new InvalidOperationException("Definition inventory expected source counts are missing.");
+
+    private static void ValidatePackageSet(
+        IReadOnlyList<DbFhirPackage> packages, DefinitionInventoryPackageCounts[] expected)
+    {
+        if (!packages.Select(row => row.Key).Order().SequenceEqual(expected.Select(row => row.FhirPackageKey).Order()) ||
+            expected.Select(row => row.FhirPackageKey).Distinct().Count() != expected.Length)
+        {
+            throw new InvalidOperationException("Definition inventory package set does not match the expected source package set.");
+        }
+    }
+
+    private static void ValidateInventoryRows(
+        DefinitionInventoryPackageCounts[] expected,
+        IReadOnlyList<DbFhirPackage> packages,
+        IReadOnlyList<DbStructureDefinition> structures,
+        IReadOnlyList<DbStructureDefinitionFacts> facts,
+        IReadOnlyList<DbElement> elements,
+        IReadOnlyList<DbElementType> types,
+        IReadOnlyList<DbElementAdditionalBinding> bindings)
+    {
         Dictionary<int, DbStructureDefinition> owners = structures.ToDictionary(row => row.Key);
         Dictionary<int, DbElement> elementOwners = elements.ToDictionary(row => row.Key);
         ILookup<int, DbElement> elementsByOwner = elements.ToLookup(row => row.StructureKey);
@@ -340,9 +378,50 @@ internal static class DefinitionInventoryStore
                 throw new InvalidOperationException($"Definition inventory package {packageKey} does not match independent expected source counts. Expected {counts}; stored {actual}.");
             }
         }
+    }
 
-        XVerStructureCatalog catalog = new(db);
-        catalog.ValidateStoredLinks(types);
+    internal sealed class ValidatedInventory
+    {
+        private readonly XVerOperandEvidence _evidence;
+        private readonly string _completedMapBindings;
+
+        internal ValidatedInventory(XVerOperandEvidence evidence, XVerStructureCatalog catalog)
+        {
+            DbDefinitionInventoryState state = RequireCapturedCompletedState(evidence);
+            ValidateInventory(state, evidence.Rows<DbFhirPackage>(DbFhirPackage.DefaultTableName),
+                evidence.Rows<DbStructureDefinition>(DbStructureDefinition.DefaultTableName),
+                evidence.Rows<DbStructureDefinitionFacts>(DbStructureDefinitionFacts.DefaultTableName),
+                evidence.Rows<DbElement>(DbElement.DefaultTableName), evidence.Rows<DbElementType>(DbElementType.DefaultTableName),
+                evidence.Rows<DbElementAdditionalBinding>(DbElementAdditionalBinding.DefaultTableName), catalog);
+            catalog.ReleasePayloads();
+            _evidence = evidence;
+            Revision = state.CompletedRevision!;
+            _completedMapBindings = state.CompletedMapInventoryBindingsJson;
+        }
+
+        internal string Revision { get; }
+
+        internal void RequireMapBinding(string snapshotId)
+        {
+            _evidence.RequireActive();
+            RequireBoundSnapshot(_completedMapBindings, snapshotId, Revision);
+        }
+    }
+
+    internal static ValidatedInventory RequireReady(XVerOperandEvidence evidence, XVerStructureCatalog catalog) =>
+        new(evidence, catalog);
+
+    private static DbDefinitionInventoryState RequireCapturedCompletedState(XVerOperandEvidence evidence)
+    {
+        List<DbDefinitionInventoryState> states = evidence.Rows<DbDefinitionInventoryState>(DbDefinitionInventoryState.DefaultTableName);
+        if (states.Count != 1 || states[0].Key != 1 ||
+            states[0].FormatVersion != FormatVersion || states[0].PolicyVersion != PolicyVersion ||
+            string.IsNullOrEmpty(states[0].CompletedRevision) || states[0].CompletedRevision != states[0].StartedRevision)
+        {
+            throw new InvalidOperationException("Definition catalog is incomplete, incompatible, or stale. Reload the database, load maps, compare, generate outcomes, then export.");
+        }
+
+        return states[0];
     }
 
     internal static void BeginMapInputs(IDbConnection db, string inputSnapshotId, string inventoryRevision)
@@ -463,7 +542,15 @@ internal static class DefinitionInventoryStore
     {
         string revision = RequireReady(db);
         DbDefinitionInventoryState state = RequireCompletedState(db, revision);
-        if (!ReadBindings(state.CompletedMapInventoryBindingsJson).TryGetValue(snapshotId, out string? bound) ||
+        RequireBoundSnapshot(state.CompletedMapInventoryBindingsJson, snapshotId, revision);
+    }
+
+    internal static void RequireMapBinding(ValidatedInventory validatedState, string snapshotId) =>
+        validatedState.RequireMapBinding(snapshotId);
+
+    private static void RequireBoundSnapshot(string completedMapBindings, string snapshotId, string revision)
+    {
+        if (!ReadBindings(completedMapBindings).TryGetValue(snapshotId, out string? bound) ||
             bound != revision)
         {
             throw new InvalidOperationException("Map inputs are not bound to the completed definition catalog. Reload the database if incompatible, load maps, compare, generate outcomes, then export.");

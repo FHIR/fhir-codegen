@@ -4,12 +4,14 @@
 // </copyright>
 
 using System.Data;
+using System.Data.Common;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Xml;
 using System.Xml.Linq;
 using System.Xml.XPath;
@@ -50,6 +52,386 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         FhirReleases.FhirSequenceCodes.R4, FhirReleases.FhirSequenceCodes.R4B,
         FhirReleases.FhirSequenceCodes.R5,
     ];
+
+    [Fact]
+    public void OperandEvidenceCoversAllPersistedFields()
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        DbComparisonClasses.CreateTables(fixture.Connection);
+        DbOutcomeClasses.CreateTables(fixture.Connection);
+        ExecuteOperandSql(fixture.Connection, """
+            UPDATE Structures SET VersionAlgorithmCoding = '{ "system": "urn:fixture", "code": "original" }';
+            UPDATE ValueSets SET Compose = '{ "include": [ { "system": "urn:original" } ] }';
+            """);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        using XVerOperandEvidence evidence = XVerOperandEvidence.Capture(connection, new(XVerPreparationKind.Comparison));
+
+        foreach (XVerOperandEvidence.XVerTableManifest table in XVerOperandEvidence.Manifest)
+        {
+            string[] persisted = [.. table.RowType.GetProperties(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public)
+                .Where(property => property.SetMethod is not null &&
+                    !property.CustomAttributes.Any(attribute => attribute.AttributeType.Name == "CgSQLiteIgnore"))
+                .Select(property => property.Name).Order(StringComparer.Ordinal)];
+            table.PersistedFields.Order(StringComparer.Ordinal).ShouldBe(persisted, ignoreOrder: false, customMessage: table.RowType.Name);
+            table.PersistedFields.ShouldContain(nameof(DbRecordBase.Key));
+            connection.Statements.Any(sql =>
+            {
+                Match match = Regex.Match(sql, @"^SELECT (.+) FROM (\w+) ORDER BY Key ASC$");
+                return match.Success && match.Groups[2].Value == table.TableName &&
+                    match.Groups[1].Value.Split(", ").Order(StringComparer.Ordinal).SequenceEqual(persisted);
+            }).ShouldBeTrue(table.TableName);
+        }
+
+        foreach (string sql in connection.Statements)
+        {
+            (sql.StartsWith("SELECT ", StringComparison.Ordinal) || sql.StartsWith("PRAGMA ", StringComparison.Ordinal)).ShouldBeTrue(sql);
+            Match match = Regex.Match(sql, @"^SELECT (.+) FROM (\w+) ORDER BY Key(?: ASC)?$");
+            if (match.Success)
+            {
+                XVerOperandEvidence.XVerTableManifest table = XVerOperandEvidence.Manifest.Single(table => table.TableName == match.Groups[2].Value);
+                match.Groups[1].Value.Split(", ").ShouldAllBe(field => table.PersistedFields.Contains(field));
+            }
+        }
+
+        DbStructureDefinition copy = evidence.Rows<DbStructureDefinition>(DbStructureDefinition.DefaultTableName)[0];
+        copy.VersionAlgorithmCoding!.Code = "mutated";
+        copy.Key = -100;
+        evidence.Rows<DbStructureDefinition>(DbStructureDefinition.DefaultTableName)[0].VersionAlgorithmCoding!.Code.ShouldBe("original");
+        evidence.Rows<DbStructureDefinition>(DbStructureDefinition.DefaultTableName)[0].Key.ShouldBeGreaterThan(0);
+        DbValueSet valueSet = evidence.Rows<DbValueSet>(DbValueSet.DefaultTableName)[0];
+        valueSet.Compose!.Include[0].System = "urn:mutated";
+        evidence.Rows<DbValueSet>(DbValueSet.DefaultTableName)[0].Compose!.Include[0].System.ShouldBe("urn:original");
+        List<DbFhirPackage> packages = evidence.Rows<DbFhirPackage>(DbFhirPackage.DefaultTableName);
+        packages.Select(package => package.Key).ShouldBe(packages.Select(package => package.Key).Order());
+        evidence.Audit();
+        output.WriteLine($"Operand manifest: {XVerOperandEvidence.Manifest.Length} tables, {XVerOperandEvidence.Manifest.Sum(table => table.PersistedFields.Length)} persisted fields; reflected properties and observed SELECTs are a coverage guardrail, not a proof of reader closure.");
+    }
+
+    [Theory]
+    [InlineData("same-count", false)]
+    [InlineData("same-count", true)]
+    [InlineData("payload-json", false)]
+    [InlineData("payload-json", true)]
+    [InlineData("metadata-json", false)]
+    [InlineData("metadata-json", true)]
+    [InlineData("null-empty", false)]
+    [InlineData("null-empty", true)]
+    [InlineData("version", false)]
+    [InlineData("version", true)]
+    [InlineData("enum-text", false)]
+    [InlineData("enum-text", true)]
+    [InlineData("boolean-integer", false)]
+    [InlineData("boolean-integer", true)]
+    public void OperandAuditRejectsSameCountAndJsonOnlyChanges(string mutation, bool secondConnection)
+    {
+        using UnsafeCodeTestFixture fixture = new(persistDatabase: true);
+        DbOutcomeClasses.CreateTables(fixture.Connection);
+        ExecuteOperandSql(fixture.Connection, """
+            UPDATE Structures SET VersionAlgorithmCoding = '{"code":"same"}';
+            UPDATE ValueSets SET CanExpand = 1;
+            INSERT INTO UnsafeCodeTriggers
+                (Key, StructureOutcomeKey, SourceFhirPackageKey, TargetFhirPackageKey, SourceElementId, TargetElementId,
+                 SourcePathJson, System, Code, IsWildcardVersion, VersionsJson, EvidenceKeysJson, RuleKeysJson, AnnotationKeysJson)
+                VALUES (1, 1, 1, 2, 'sentinel', 'sentinel', '[]', 'urn:sentinel', 'sentinel', 0, '[]', '[]', '[]', '[]');
+            """);
+        using XVerOperandEvidence evidence = XVerOperandEvidence.Capture(fixture.Connection, new(XVerPreparationKind.Comparison));
+        using SqliteConnection writer = new(fixture.Connection.ConnectionString);
+        writer.Open();
+        IDbConnection target = secondConnection ? writer : fixture.Connection;
+        int[] capturedFactKeys = [.. evidence.Rows<DbStructureDefinitionFacts>(DbStructureDefinitionFacts.DefaultTableName)
+            .Select(facts => facts.Key).Order()];
+        capturedFactKeys.ShouldNotBeEmpty();
+        int replacementFactKey = capturedFactKeys[^1] + 1;
+        string sql = mutation switch
+        {
+            "same-count" => $"UPDATE StructureDefinitionFacts SET Key = {replacementFactKey} WHERE Key = {capturedFactKeys[0]}",
+            "payload-json" => "UPDATE StructureDefinitionFacts SET StructureDefinitionJson = StructureDefinitionJson || ' '",
+            "metadata-json" => """UPDATE Structures SET VersionAlgorithmCoding = '{ "code" : "same" }'""",
+            "null-empty" => "UPDATE FhirPackages SET Dependencies = ''",
+            "version" => "UPDATE FhirPackages SET PackageVersion = PackageVersion || '-changed'",
+            "enum-text" => $"UPDATE FhirPackages SET DefinitionFhirSequence = '{(int)fixture.Packages[0].DefinitionFhirSequence}' WHERE Key = {fixture.Packages[0].Key}",
+            "boolean-integer" => "UPDATE ValueSets SET CanExpand = 2",
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+        };
+        ExecuteOperandSql(target, sql);
+        if (mutation == "same-count")
+        {
+            int[] liveFactKeys = [.. DbStructureDefinitionFacts.SelectList(fixture.Connection).Select(facts => facts.Key).Order()];
+            liveFactKeys.Length.ShouldBe(capturedFactKeys.Length);
+            liveFactKeys.ShouldNotContain(capturedFactKeys[0]);
+            liveFactKeys.ShouldContain(replacementFactKey);
+        }
+        long changes = ReadOperandInteger(fixture.Connection, "SELECT total_changes()");
+        long schema = ReadOperandInteger(fixture.Connection, "PRAGMA schema_version");
+        string triggers = ReadOperandText(fixture.Connection, "SELECT SourcePathJson || VersionsJson || EvidenceKeysJson || RuleKeysJson || AnnotationKeysJson FROM UnsafeCodeTriggers");
+        Should.Throw<InvalidOperationException>(evidence.Audit).Message.ShouldContain("changed");
+        ReadOperandInteger(fixture.Connection, "SELECT total_changes()").ShouldBe(changes);
+        ReadOperandInteger(fixture.Connection, "PRAGMA schema_version").ShouldBe(schema);
+        ReadOperandText(fixture.Connection, "SELECT SourcePathJson || VersionsJson || EvidenceKeysJson || RuleKeysJson || AnnotationKeysJson FROM UnsafeCodeTriggers").ShouldBe(triggers);
+        Should.Throw<ObjectDisposedException>(evidence.Audit);
+    }
+
+    [Theory]
+    [InlineData("local", false)]
+    [InlineData("external", false)]
+    [InlineData("schema", false)]
+    [InlineData("local", true)]
+    [InlineData("external", true)]
+    [InlineData("schema", true)]
+    public void CaptureRejectsConcurrentOrSchemaDrift(string mutation, bool audit)
+    {
+        using UnsafeCodeTestFixture fixture = new(persistDatabase: true);
+        using SqliteConnection writer = new(fixture.Connection.ConnectionString);
+        writer.Open();
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        using XVerOperandEvidence? evidence = audit
+            ? XVerOperandEvidence.Capture(connection, new(XVerPreparationKind.Comparison)) : null;
+        bool injected = false;
+        connection.BeforeExecute = sql =>
+        {
+            if (!sql.Contains(" FROM Structures", StringComparison.Ordinal))
+            {
+                return;
+            }
+            connection.BeforeExecute = null;
+            injected = true;
+            if (mutation == "schema")
+            {
+                ExecuteOperandSql(fixture.Connection, "CREATE TABLE Phase2SchemaDrift (Key INTEGER PRIMARY KEY)");
+            }
+            else
+            {
+                IDbConnection target = mutation == "external" ? writer : fixture.Connection;
+                ExecuteOperandSql(target, "UPDATE FhirPackages SET Name = Name || '-changed'; UPDATE FhirPackages SET Name = replace(Name, '-changed', '')");
+            }
+        };
+        Action read = audit ? evidence!.Audit : () => XVerOperandEvidence.Capture(connection, new(XVerPreparationKind.Comparison)).Dispose();
+        Should.Throw<InvalidOperationException>(read).Message.ShouldContain("during a read pass");
+        injected.ShouldBeTrue();
+        connection.Subscriptions.ShouldBe(0);
+        DefinitionInventoryStore.TableExists(fixture.Connection, DbStructureOutcome.DefaultTableName).ShouldBeFalse();
+        DefinitionInventoryStore.TableExists(fixture.Connection, DbUnsafeCodeTrigger.DefaultTableName).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void PhysicalReopenInvalidatesEvenIdenticalEvidence()
+    {
+        using UnsafeCodeTestFixture fixture = new(persistDatabase: true);
+        fixture.Connection.Close();
+        fixture.Connection.Open();
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection, new(XVerPreparationKind.Catalog));
+        XVerStructureCatalog catalog = operation.Catalog;
+        long dataVersion = ReadOperandInteger(fixture.Connection, "PRAGMA data_version");
+        long changes = ReadOperandInteger(fixture.Connection, "SELECT total_changes()");
+        long schema = ReadOperandInteger(fixture.Connection, "PRAGMA schema_version");
+        connection.Subscriptions.ShouldBe(1);
+        fixture.Connection.Close();
+        fixture.Connection.Open();
+        ReadOperandInteger(fixture.Connection, "PRAGMA data_version").ShouldBe(dataVersion);
+        ReadOperandInteger(fixture.Connection, "SELECT total_changes()").ShouldBe(changes);
+        ReadOperandInteger(fixture.Connection, "PRAGMA schema_version").ShouldBe(schema);
+        connection.Subscriptions.ShouldBe(0);
+        Should.Throw<InvalidOperationException>(() => catalog.GetDefinitions(fixture.Packages[0].Key)).Message.ShouldContain("physical connection");
+        Should.Throw<InvalidOperationException>(operation.Audit).Message.ShouldContain("physical connection");
+        Should.Throw<ObjectDisposedException>(() => { _ = operation.Catalog; });
+        using XVerPreparedOperation fresh = XVerPreparedOperation.Prepare(connection, new(XVerPreparationKind.Catalog));
+        fresh.Catalog.GetDefinitions(fixture.Packages[0].Key).ShouldNotBeEmpty();
+    }
+
+    [Theory]
+    [InlineData((int)XVerPreparationKind.Catalog)]
+    [InlineData((int)XVerPreparationKind.TypeComparison)]
+    [InlineData((int)XVerPreparationKind.ElementOutcomes)]
+    [InlineData((int)XVerPreparationKind.Construction)]
+    public void NarrowPreparationDoesNotAcquirePipelinePrerequisites(int preparationKind)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        DbDefinitionInventoryState.DropTable(fixture.Connection);
+        DbUnsafeCodeInputState.DropTable(fixture.Connection);
+        DbUnsafeCodePairState.DropTable(fixture.Connection);
+        DbUnsafeCodeMapEvidence.DropTable(fixture.Connection);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        long changes = ReadOperandInteger(connection, "SELECT total_changes()");
+        long schema = ReadOperandInteger(connection, "PRAGMA schema_version");
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection, new((XVerPreparationKind)preparationKind));
+        operation.InventoryRevision.ShouldBeNull();
+        operation.Catalog.GetDefinitions(fixture.Packages[0].Key).ShouldNotBeEmpty();
+        operation.Evidence.ContainsTable(DbUnsafeCodeMapEvidence.DefaultTableName).ShouldBeFalse();
+        ReadOperandInteger(connection, "SELECT total_changes()").ShouldBe(changes);
+        ReadOperandInteger(connection, "PRAGMA schema_version").ShouldBe(schema);
+        DefinitionInventoryStore.TableExists(connection, DbDefinitionInventoryState.DefaultTableName).ShouldBeFalse();
+        DefinitionInventoryStore.TableExists(connection, DbUnsafeCodePairState.DefaultTableName).ShouldBeFalse();
+        DefinitionInventoryStore.TableExists(connection, DbStructureOutcome.DefaultTableName).ShouldBeFalse();
+        operation.Dispose();
+        connection.Subscriptions.ShouldBe(0);
+        Should.Throw<ObjectDisposedException>(() => { _ = operation.Catalog; });
+    }
+
+    [Fact]
+    public void PreparationValidatesCapturedRowsWithoutASecondCatalogOrMapBindingValidation()
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        fixture.Load().ShouldBeTrue();
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        HashSet<string> exclusions = ["urn:excluded"];
+        ConfigXVer config = new() { OutputDirectory = "original", XverArtifactVersion = "original" };
+        XVerOperationOptions options = new(XVerPreparationKind.Comparison, exclusions, configuration: config);
+        exclusions.Add(fixture.Structure(fixture.Packages[0]).UnversionedUrl);
+        config.OutputDirectory = "changed";
+        config.XverArtifactVersion = "changed";
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection, options);
+        operation.InventoryRevision.ShouldBe(DefinitionInventoryStore.ReadState(fixture.Connection)!.CompletedRevision);
+        connection.Statements.Count(sql => sql.Contains("StructureDefinitionJson", StringComparison.Ordinal) &&
+            sql.Contains(" FROM StructureDefinitionFacts", StringComparison.Ordinal)).ShouldBe(2);
+        operation.Evidence.Options.Exclusions.ShouldBe(["urn:excluded"], ignoreOrder: true);
+        operation.Evidence.Options.Construction!.OutputDirectory.ShouldBe("original");
+        operation.Evidence.Options.Construction.ArtifactVersion.ShouldBe("original");
+
+        XVerStructureCatalog independent = new(fixture.Connection);
+        DbStructureDefinition owner = independent.GetDefinitions(fixture.Packages[0].Key)[0];
+        StructureDefinition payload = independent.ReadPayload(owner);
+        XVerStructureCatalog captured = operation.Catalog;
+        captured.ReadPayload(captured.GetStructure(owner.Key)).ShouldNotBeSameAs(payload);
+        operation.Dispose();
+        independent.ReadPayload(owner).ShouldBeSameAs(payload);
+        Should.Throw<ObjectDisposedException>(() => captured.ReadPayload(owner));
+        independent.Dispose();
+    }
+
+    [Theory]
+    [InlineData("missing-table")]
+    [InlineData("missing-column")]
+    public void RequiredOperandSchemaFailuresAreContextualAndReadOnly(string mutation)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        if (mutation == "missing-table")
+        {
+            DbStructureDefinitionFacts.DropTable(fixture.Connection);
+        }
+        else
+        {
+            ExecuteOperandSql(fixture.Connection, "ALTER TABLE StructureDefinitionFacts RENAME COLUMN StructureDefinitionJson TO FormerPayload");
+        }
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        long changes = ReadOperandInteger(connection, "SELECT total_changes()");
+        long schema = ReadOperandInteger(connection, "PRAGMA schema_version");
+        Should.Throw<InvalidOperationException>(() => XVerPreparedOperation.Prepare(connection, new(XVerPreparationKind.Comparison)))
+            .Message.ShouldContain(DbStructureDefinitionFacts.DefaultTableName);
+        ReadOperandInteger(connection, "SELECT total_changes()").ShouldBe(changes);
+        ReadOperandInteger(connection, "PRAGMA schema_version").ShouldBe(schema);
+        connection.Subscriptions.ShouldBe(0);
+        DefinitionInventoryStore.TableExists(connection, DbStructureOutcome.DefaultTableName).ShouldBeFalse();
+    }
+
+    private static void ExecuteOperandSql(IDbConnection connection, string sql)
+    {
+        using IDbCommand command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static long ReadOperandInteger(IDbConnection connection, string sql)
+    {
+        using IDbCommand command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string ReadOperandText(IDbConnection connection, string sql)
+    {
+        using IDbCommand command = connection.CreateCommand();
+        command.CommandText = sql;
+        return (string)command.ExecuteScalar()!;
+    }
+
+    private sealed class ObservedOperandConnection(SqliteConnection connection) : DbConnection
+    {
+        internal List<string> Statements { get; } = [];
+        internal Action<string>? BeforeExecute { get; set; }
+        internal int Subscriptions { get; private set; }
+
+        public override event StateChangeEventHandler? StateChange
+        {
+            add
+            {
+                connection.StateChange += value;
+                Subscriptions++;
+            }
+            remove
+            {
+                connection.StateChange -= value;
+                Subscriptions--;
+            }
+        }
+
+        [AllowNull]
+        public override string ConnectionString { get => connection.ConnectionString; set => connection.ConnectionString = value; }
+        public override string Database => connection.Database;
+        public override string DataSource => connection.DataSource;
+        public override string ServerVersion => connection.ServerVersion;
+        public override ConnectionState State => connection.State;
+        public override int ConnectionTimeout => connection.ConnectionTimeout;
+        public override void Open() => connection.Open();
+        public override void Close() => connection.Close();
+        public override void ChangeDatabase(string databaseName) => connection.ChangeDatabase(databaseName);
+        protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel) => connection.BeginTransaction(isolationLevel);
+        protected override DbCommand CreateDbCommand() => new ObservedOperandCommand(connection.CreateCommand(), Observe);
+
+        protected override void Dispose(bool disposing)
+        {
+            // The fixture, not this observation wrapper, owns the physical connection.
+        }
+
+        private void Observe(string sql)
+        {
+            Statements.Add(sql);
+            BeforeExecute?.Invoke(sql);
+        }
+    }
+
+    private sealed class ObservedOperandCommand(DbCommand command, Action<string> observe) : DbCommand
+    {
+        [AllowNull]
+        public override string CommandText { get => command.CommandText; set => command.CommandText = value; }
+        public override int CommandTimeout { get => command.CommandTimeout; set => command.CommandTimeout = value; }
+        public override CommandType CommandType { get => command.CommandType; set => command.CommandType = value; }
+        public override bool DesignTimeVisible { get => command.DesignTimeVisible; set => command.DesignTimeVisible = value; }
+        public override UpdateRowSource UpdatedRowSource { get => command.UpdatedRowSource; set => command.UpdatedRowSource = value; }
+        protected override DbConnection? DbConnection { get => command.Connection; set => command.Connection = value; }
+        protected override DbTransaction? DbTransaction { get => command.Transaction; set => command.Transaction = value; }
+        protected override DbParameterCollection DbParameterCollection => command.Parameters;
+        public override void Cancel() => command.Cancel();
+        public override void Prepare() => command.Prepare();
+        protected override DbParameter CreateDbParameter() => command.CreateParameter();
+
+        public override int ExecuteNonQuery()
+        {
+            observe(CommandText);
+            return command.ExecuteNonQuery();
+        }
+
+        public override object? ExecuteScalar()
+        {
+            observe(CommandText);
+            return command.ExecuteScalar();
+        }
+
+        protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
+        {
+            observe(CommandText);
+            return command.ExecuteReader(behavior);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                command.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+    }
 
     [Fact]
     public void CharacterizedPipelineProducesStableSemantics()

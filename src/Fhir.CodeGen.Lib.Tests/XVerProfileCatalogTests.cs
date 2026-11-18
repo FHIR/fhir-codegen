@@ -48,6 +48,170 @@ public class XVerProfileCatalogTests
         _output = output;
     }
 
+    [Fact]
+    public void CapturedInventoryRetainsPassivePayloadsWithoutAcquiringUnusedRoots()
+    {
+        DefinitionCollection definitions = UseDefinitions(ConstraintProfile("CapturedQuantity", slicedRoot: true));
+        StructureDefinition passive = Profile("UnusedPassive", null);
+        passive.Snapshot = null;
+        passive.Differential = new() { Element = [new() { ElementId = "Coding.code", Path = "Coding.code", Max = "0" }] };
+        AddProfile(definitions, passive);
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        CompleteCapturedMapInputs(imported.Connection);
+
+        using (XVerPreparedOperation operation = XVerPreparedOperation.Prepare(imported.Connection, new(XVerPreparationKind.Comparison)))
+        {
+            XVerStructureCatalog catalog = operation.Catalog;
+            DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, "http://example.org/CapturedQuantity")!;
+            catalog.ResolveRoot(owner).Id.ShouldBe("Quantity:fixture");
+            catalog.ReadPayload(owner).Snapshot.Element[0].Type.ShouldBeEmpty();
+            catalog.GetTypeUses(catalog.ResolveRoot(owner)).ShouldHaveSingleItem().TypeName.ShouldBe("Quantity");
+            DbStructureDefinition retained = catalog.ResolveDefinition(imported.PackageKey, passive.Url)!;
+            catalog.GetDefinitions(imported.PackageKey).ShouldContain(row => row.Key == retained.Key);
+            Should.Throw<InvalidOperationException>(() => catalog.ResolveRoot(retained)).Message.ShouldContain("snapshot");
+            operation.Audit();
+        }
+
+        DbStructureDefinitionFacts facts = DbStructureDefinitionFacts.SelectList(imported.Connection)
+            .Single(row => row.StructureKey == imported.Catalog.ResolveDefinition(imported.PackageKey, passive.Url)!.Key);
+        facts.StructureDefinitionJson = "not-json";
+        DbStructureDefinitionFacts.Update(imported.Connection, facts);
+        Should.Throw<InvalidOperationException>(() => XVerPreparedOperation.Prepare(imported.Connection, new(XVerPreparationKind.Comparison)))
+            .Message.ShouldContain("Malformed normalized StructureDefinition");
+        Should.Throw<InvalidOperationException>(() => DefinitionInventoryStore.RequireReady(imported.Connection))
+            .Message.ShouldContain("Malformed normalized StructureDefinition");
+    }
+
+    [Theory]
+    [InlineData("counts")]
+    [InlineData("owner")]
+    [InlineData("types")]
+    [InlineData("snapshot")]
+    [InlineData("links")]
+    [InlineData("policy")]
+    [InlineData("binding")]
+    public void CapturedAndIndependentInventoryEntriesRejectTheSameInvalidOperands(string mutation)
+    {
+        using CatalogImport imported = ImportUses(ConstraintProfile("CapturedQuantity"));
+        CompleteCapturedMapInputs(imported.Connection);
+        string snapshot = DbUnsafeCodeInputState.SelectSingle(imported.Connection, Key: 1)!.SnapshotId;
+        using IDbCommand command = imported.Connection.CreateCommand();
+        command.CommandText = mutation switch
+        {
+            "counts" => "UPDATE DefinitionInventoryState SET ExpectedPackageCountsJson = '[]'",
+            "owner" => "UPDATE Elements SET FhirPackageKey = FhirPackageKey + 100",
+            "types" => "DELETE FROM ElementTypes WHERE Key = (SELECT min(Key) FROM ElementTypes)",
+            "snapshot" => "UPDATE StructureDefinitionFacts SET SnapshotAvailability = 'Missing'",
+            "links" => "UPDATE ElementTypes SET TypeProfileStructureKey = -123 WHERE TypeProfile IS NOT NULL",
+            "policy" => "UPDATE DefinitionInventoryState SET PolicyVersion = 1",
+            "binding" => "UPDATE DefinitionInventoryState SET CompletedMapInventoryBindingsJson = '{}'",
+            _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+        };
+        command.ExecuteNonQuery();
+        command.CommandText = "SELECT total_changes()";
+        long changes = (long)command.ExecuteScalar()!;
+        command.CommandText = "PRAGMA schema_version";
+        long schema = (long)command.ExecuteScalar()!;
+        Should.Throw<InvalidOperationException>(() => XVerPreparedOperation.Prepare(imported.Connection, new(XVerPreparationKind.Comparison)));
+        Should.Throw<InvalidOperationException>(() => DefinitionInventoryStore.RequireMapBinding(imported.Connection, snapshot));
+        command.CommandText = "SELECT total_changes()";
+        command.ExecuteScalar().ShouldBe(changes);
+        command.CommandText = "PRAGMA schema_version";
+        command.ExecuteScalar().ShouldBe(schema);
+        DefinitionInventoryStore.TableExists(imported.Connection, DbStructureOutcome.DefaultTableName).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void CapturedAlternateElementViewsKeepTheirExactOwnerAndInventoryBoundaries()
+    {
+        using CatalogImport imported = ImportUses(ConstraintProfile("CapturedQuantity", slicedRoot: true));
+        CompleteCapturedMapInputs(imported.Connection);
+        using IDbCommand command = imported.Connection.CreateCommand();
+        command.CommandText = "CREATE TABLE CapturedAlternateElements AS SELECT * FROM Elements; UPDATE CapturedAlternateElements SET Name = 'alternate-only'";
+        command.ExecuteNonQuery();
+        using XVerPreparedOperation narrow = XVerPreparedOperation.Prepare(imported.Connection,
+            new(XVerPreparationKind.Catalog, elementTableName: "CapturedAlternateElements"));
+        using XVerPreparedOperation pipeline = XVerPreparedOperation.Prepare(imported.Connection,
+            new(XVerPreparationKind.Comparison, elementTableName: "CapturedAlternateElements"));
+        foreach (XVerPreparedOperation operation in new[] { narrow, pipeline })
+        {
+            XVerStructureCatalog catalog = operation.Catalog;
+            DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, "http://example.org/CapturedQuantity")!;
+            DbElement root = catalog.ResolveRoot(owner);
+            root.Id.ShouldBe("Quantity:fixture");
+            root.Name.ShouldBe("alternate-only");
+            root.StructureKey.ShouldBe(owner.Key);
+            catalog.GetOwnedChildren(root).ShouldAllBe(child => child.Id.StartsWith(root.Id + ".", StringComparison.Ordinal));
+        }
+        command.CommandText = "UPDATE Elements SET Name = 'changed-default-view'";
+        command.ExecuteNonQuery();
+        narrow.Audit();
+        Should.Throw<InvalidOperationException>(pipeline.Audit).Message.ShouldContain("'Elements'");
+        command.CommandText = "UPDATE CapturedAlternateElements SET Name = 'changed-alternate-view'";
+        command.ExecuteNonQuery();
+        Should.Throw<InvalidOperationException>(narrow.Audit).Message.ShouldContain("'CapturedAlternateElements'");
+    }
+
+    [Theory]
+    [InlineData("mapping")]
+    [InlineData("value-set")]
+    [InlineData("definition-version")]
+    public void CapturedReadersDoNotQueryLiveOperandsOrForgetAbsentMembership(string mutation)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.Catalog));
+        XVerStructureCatalog catalog = operation.Catalog;
+        DbFhirPackage package = fixture.Packages[0];
+        DbStructureDefinition owner = fixture.Structure(package);
+        DbValueSet valueSet = DbValueSet.SelectList(fixture.Connection, FhirPackageKey: package.Key).Single();
+        catalog.GetElementMapping(987654).ShouldBeNull();
+        catalog.HasValueSet(package.Key, valueSet.VersionedUrl).ShouldBeTrue();
+        catalog.HasValueSet(package.Key, valueSet.UnversionedUrl).ShouldBeFalse();
+        catalog.ResolveDefinition(package.Key, owner.UnversionedUrl)!.Key.ShouldBe(owner.Key);
+        if (mutation == "mapping")
+        {
+            DbElementMapping.Insert(fixture.Connection, new DbElementMapping
+            {
+                Key = 987654, SourceFhirPackageKey = package.Key, TargetFhirPackageKey = package.Key,
+                SourceFhirSequence = package.DefinitionFhirSequence, TargetFhirSequence = package.DefinitionFhirSequence,
+                ConceptMapSourceKey = null, ConceptMapFilename = null, FmlSourceKey = null, FmlFilename = null,
+                Relationship = ConceptMap.ConceptMapRelationship.Equivalent, ExplicitNoMap = false,
+                StructureMappingKey = null, SourceStructureKey = owner.Key, SourceElementKey = null,
+                SourceElementId = "ValueSet", TargetStructureKey = owner.Key, TargetElementKey = null,
+                TargetElementId = "ValueSet", FmlIsSimpleCopy = null, ConceptDomainRelationship = null, ValueDomainRelationship = null,
+            }, insertPrimaryKey: true);
+            catalog.GetElementMapping(987654).ShouldBeNull();
+            new XVerStructureCatalog(fixture.Connection).GetElementMapping(987654).ShouldNotBeNull();
+        }
+        else if (mutation == "value-set")
+        {
+            valueSet.Key += 100000;
+            DbValueSet.Insert(fixture.Connection, valueSet, insertPrimaryKey: true);
+            catalog.HasValueSet(package.Key, valueSet.VersionedUrl).ShouldBeTrue();
+            new XVerStructureCatalog(fixture.Connection).HasValueSet(package.Key, valueSet.VersionedUrl).ShouldBeFalse();
+        }
+        else
+        {
+            owner.Key += 100000;
+            owner.Version = "other-definition-version";
+            owner.VersionedUrl = owner.UnversionedUrl + "|" + owner.Version;
+            DbStructureDefinition.Insert(fixture.Connection, owner, insertPrimaryKey: true);
+            catalog.ResolveDefinition(package.Key, owner.UnversionedUrl)!.Version.ShouldNotBe(owner.Version);
+            Should.Throw<InvalidOperationException>(() => new XVerStructureCatalog(fixture.Connection).ResolveDefinition(package.Key, owner.UnversionedUrl))
+                .Message.ShouldContain("ambiguous");
+        }
+        Should.Throw<InvalidOperationException>(operation.Audit).Message.ShouldContain("changed");
+        DefinitionInventoryStore.TableExists(fixture.Connection, DbStructureOutcome.DefaultTableName).ShouldBeFalse();
+    }
+
+    private static void CompleteCapturedMapInputs(IDbConnection connection)
+    {
+        DbMappingClasses.CreateTables(connection);
+        UnsafeCodeInputStore.BeginInputs(connection, "fixture", null);
+        UnsafeCodeInputStore.CompleteInputs(connection, DbFhirPackage.SelectList(connection));
+    }
+
     private const string SimpleQuantityJson = """
         {
           "resourceType": "StructureDefinition",
