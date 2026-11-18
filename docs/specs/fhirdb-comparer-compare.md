@@ -133,6 +133,11 @@ without globally stripping slices or choosing a package-wide first root.
 profile/targetProfile alternatives and slice contexts. Cardinality, fixed/pattern,
 bindings, bounds, slicing, opaque invariants and primitive bridge obligations
 remain proof obligations; differential-only data is not a synthetic snapshot.
+For a validated snapshot root without explicit element types, effective facts use
+that owner's declared `StructureDefinition.Type`, matching the importer's root
+type projection before merging ancestry. This neither changes the normalized
+payload nor supplies missing ordinary child types; exact sliced root IDs and
+owner-local restrictions remain authoritative.
 The Quantity shortcut cannot erase them. Primary mapping authorities precede
 fallback authorities, and actual `DbElementMapping.Key` provenance is retained.
 

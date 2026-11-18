@@ -1235,6 +1235,10 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 ElementDefinition element = catalog.ReadElement(row);
                 string id = row.Id[root.Id.Length..];
                 EffectiveProfileElement local = Read(owner, element, id, diagnostics);
+                if (row.Key == root.Key && local.Types.IsEmpty && payload.Type is { Length: > 0 } declaredType)
+                {
+                    local = local with { Types = [new(declaredType, [], [], 0)] };
+                }
                 if (!elements.TryGetValue(id, out EffectiveProfileElement? basis) && id[(id.LastIndexOf('.') + 1)..].Contains(':'))
                 {
                     // Only this exact unsliced context may constrain the new slice.

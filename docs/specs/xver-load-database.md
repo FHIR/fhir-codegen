@@ -207,7 +207,29 @@ reuse at both Range bounds
 and executable non-equivalence witnesses for DSTU2 Age zero and R5 comparator
 `http://hl7.org/fhir/quantity-comparator|5.0.0#ad`.
 
-### Prepared-operation baseline attempt (2026-11-18; incomplete)
+### Prepared-operation workload follow-up (2026-11-18)
+
+The root-type consumer mismatch in the original attempt below is corrected:
+effective profile facts now use the validated snapshot root's owner-declared
+Type when its element-level type list is empty, matching import without changing
+the normalized payload or fixture root types. A first rerun reached export,
+which correctly refused the fixture's release-specific required comparator
+bindings. The fixture now uses the independent terminology version `1.0.0`
+for its comparator binding, ValueSet, CodeSystem, compose and expansion in all
+five packages. Production proof and export safety checks remain unchanged.
+
+Both `XVerPreparedOperationTests` now complete comparison and outcomes for all
+20 directed pairs and actual vocabulary/structure export for the 12 configured
+pairs. Negative-decision assertions require the deliberately incompatible
+`NegativeQuantity` owner and an invariant-transformation reason, not an
+accidental terminology mismatch. The focused run, including three root-type
+regression cases, passes all five tests.
+
+This confirms successful synthetic pipeline execution, not a frozen semantic
+golden or a W1/W2 performance baseline. Both named workload tests still run the
+same helper and do not compare independent workloads or timing distributions.
+
+### Prepared-operation baseline attempt (2026-11-18; historical, incomplete)
 
 This is **failed-workload diagnostic evidence, not a performance baseline**.
 Production remained at `6033290a2abda35092675917e7fcdec5daba222d` on `dev`;
@@ -216,11 +238,12 @@ from root `AGENTS.md`. The caller supplied SDK `11.0.100`; the focused command
 built Debug/net11.0. No production instrumentation, optimization, package
 installation, external database, or external IG tree was used.
 
-`XVerPreparedOperationTests` joins the existing nonparallel unsafe-code profile
-collection. Its two named tests currently enter the same **unfinished W1 gate**;
-they are not completed semantic-equality and W1/W2 measurement tests. Do not use
-them as Phase 1 acceptance, frozen semantic expectations, or a candidate timing
-comparison. No golden expectation was derived from a failed run.
+`XVerPreparedOperationTests` joined the existing nonparallel unsafe-code profile
+collection. At that point its two named tests entered the same **unfinished W1
+gate**; they were not completed semantic-equality and W1/W2 measurement tests.
+Do not use the historical attempts as Phase 1 acceptance, frozen semantic
+expectations, or a candidate timing comparison. No golden expectation was
+derived from a failed run.
 
 #### Authored W1 inputs and intended schedule
 

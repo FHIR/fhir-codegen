@@ -1349,6 +1349,56 @@ public class XVerProfileCatalogTests
 
     private const string QuantityUrl = "http://hl7.org/fhir/StructureDefinition/Quantity";
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ImportedRootTypeUsesPreserveOwnerRestrictions(bool constrained)
+    {
+        StructureDefinition profile = ConstraintProfile("SimpleQuantity");
+        foreach (ElementDefinition element in profile.Snapshot.Element)
+        {
+            element.ElementId = "Quantity:simplequantity" + element.ElementId["Quantity".Length..];
+        }
+        profile.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        profile.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "sqty-1", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error,
+            Expression = "comparator.empty()", Human = "No comparator is permitted.", Source = profile.Url,
+        });
+        DefinitionCollection definitions = UseDefinitions(profile);
+        AddNative(definitions, Definition("Element", "Element"));
+        definitions.ComplexTypesByName["Quantity"].BaseDefinition = "http://hl7.org/fhir/StructureDefinition/Element";
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
+        DbStructureDefinition owner = constrained ? catalog.ResolveDefinition(imported.PackageKey, profile.Url)! : quantity;
+        DbElement root = catalog.ResolveRoot(owner);
+        catalog.ReadElement(root).Type.ShouldBeEmpty();
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+
+        EffectiveProfileUse use = facts.AtUse(root, catalog.GetTypeUses(root).ShouldHaveSingleItem());
+
+        use.Diagnostics.ShouldBeEmpty();
+        EffectiveProfileBranch branch = use.Branches.ShouldHaveSingleItem();
+        branch.Diagnostics.ShouldBeEmpty();
+        branch.Key.OwnerKey.ShouldBe(owner.Key);
+        branch.Key.ElementKey.ShouldBe(root.Key);
+        branch.Elements[""].ElementId.ShouldBe(root.Id);
+        ProfileRepresentationProof proof = facts.Prove(branch, quantity);
+        proof.IsAcceptedDecision.ShouldBeTrue(string.Join("; ", proof.Diagnostics));
+        proof.Kind.ShouldBe(constrained ? ProfileProofKind.Unrepresentable : ProfileProofKind.NativeReuse);
+        if (constrained)
+        {
+            proof.InputOwnerRoot!.ElementId.ShouldBe("Quantity:simplequantity");
+            proof.RequiredFacts[".comparator"].Maximum.ShouldBe(0);
+            proof.NativeFacts[".comparator"].Maximum.ShouldBe(1);
+            proof.RequiredFacts[""].Invariants.ShouldContain(invariant =>
+                invariant.Key == "sqty-1" && invariant.Origin.OwnerKey == owner.Key &&
+                invariant.Origin.ElementId == root.Id);
+        }
+    }
+
     [Fact]
     public void LocalProhibitionsAndBindingsOverrideInheritedFacts()
     {
@@ -2451,7 +2501,7 @@ public class XVerProfileCatalogTests
     }
 
     [Fact]
-    public void DeclaredRootsAndProhibitedChildrenNeedNoInventedTypes()
+    public void DeclaredRootTypesDoNotInventProhibitedChildTypes()
     {
         DefinitionCollection definitions = UseDefinitions();
         ElementDefinition code = definitions.ComplexTypesByName["Quantity"].Snapshot.Element.Single(element => element.Path == "Quantity.code");
@@ -2463,7 +2513,7 @@ public class XVerProfileCatalogTests
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
         EffectiveProfileBranch branch = facts.ForDefinition(quantity);
-        branch.Elements[""].Types.ShouldBeEmpty();
+        branch.Elements[""].Types.ShouldHaveSingleItem().Code.ShouldBe("Quantity");
         branch.Elements[".code"].Types.ShouldBeEmpty();
         facts.Prove(branch, quantity).Kind.ShouldBe(ProfileProofKind.NativeReuse);
     }

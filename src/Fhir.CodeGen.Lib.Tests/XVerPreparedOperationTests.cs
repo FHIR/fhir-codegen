@@ -30,6 +30,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
 {
     private const string StructureUrl = "http://hl7.org/fhir/StructureDefinition/";
     private const string ConsumerName = "PreparedConsumer";
+    private const string ComparatorTerminologyVersion = "1.0.0";
     private const int Repetitions = 3;
     private static readonly FhirReleases.FhirSequenceCodes[] _sequences =
     [
@@ -111,7 +112,9 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
                 ProfileUseFacts.ReadDecisions(negative.ExtensionProhibitionReason!).ShouldAllBe(decision =>
                     decision.Kind == ProfileProofKind.Unrepresentable && decision.TargetCanonical == null &&
                     decision.RequiredFacts.ContainsKey("") && decision.NativeFacts.ContainsKey("") &&
-                    decision.InputOwnerRoot != null && decision.NativeOwnerRoot != null && decision.Reasons.Length > 0);
+                    decision.InputOwnerRoot != null && decision.InputOwnerRoot.Canonical == StructureUrl + "NegativeQuantity" &&
+                    decision.NativeOwnerRoot != null &&
+                    decision.Reasons.Any(reason => reason.Category == ProfileReasonCategory.InvariantTransformation));
             }
             stage = "XVerExporter.Export";
             Measure(stage, () =>
@@ -213,7 +216,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         Child(quantity, "value", "decimal");
         Child(quantity, "comparator", "code").Binding = new()
         {
-            Strength = BindingStrength.Required, ValueSet = "http://example.org/ValueSet/prepared-comparators|" + version,
+            Strength = BindingStrength.Required, ValueSet = "http://example.org/ValueSet/prepared-comparators|" + ComparatorTerminologyVersion,
         };
         Child(quantity, "unit", "string");
         Child(quantity, "system", "uri");
@@ -281,20 +284,20 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         Add(consumer, resource: true);
         definitions.AddCodeSystem(new()
         {
-            Id = "prepared-comparators", Url = "http://example.org/CodeSystem/prepared-comparators", Version = version,
+            Id = "prepared-comparators", Url = "http://example.org/CodeSystem/prepared-comparators", Version = ComparatorTerminologyVersion,
             Name = "PreparedComparators", Status = PublicationStatus.Active, Content = CodeSystemContentMode.Complete,
             Concept = [new() { Code = "<" }, new() { Code = ">" }],
         }, definitions.MainPackageId, version);
         definitions.AddValueSet(new()
         {
-            Id = "prepared-comparators", Url = "http://example.org/ValueSet/prepared-comparators", Version = version,
+            Id = "prepared-comparators", Url = "http://example.org/ValueSet/prepared-comparators", Version = ComparatorTerminologyVersion,
             Name = "PreparedComparators", Status = PublicationStatus.Active,
-            Compose = new() { Include = [new() { System = "http://example.org/CodeSystem/prepared-comparators", Version = version }] },
+            Compose = new() { Include = [new() { System = "http://example.org/CodeSystem/prepared-comparators", Version = ComparatorTerminologyVersion }] },
             Expansion = new()
             {
                 Contains = [.. new[] { "<", ">" }.Select(code => new ValueSet.ContainsComponent
                 {
-                    System = "http://example.org/CodeSystem/prepared-comparators", Version = version, Code = code,
+                    System = "http://example.org/CodeSystem/prepared-comparators", Version = ComparatorTerminologyVersion, Code = code,
                 })],
             },
         }, sequence, definitions.MainPackageId, version);
