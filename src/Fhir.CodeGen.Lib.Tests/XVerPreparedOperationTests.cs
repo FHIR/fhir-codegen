@@ -54,6 +54,367 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
     ];
 
     [Fact]
+    public void BorrowerDisposalDoesNotClearAnotherBorrowersPayloads()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        using XVerStructureCatalog catalog = new(fixture.Connection);
+        DbStructureDefinition owner = fixture.Structure(fixture.Packages[2], "Coding");
+        StructureDefinition payload = catalog.ReadPayload(owner);
+        using ProfileUseFacts first = new(catalog, fixture.Packages[2].Key, fixture.Packages[0].Key);
+        using ProfileUseFacts second = new(catalog, fixture.Packages[2].Key, fixture.Packages[0].Key);
+        EffectiveProfileBranch branch = second.ForDefinition(owner);
+        first.ForDefinition(owner);
+        first.Dispose();
+        catalog.ReadPayload(owner).ShouldBeSameAs(payload);
+        second.ForDefinition(owner).Elements.ShouldBeSameAs(branch.Elements);
+        catalog.ReleasePayloads();
+        catalog.ReadPayload(owner).ShouldNotBeSameAs(payload);
+        branch.Elements.ShouldContainKey(".code");
+    }
+
+    [Fact]
+    public void ComparisonClassificationAndProjectionContextsNeverAlias()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.Construction));
+        XVerDirectionalOperands operands = operation.CaptureDirection(pair.SourcePackageKey, pair.TargetPackageKey);
+        XVerProfileWorkPacket comparison = operation.GetComparisonPacket(pair.SourcePackageKey, pair.TargetPackageKey);
+        XVerProfileWorkPacket classification = operation.GetPacket(operands, XVerProfileContext.Classification);
+        int ownerKey = fixture.Structure(pair.TargetPackage).Key;
+        XVerProfileContext projectionContext = XVerProfileContext.ForOwner(ownerKey, 100, [ownerKey]);
+        XVerProfileWorkPacket projection = operation.GetPacket(operands, projectionContext);
+        comparison.Facts.ShouldNotBeSameAs(classification.Facts);
+        classification.Facts.ShouldNotBeSameAs(projection.Facts);
+        comparison.Facts.ShouldNotBeSameAs(projection.Facts);
+        Should.Throw<InvalidOperationException>(() => operation.GetPacket(operands, XVerProfileContext.Comparison));
+        operation.GetPacket(operands, XVerProfileContext.ForOwner(ownerKey, 100, [ownerKey])).ShouldBeSameAs(projection);
+        operation.GetPacket(operands, XVerProfileContext.ForOwner(ownerKey, 101, [ownerKey])).ShouldNotBeSameAs(projection);
+        operation.GetPacket(operands, XVerProfileContext.ForOwner(ownerKey, 100, [ownerKey, ownerKey + 1])).ShouldNotBeSameAs(projection);
+        Should.Throw<InvalidOperationException>(() => comparison.Classify());
+        Should.Throw<InvalidOperationException>(() => projection.Classify());
+        using XVerPreparedOperation independent = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.Construction));
+        Should.Throw<InvalidOperationException>(() => independent.GetPacket(operands, XVerProfileContext.Classification));
+        operation.Dispose();
+        Should.Throw<ObjectDisposedException>(() => { _ = classification.Facts; });
+    }
+
+    [Fact]
+    public void ComparisonPacketsDoNotAcquireCorrespondencePrerequisites()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        DefinitionInventoryStore.TableExists(fixture.Connection, DbElementComparison.DefaultTableName).ShouldBeFalse();
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.TypeComparison));
+        XVerProfileWorkPacket packet = operation.GetComparisonPacket(fixture.Packages[2].Key, fixture.Packages[0].Key);
+        packet.Operands.HasCorrespondence.ShouldBeFalse();
+        packet.Facts.ForDefinition(fixture.Structure(fixture.Packages[2], "Coding")).Elements.ShouldContainKey(".code");
+        operation.GetComparisonPacket(fixture.Packages[2].Key, fixture.Packages[0].Key).ShouldBeSameAs(packet);
+        operation.ReleasePairWorkingFacts(fixture.Packages[2].Key, fixture.Packages[0].Key);
+        AssertNoPayloads(operation.Catalog);
+        DefinitionInventoryStore.TableExists(fixture.Connection, DbElementComparison.DefaultTableName).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void DirectionalProductsTrackExactReverseOperandEpochs()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        FhirPackageComparisonPair reversePair = new(pair.TargetPackage, pair.SourcePackage);
+        DbElement source = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.SourcePackageKey, Id: "Coding.code")!;
+        DbElement target = DbElement.SelectSingle(fixture.Connection, FhirPackageKey: pair.TargetPackageKey, Id: "Coding.code")!;
+        DbStructureOutcome owner = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage, "Coding"), fixture.Structure(pair.TargetPackage, "Coding"));
+        fixture.Connect(pair, owner, source, target);
+        DbStructureOutcome reverseOwner = fixture.AddOutcome(reversePair, fixture.Structure(pair.TargetPackage, "Coding"), fixture.Structure(pair.SourcePackage, "Coding"));
+        fixture.Connect(reversePair, reverseOwner, target, source);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.Construction));
+        XVerDirectionalProduct Read(FhirPackageComparisonPair direction) => operation.GetPacket(
+            operation.CaptureDirection(direction.SourcePackageKey, direction.TargetPackageKey),
+            XVerProfileContext.Classification).Classify();
+        XVerDirectionalProduct forward = Read(pair);
+        XVerDirectionalProduct reverse = Read(reversePair);
+        operation.ComposePair(forward, reverse).ShouldBe(forward.Decisions);
+        Read(pair).ShouldBeSameAs(forward);
+        Read(reversePair).ShouldBeSameAs(reverse);
+
+        DbElementComparison row = DbElementComparison.SelectList(fixture.Connection,
+            SourceFhirPackageKey: reversePair.SourcePackageKey, TargetFhirPackageKey: reversePair.TargetPackageKey).ShouldHaveSingleItem();
+        row.UserMessage = ""; // Null and empty are different operand epochs, even when proof meaning agrees.
+        DbElementComparison.Update(fixture.Connection, [row]);
+        XVerDirectionalOperands nextOperands = operation.CaptureDirection(reversePair.SourcePackageKey, reversePair.TargetPackageKey);
+        operation.ReplaceScheduledDirection(nextOperands, new(XVerOperandFamily.StructureComparisons, XVerOutputTransitionKind.PairFlush,
+            reversePair.SourcePackageKey, reversePair.TargetPackageKey));
+        XVerDirectionalProduct nextReverse = Read(reversePair);
+        nextReverse.ShouldNotBeSameAs(reverse);
+        Read(pair).ShouldBeSameAs(forward);
+        Should.Throw<InvalidOperationException>(() => operation.ComposePair(forward, reverse));
+        operation.ComposePair(forward, nextReverse).ShouldBe(forward.Decisions);
+        Should.Throw<InvalidOperationException>(() => operation.ComposePair(forward, forward));
+        Should.Throw<InvalidOperationException>(operation.Audit); // Computing an epoch does not authorize an undeclared write.
+
+        using XVerPreparedOperation fresh = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.Construction));
+        fresh.GetPacket(fresh.CaptureDirection(reversePair.SourcePackageKey, reversePair.TargetPackageKey), XVerProfileContext.Classification).Classify();
+        XVerStructureCatalog freshCatalog = fresh.Catalog;
+        freshCatalog.ReadPayload(fixture.Structure(pair.SourcePackage));
+        row.UserMessage = null;
+        DbElementComparison.Update(fixture.Connection, [row]);
+        XVerDirectionalOperands unexpected = fresh.CaptureDirection(reversePair.SourcePackageKey, reversePair.TargetPackageKey);
+        Should.Throw<InvalidOperationException>(() => fresh.GetPacket(unexpected, XVerProfileContext.Classification));
+        AssertNoPayloads(freshCatalog);
+        Should.Throw<ObjectDisposedException>(() => { _ = fresh.Catalog; });
+    }
+
+    [Theory]
+    [InlineData("envelope")]
+    [InlineData("facts")]
+    [InlineData("native-facts")]
+    [InlineData("reasons")]
+    [InlineData("children")]
+    [InlineData("owner")]
+    [InlineData("pair")]
+    [InlineData("occurrence")]
+    [InlineData("canonical")]
+    [InlineData("usability")]
+    [InlineData("target-context")]
+    [InlineData("target-usability")]
+    [InlineData("structure-usability")]
+    [InlineData("structure-canonical")]
+    [InlineData("missing")]
+    [InlineData("duplicate")]
+    [InlineData("extra")]
+    [InlineData("malformed")]
+    public void PersistedVerifierRejectsTamperAfterProductWarmup(string mutation)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        (FhirPackageComparisonPair pair, DbStructureOutcome owner, DbElement source, DbElement target) =
+            fixture.AddOwnerProjectionAlternatives(0, "profiles");
+        fixture.GenerateSafety(pair);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.Construction));
+        XVerDirectionalProduct Read(int from, int to) => operation.GetPacket(
+            operation.CaptureDirection(from, to),
+            XVerProfileContext.Classification).Classify();
+        IReadOnlyList<ProfileRepresentationProof> expected = operation.ComposePair(
+            Read(pair.SourcePackageKey, pair.TargetPackageKey), Read(pair.TargetPackageKey, pair.SourcePackageKey));
+        operation.ReleasePairWorkingFacts(pair.SourcePackageKey, pair.TargetPackageKey);
+        AssertNoPayloads(operation.Catalog);
+        ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog);
+        DbElementOutcome outcome = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: source.Key)!;
+        JsonObject document = JsonNode.Parse(outcome.ExtensionProhibitionReason!)!.AsObject();
+        JsonObject decision = document["Decisions"]![0]!.AsObject();
+        switch (mutation)
+        {
+            case "envelope": document["ProfileDecisionFormat"] = 2; break;
+            case "facts": decision["RequiredFacts"]![""]!["Maximum"] = 19; break;
+            case "native-facts": decision["NativeFacts"]![""]!["Maximum"] = 19; break;
+            case "reasons": decision["Reasons"]![0]!["Detail"] = "well-formed but wrong"; break;
+            case "children": decision["Children"]!.AsArray().Add(decision.DeepClone()); break;
+            case "owner": decision["Input"]!["OwnerKey"] = owner.TargetStructureKey; break;
+            case "pair": decision["TargetPackageKey"] = pair.SourcePackageKey; break;
+            case "occurrence": decision["Input"]!["ElementKey"] = target.Key; break;
+            case "canonical": decision["TargetCanonical"] = "urn:forged"; break;
+            case "usability": outcome.FullyMapsToThisTarget = true; break;
+            case "target-context":
+                DbElementOutcomeTarget row = DbElementOutcomeTarget.SelectList(fixture.Connection, ElementOutcomeKey: outcome.Key).ShouldHaveSingleItem();
+                row.CardinalityContextParentExtensionUrl = "urn:forged";
+                DbElementOutcomeTarget.Update(fixture.Connection, [row]);
+                break;
+            case "target-usability":
+                DbElementOutcomeTarget usable = DbElementOutcomeTarget.SelectList(fixture.Connection, ElementOutcomeKey: outcome.Key).ShouldHaveSingleItem();
+                usable.FullyMapsToThisTarget = true;
+                DbElementOutcomeTarget.Update(fixture.Connection, [usable]);
+                break;
+            case "structure-usability":
+                owner.IsEquivalent = true;
+                DbStructureOutcome.Update(fixture.Connection, [owner]);
+                break;
+            case "structure-canonical":
+                owner.TargetCanonicalUnversioned = "urn:forged";
+                DbStructureOutcome.Update(fixture.Connection, [owner]);
+                break;
+            case "missing": document["Decisions"] = new JsonArray(); break;
+            case "duplicate": document["Decisions"]!.AsArray().Add(decision.DeepClone()); break;
+            case "extra":
+                JsonObject extra = decision.DeepClone().AsObject();
+                extra["Input"]!["ProfileAlternative"] = "urn:forged";
+                document["Decisions"]!.AsArray().Add(extra);
+                break;
+            case "malformed": break;
+            default: throw new ArgumentOutOfRangeException(nameof(mutation));
+        }
+        outcome.ExtensionProhibitionReason = mutation == "malformed" ? "{\"ProfileDecisionFormat\":" :
+            document.ToJsonString(new() { WriteIndented = false });
+        DbElementOutcome.Update(fixture.Connection, [outcome]);
+        Should.Throw<InvalidOperationException>(() =>
+            ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog));
+    }
+
+    [Fact]
+    public void LegacyTypeComparerReleasesPayloadsOnSuccessExceptionAndReuse()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        (FhirPackageComparisonPair pair, _, DbElement source, DbElement target) = fixture.AddOwnerProjectionAlternatives(0, "profiles");
+        DbStructureDefinition sourceType = fixture.Structure(pair.SourcePackage, "Coding");
+        DbStructureDefinition targetType = fixture.Structure(pair.TargetPackage, "Coding");
+        DbStructureMapping.Insert(fixture.Connection, new DbStructureMapping
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey, TargetFhirPackageKey = pair.TargetPackageKey,
+            SourceFhirSequence = pair.SourceFhirSequence, TargetFhirSequence = pair.TargetFhirSequence,
+            SourceStructureKey = sourceType.Key, TargetStructureKey = targetType.Key,
+            SourceStructureId = sourceType.Id, TargetStructureId = targetType.Id,
+            SourceStructureUrl = sourceType.UnversionedUrl, TargetStructureUrl = targetType.UnversionedUrl,
+            ConceptMapSourceKey = null, ConceptMapFilename = null, FmlSourceKey = null, FmlFilename = null,
+            Relationship = ConceptMap.ConceptMapRelationship.Equivalent, ExplicitNoMap = false, IsFallback = false,
+            ConceptDomainRelationship = null, ValueDomainRelationship = null,
+        });
+        DbComparisonCache<DbElementTypeComparison> comparisons = new();
+        ElementTypeComparer comparer = new(fixture.Connection, NullLoggerFactory.Instance, comparisons);
+        comparer.DoTypeComparisons(pair, source, target, 1);
+        comparisons.Values.ShouldContain(comparison => comparison.TechnicalMessage != null &&
+            comparison.TechnicalMessage.Contains("ProfileDecisionFormat", StringComparison.Ordinal));
+        PrivateField<XVerStructureCatalog?>(comparer, "_catalog").ShouldBeNull();
+        comparer.DoTypeComparisons(pair, source, null, 2);
+        PrivateField<XVerStructureCatalog?>(comparer, "_catalog").ShouldBeNull();
+        DbStructureDefinitionFacts facts = DbStructureDefinitionFacts.SelectSingle(fixture.Connection, StructureKey: sourceType.Key)!;
+        string original = facts.StructureDefinitionJson;
+        facts.StructureDefinitionJson = "{}";
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        Should.Throw<InvalidOperationException>(() => comparer.DoTypeComparisons(pair, source, target, 3));
+        PrivateField<XVerStructureCatalog?>(comparer, "_catalog").ShouldBeNull();
+        facts.StructureDefinitionJson = original;
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        comparer.DoTypeComparisons(pair, source, target, 4);
+        PrivateField<XVerStructureCatalog?>(comparer, "_catalog").ShouldBeNull();
+    }
+
+    [Fact]
+    public void LegacyElementOutcomesReleasePayloadsOnSuccessExceptionAndReuse()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        ElementOutcomeGenerator generator = new(fixture.Connection, NullLoggerFactory.Instance, pair, new(), new());
+        XVerStructureCatalog catalog = PrivateField<XVerStructureCatalog>(generator, "_catalog");
+        AssertNoPayloads(catalog);
+        DbStructureDefinition owner = fixture.Structure(pair.SourcePackage);
+        catalog.ReadPayload(owner);
+        generator.ProcessSourceStructure(owner, []);
+        AssertNoPayloads(catalog);
+        catalog.ReadPayload(owner);
+        Should.Throw<NullReferenceException>(() => generator.ProcessSourceStructure(null!, []));
+        AssertNoPayloads(catalog);
+        catalog.ReadPayload(owner);
+        generator.ProcessSourceStructure(owner, []);
+        AssertNoPayloads(catalog);
+        generator.DoPostProcessing(pair);
+        AssertNoPayloads(catalog);
+    }
+
+    [Fact]
+    public void LegacyBuildersAndRepresentationQueriesReleasePayloadsOnSuccessExceptionAndReuse()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        DbStructureOutcome owner = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        DbElement source = fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.status", "code");
+        DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.status", "code");
+        fixture.Connect(pair, owner, source, target);
+        fixture.CompleteAuthoredArrangement(pair);
+        fixture.GenerateSafety(pair);
+        StructureFhirExporter builder = new(new XVerExporter(fixture.Connection, new ConfigXVer { XverArtifactVersion = "0.1.0-test" }),
+            fixture.Connection, NullLoggerFactory.Instance);
+        IgExporter.XVerIgExportTrackingRecord Tracking() => new()
+        {
+            PackagePair = pair, PackageId = "hl7.fhir.uv.xver-r5.r4",
+        };
+        StructureFhirExporter.BuiltDefinitions built = builder.BuildDefinitions(Tracking());
+        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
+        XVerStructureCatalog representationCatalog = PrivateField<XVerStructureCatalog>(built.Representations, "_catalog");
+        AssertNoPayloads(representationCatalog);
+        UnsafeCodePathStep[] path = [new("ValueSet", null, false), new(source.Id, null, false)];
+        built.Representations.Resolve(owner.Key, path).ShouldNotBeEmpty();
+        AssertNoPayloads(representationCatalog);
+        built.Representations.ResolveSafety(owner.Key, [.. path]);
+        AssertNoPayloads(representationCatalog);
+        built.Representations.Occurrences(owner.Key).Take(1).ToArray().ShouldNotBeEmpty();
+        AssertNoPayloads(representationCatalog);
+        StructureFhirExporter.BuiltDefinitions next = builder.BuildDefinitions(Tracking());
+        next.Representations.ShouldNotBeSameAs(built.Representations);
+        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
+        built.Representations.Resolve(owner.Key, path).ShouldNotBeEmpty();
+        AssertNoPayloads(representationCatalog);
+
+        DbStructureDefinitionFacts facts = DbStructureDefinitionFacts.SelectSingle(fixture.Connection, StructureKey: owner.SourceStructureKey)!;
+        string original = facts.StructureDefinitionJson;
+        facts.StructureDefinitionJson = "{}";
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        Should.Throw<InvalidOperationException>(() => builder.BuildDefinitions(Tracking()));
+        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
+        facts.StructureDefinitionJson = original;
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        builder.BuildExtensions(Tracking());
+        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
+        builder.BuildProfiles(Tracking());
+        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
+
+        DbStructureDefinitionFacts captured = PrivateField<Dictionary<int, DbStructureDefinitionFacts>>(representationCatalog, "_facts")[owner.SourceStructureKey];
+        string capturedJson = captured.StructureDefinitionJson;
+        captured.StructureDefinitionJson = "{}";
+        Should.Throw<InvalidOperationException>(() => built.Representations.Occurrences(owner.Key).ToArray());
+        AssertNoPayloads(representationCatalog);
+        captured.StructureDefinitionJson = capturedJson;
+        built.Representations.Resolve(owner.Key, path).ShouldNotBeEmpty();
+        AssertNoPayloads(representationCatalog);
+    }
+
+    [Fact]
+    public void LegacyUnsafePairFactsReleaseTheirOwnPayloadsIncludingProvenanceOnlyWork()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        Type type = typeof(UnsafeCodeOutcomeGenerator).GetNestedType("PairFacts", System.Reflection.BindingFlags.NonPublic)!;
+        object instance = Activator.CreateInstance(type, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            null, [fixture.Connection, pair], System.Globalization.CultureInfo.InvariantCulture)!;
+        XVerStructureCatalog catalog = PrivateField<XVerStructureCatalog>(instance, "_catalog");
+        try
+        {
+            catalog.ReadPayload(fixture.Structure(pair.SourcePackage));
+            type.GetMethod("ValidateAnnotationProvenance", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(instance, [Array.Empty<DbUnsafeCodeTrigger>()]);
+        }
+        finally
+        {
+            ((IDisposable)instance).Dispose();
+        }
+        AssertNoPayloads(catalog);
+        Should.Throw<ObjectDisposedException>(() => catalog.GetDefinitions(pair.SourcePackageKey));
+        object failed = Activator.CreateInstance(type, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            null, [fixture.Connection, pair], System.Globalization.CultureInfo.InvariantCulture)!;
+        XVerStructureCatalog failedCatalog = PrivateField<XVerStructureCatalog>(failed, "_catalog");
+        DbUnsafeCodeTrigger[] invalidTriggers = [null!];
+        try
+        {
+            failedCatalog.ReadPayload(fixture.Structure(pair.SourcePackage));
+            Should.Throw<System.Reflection.TargetInvocationException>(() =>
+                type.GetMethod("ValidateAnnotationProvenance", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                    .Invoke(failed, [invalidTriggers]));
+        }
+        finally
+        {
+            ((IDisposable)failed).Dispose();
+        }
+        AssertNoPayloads(failedCatalog);
+        new UnsafeCodeOutcomeGenerator(fixture.Connection).ValidateAnnotationProvenance(pair, []);
+        new UnsafeCodeOutcomeGenerator(fixture.Connection).GenerateForPair(pair);
+    }
+
+    private static T PrivateField<T>(object instance, string name) =>
+        (T)instance.GetType().GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(instance)!;
+
+    private static void AssertNoPayloads(XVerStructureCatalog catalog)
+    {
+        PrivateField<Dictionary<int, StructureDefinition>>(catalog, "_payloads").ShouldBeEmpty();
+        PrivateField<Dictionary<int, Dictionary<string, ElementDefinition>>>(catalog, "_payloadElements").ShouldBeEmpty();
+    }
+
+    [Fact]
     public void OperandEvidenceCoversAllPersistedFields()
     {
         using UnsafeCodeTestFixture fixture = new();

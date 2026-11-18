@@ -133,177 +133,184 @@ public class ElementOutcomeGenerator
     {
         _db = db;
         _catalog = new(db, XVerProcessor._exclusionSet);
-        _loggerFactory = loggerFactory;
-        _logger = loggerFactory.CreateLogger<ElementOutcomeGenerator>();
-        _packagePair = packagePair;
-        _edOutcomeCache = edOutcomeCache;
-        _edOutcomeTargetCache = edOutcomeTargetCache;
-
-        _allSourceElements = DbElement.SelectDict(_db, FhirPackageKey: _packagePair.SourcePackageKey);
-        _allTargetElements = DbElement.SelectDict(_db, FhirPackageKey: _packagePair.TargetPackageKey);
-
-        _edComparisons = DbElementComparison.SelectList(
-            _db,
-            SourceFhirPackageKey: packagePair.SourcePackageKey,
-            TargetFhirPackageKey: packagePair.TargetPackageKey);
-
-        _logger.LogInformation(
-            $"Element comparisons: {_edComparisons.Count}, from" +
-            $" {_allSourceElements.Count} Elements" +
-            $" to {_allTargetElements.Count} Elements");
-
-        _allSourceElementTypes = DbElementType.SelectDict(_db, FhirPackageKey: packagePair.SourcePackageKey);
-        _allTargetElementTypes = DbElementType.SelectDict(_db, FhirPackageKey: packagePair.TargetPackageKey);
-
-        _etcComparisons = DbElementTypeComparison.SelectList(
-            _db,
-            SourceFhirPackageKey: packagePair.SourcePackageKey,
-            TargetFhirPackageKey: packagePair.TargetPackageKey);
-
-        _logger.LogInformation(
-            $"Element Type comparisons: {_etcComparisons.Count}, from" +
-            $" {_allSourceElementTypes.Count} Element Types" +
-            $" to {_allTargetElementTypes.Count} Element Types");
-
-        _allSourceElementsBySdKey = _allSourceElements.Values.ToLookup(c => c.StructureKey);
-        _allTargetElementsBySdKey = _allTargetElements.Values.ToLookup(c => c.StructureKey);
-
-        _sourceElementTypesByElementKey = _allSourceElementTypes.Values.ToLookup(c => c.ElementKey);
-        _targetElementTypesByElementKey = _allTargetElementTypes.Values.ToLookup(c => c.ElementKey);
-
-        _edComparsionsBySourceElementKey = _edComparisons.ToLookup(c => c.SourceContentKey);
-        _edComparsionsBySourceStructureKey = _edComparisons.ToLookup(c => c.SourceStructureKey);
-
-        _etcComparisonsBySourceElementKey = _etcComparisons.ToLookup(c => c.SourceElementKey);
-
-        _sourceResourceTypes = [];
-        foreach (DbStructureDefinition sd in DbStructureDefinition.SelectList(_db, FhirPackageKey: packagePair.SourcePackageKey, ArtifactClass: FhirArtifactClassEnum.Resource))
+        try
         {
-            _sourceResourceTypes.Add(sd.Name);
-        }
+            _loggerFactory = loggerFactory;
+            _logger = loggerFactory.CreateLogger<ElementOutcomeGenerator>();
+            _packagePair = packagePair;
+            _edOutcomeCache = edOutcomeCache;
+            _edOutcomeTargetCache = edOutcomeTargetCache;
 
-        _targetResourceTypes = [];
-        foreach (DbStructureDefinition sd in DbStructureDefinition.SelectList(_db, FhirPackageKey: packagePair.TargetPackageKey, ArtifactClass: FhirArtifactClassEnum.Resource))
-        {
-            _targetResourceTypes.Add(sd.Name);
-        }
+            _allSourceElements = DbElement.SelectDict(_db, FhirPackageKey: _packagePair.SourcePackageKey);
+            _allTargetElements = DbElement.SelectDict(_db, FhirPackageKey: _packagePair.TargetPackageKey);
 
-        _targetBasicElementPathLookup = [];
-        _targetBasicElementsById = [];
-
-        // check for a basic structure
-        DbStructureDefinition? targetBasicResource = DbStructureDefinition.SelectSingle(
-            _db,
-            FhirPackageKey: _packagePair.TargetPackageKey,
-            Name: "Basic",
-            ArtifactClass: FhirArtifactClassEnum.Resource);
-        if (targetBasicResource != null)
-        {
-            _targetBasicRoot = _catalog.ResolveRoot(targetBasicResource);
-            // get the elements for this structure
-            List<DbElement> targetBasicElements = DbElement.SelectList(
+            _edComparisons = DbElementComparison.SelectList(
                 _db,
-                StructureKey: targetBasicResource.Key,
-                orderByProperties: [nameof(DbElement.ResourceFieldOrder)]);
+                SourceFhirPackageKey: packagePair.SourcePackageKey,
+                TargetFhirPackageKey: packagePair.TargetPackageKey);
 
-            // iterate over the elements
-            foreach (DbElement element in targetBasicElements)
-            {
-                // skip root, elements with empty paths, and `code` element
-                if ((element.ResourceFieldOrder == 0) ||
-                    string.IsNullOrEmpty(element.Path) ||
-                    element.Path.Equals("Basic.code", StringComparison.Ordinal))
-                {
-                    continue;
-                }
+            _logger.LogInformation(
+                $"Element comparisons: {_edComparisons.Count}, from" +
+                $" {_allSourceElements.Count} Elements" +
+                $" to {_allTargetElements.Count} Elements");
 
-                // add the path to the dictionary, but strip "Basic" from the front
-                _targetBasicElementPathLookup.Add(element.Path.Substring(5), element.BasePath);
-                _targetBasicElementsById.Add(element.Id, element);
-                if (element.BasePath is not null)
-                {
-                    _targetBasicElementsById[element.BasePath] = element;
-                }
-            }
-        }
+            _allSourceElementTypes = DbElementType.SelectDict(_db, FhirPackageKey: packagePair.SourcePackageKey);
+            _allTargetElementTypes = DbElementType.SelectDict(_db, FhirPackageKey: packagePair.TargetPackageKey);
 
-        _targetExtensionElementPathLookup = [];
-        _targetExtensionElementsById = [];
-
-        // check for a basic structure
-        DbStructureDefinition? targetExtensionType = DbStructureDefinition.SelectSingle(
-            _db,
-            FhirPackageKey: _packagePair.TargetPackageKey,
-            Name: "Extension",
-            ArtifactClass: FhirArtifactClassEnum.ComplexType);
-        if (targetExtensionType != null)
-        {
-            _targetExtensionRoot = _catalog.ResolveRoot(targetExtensionType);
-            // get the elements for this structure
-            List<DbElement> targetExtensionElements = DbElement.SelectList(
+            _etcComparisons = DbElementTypeComparison.SelectList(
                 _db,
-                StructureKey: targetExtensionType.Key,
-                orderByProperties: [nameof(DbElement.ResourceFieldOrder)]);
+                SourceFhirPackageKey: packagePair.SourcePackageKey,
+                TargetFhirPackageKey: packagePair.TargetPackageKey);
 
-            // iterate over the elements
-            foreach (DbElement element in targetExtensionElements)
+            _logger.LogInformation(
+                $"Element Type comparisons: {_etcComparisons.Count}, from" +
+                $" {_allSourceElementTypes.Count} Element Types" +
+                $" to {_allTargetElementTypes.Count} Element Types");
+
+            _allSourceElementsBySdKey = _allSourceElements.Values.ToLookup(c => c.StructureKey);
+            _allTargetElementsBySdKey = _allTargetElements.Values.ToLookup(c => c.StructureKey);
+
+            _sourceElementTypesByElementKey = _allSourceElementTypes.Values.ToLookup(c => c.ElementKey);
+            _targetElementTypesByElementKey = _allTargetElementTypes.Values.ToLookup(c => c.ElementKey);
+
+            _edComparsionsBySourceElementKey = _edComparisons.ToLookup(c => c.SourceContentKey);
+            _edComparsionsBySourceStructureKey = _edComparisons.ToLookup(c => c.SourceStructureKey);
+
+            _etcComparisonsBySourceElementKey = _etcComparisons.ToLookup(c => c.SourceElementKey);
+
+            _sourceResourceTypes = [];
+            foreach (DbStructureDefinition sd in DbStructureDefinition.SelectList(_db, FhirPackageKey: packagePair.SourcePackageKey, ArtifactClass: FhirArtifactClassEnum.Resource))
             {
-                // skip root and elements with empty paths
-                if ((element.ResourceFieldOrder == 0) ||
-                    string.IsNullOrEmpty(element.Path))
-                {
-                    continue;
-                }
-
-                // add the path to the dictionary, but strip "Extension" from the front
-                _targetExtensionElementPathLookup.Add(element.Path.Substring(9), element.BasePath);
-                _targetExtensionElementsById.Add(element.Id, element);
-                if (element.BasePath is not null)
-                {
-                    _targetExtensionElementsById[element.BasePath] = element;
-                }
-            }
-        }
-
-        // build our extension substitution lookup
-        List<DbExtensionSubstitution> extensionSubstitutions = DbExtensionSubstitution.SelectList(
-            _db,
-            SourceFhirSequence: _packagePair.SourceFhirSequence);
-
-        extensionSubstitutions.AddRange(DbExtensionSubstitution.SelectList(_db, SourceFhirSequenceIsNull: true));
-
-        _extensionSubstitutionsByElementId = [];
-        _typeExtensionSubstitutionsByUrl = [];
-        foreach (DbExtensionSubstitution extSub in extensionSubstitutions)
-        {
-            if (extSub.SourceTypeReplacement is not null)
-            {
-                _typeExtensionSubstitutionsByUrl[extSub.ReplacementUrl] = extSub;
+                _sourceResourceTypes.Add(sd.Name);
             }
 
-            if (extSub.SourceElementId is not null)
+            _targetResourceTypes = [];
+            foreach (DbStructureDefinition sd in DbStructureDefinition.SelectList(_db, FhirPackageKey: packagePair.TargetPackageKey, ArtifactClass: FhirArtifactClassEnum.Resource))
             {
-                _extensionSubstitutionsByElementId[extSub.SourceElementId] = extSub;
-
-                string sourceElementClean = extSub.SourceElementId.Replace("[x]", string.Empty, StringComparison.Ordinal);
-                if (sourceElementClean != extSub.SourceElementId)
-                {
-                    _extensionSubstitutionsByElementId[sourceElementClean] = extSub;
-                }
+                _targetResourceTypes.Add(sd.Name);
             }
 
-            if (extSub.SourceFromContextExpandedLiteral is not null)
+            _targetBasicElementPathLookup = [];
+            _targetBasicElementsById = [];
+
+            // check for a basic structure
+            DbStructureDefinition? targetBasicResource = DbStructureDefinition.SelectSingle(
+                _db,
+                FhirPackageKey: _packagePair.TargetPackageKey,
+                Name: "Basic",
+                ArtifactClass: FhirArtifactClassEnum.Resource);
+            if (targetBasicResource != null)
             {
-                foreach (string ctxElementId in extSub.SourceFromContextExpanded)
+                _targetBasicRoot = _catalog.ResolveRoot(targetBasicResource);
+                // get the elements for this structure
+                List<DbElement> targetBasicElements = DbElement.SelectList(
+                    _db,
+                    StructureKey: targetBasicResource.Key,
+                    orderByProperties: [nameof(DbElement.ResourceFieldOrder)]);
+
+                // iterate over the elements
+                foreach (DbElement element in targetBasicElements)
                 {
-                    _extensionSubstitutionsByElementId[ctxElementId] = extSub;
-                    string ctxElementClean = ctxElementId.Replace("[x]", string.Empty, StringComparison.Ordinal);
-                    if (ctxElementClean != ctxElementId)
+                    // skip root, elements with empty paths, and `code` element
+                    if ((element.ResourceFieldOrder == 0) ||
+                        string.IsNullOrEmpty(element.Path) ||
+                        element.Path.Equals("Basic.code", StringComparison.Ordinal))
                     {
-                        _extensionSubstitutionsByElementId[ctxElementClean] = extSub;
+                        continue;
+                    }
+
+                    // add the path to the dictionary, but strip "Basic" from the front
+                    _targetBasicElementPathLookup.Add(element.Path.Substring(5), element.BasePath);
+                    _targetBasicElementsById.Add(element.Id, element);
+                    if (element.BasePath is not null)
+                    {
+                        _targetBasicElementsById[element.BasePath] = element;
                     }
                 }
             }
+
+            _targetExtensionElementPathLookup = [];
+            _targetExtensionElementsById = [];
+
+            // check for a basic structure
+            DbStructureDefinition? targetExtensionType = DbStructureDefinition.SelectSingle(
+                _db,
+                FhirPackageKey: _packagePair.TargetPackageKey,
+                Name: "Extension",
+                ArtifactClass: FhirArtifactClassEnum.ComplexType);
+            if (targetExtensionType != null)
+            {
+                _targetExtensionRoot = _catalog.ResolveRoot(targetExtensionType);
+                // get the elements for this structure
+                List<DbElement> targetExtensionElements = DbElement.SelectList(
+                    _db,
+                    StructureKey: targetExtensionType.Key,
+                    orderByProperties: [nameof(DbElement.ResourceFieldOrder)]);
+
+                // iterate over the elements
+                foreach (DbElement element in targetExtensionElements)
+                {
+                    // skip root and elements with empty paths
+                    if ((element.ResourceFieldOrder == 0) ||
+                        string.IsNullOrEmpty(element.Path))
+                    {
+                        continue;
+                    }
+
+                    // add the path to the dictionary, but strip "Extension" from the front
+                    _targetExtensionElementPathLookup.Add(element.Path.Substring(9), element.BasePath);
+                    _targetExtensionElementsById.Add(element.Id, element);
+                    if (element.BasePath is not null)
+                    {
+                        _targetExtensionElementsById[element.BasePath] = element;
+                    }
+                }
+            }
+
+            // build our extension substitution lookup
+            List<DbExtensionSubstitution> extensionSubstitutions = DbExtensionSubstitution.SelectList(
+                _db,
+                SourceFhirSequence: _packagePair.SourceFhirSequence);
+
+            extensionSubstitutions.AddRange(DbExtensionSubstitution.SelectList(_db, SourceFhirSequenceIsNull: true));
+
+            _extensionSubstitutionsByElementId = [];
+            _typeExtensionSubstitutionsByUrl = [];
+            foreach (DbExtensionSubstitution extSub in extensionSubstitutions)
+            {
+                if (extSub.SourceTypeReplacement is not null)
+                {
+                    _typeExtensionSubstitutionsByUrl[extSub.ReplacementUrl] = extSub;
+                }
+
+                if (extSub.SourceElementId is not null)
+                {
+                    _extensionSubstitutionsByElementId[extSub.SourceElementId] = extSub;
+
+                    string sourceElementClean = extSub.SourceElementId.Replace("[x]", string.Empty, StringComparison.Ordinal);
+                    if (sourceElementClean != extSub.SourceElementId)
+                    {
+                        _extensionSubstitutionsByElementId[sourceElementClean] = extSub;
+                    }
+                }
+
+                if (extSub.SourceFromContextExpandedLiteral is not null)
+                {
+                    foreach (string ctxElementId in extSub.SourceFromContextExpanded)
+                    {
+                        _extensionSubstitutionsByElementId[ctxElementId] = extSub;
+                        string ctxElementClean = ctxElementId.Replace("[x]", string.Empty, StringComparison.Ordinal);
+                        if (ctxElementClean != ctxElementId)
+                        {
+                            _extensionSubstitutionsByElementId[ctxElementClean] = extSub;
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _catalog.ReleasePayloads();
         }
     }
 
@@ -407,6 +414,20 @@ public class ElementOutcomeGenerator
     };
 
     public void ProcessSourceStructure(
+        DbStructureDefinition sourceSd,
+        Dictionary<int, StructureOutcomeGenerator.StructureOutcomeTrackingRecord> structureTrackingRecords)
+    {
+        try
+        {
+            ProcessSourceStructureCore(sourceSd, structureTrackingRecords);
+        }
+        finally
+        {
+            _catalog.ReleasePayloads();
+        }
+    }
+
+    private void ProcessSourceStructureCore(
         DbStructureDefinition sourceSd,
         Dictionary<int, StructureOutcomeGenerator.StructureOutcomeTrackingRecord> structureTrackingRecords)
     {

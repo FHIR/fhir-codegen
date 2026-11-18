@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Data;
 using System.Diagnostics;
 using System.Linq;
@@ -47,7 +48,8 @@ public class StructureFhirExporter
     private readonly IDbConnection _db;
     private ProfileRepresentationIndex? _representations;
     private XVerIgExportTrackingRecord? _representationTracking;
-    private readonly XVerStructureCatalog _catalog;
+    private XVerStructureCatalog _catalog;
+    private int _constructionDepth;
     private readonly Dictionary<(int Source, int Target), IReadOnlyList<ProfileRepresentationProof>> _profileDecisions = [];
     private DbStructureOutcome? _profileOutcome;
     private DbElementOutcome? _profileElement;
@@ -62,7 +64,10 @@ public class StructureFhirExporter
     internal sealed record BuiltDefinitions(
         IReadOnlyList<BuiltDefinition> Extensions,
         IReadOnlyList<BuiltDefinition> Profiles,
-        ProfileRepresentationIndex Representations);
+        ProfileRepresentationIndex Representations)
+    {
+        internal ImmutableArray<ProfileRepresentationProof> ProfileDecisions { get; init; } = [];
+    }
 
     internal ProfileRepresentationIndex Representations => _representations ?? throw new InvalidOperationException("Build definitions before accessing representations.");
 
@@ -184,19 +189,76 @@ public class StructureFhirExporter
 
     internal void Emit(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions)
     {
-        exportExtensions(igTr, definitions.Extensions);
-        exportProfiles(igTr, definitions.Profiles);
-        exportResourceMaps(igTr);
-        exportTypeMaps(igTr);
-        exportElementMaps(igTr);
+        try
+        {
+            _profileDecisions[(igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey)] = definitions.ProfileDecisions;
+            exportExtensions(igTr, definitions.Extensions);
+            exportProfiles(igTr, definitions.Profiles);
+            exportResourceMaps(igTr);
+            exportTypeMaps(igTr);
+            exportElementMaps(igTr);
+        }
+        finally
+        {
+            _catalog.ReleasePayloads();
+            definitions.Representations.ReleasePayloads();
+            _profileDecisions.Clear();
+        }
     }
 
-    internal BuiltDefinitions BuildDefinitions(XVerIgExportTrackingRecord igTr)
+    private T InConstructionScope<T>(Func<T> build)
+    {
+        bool ownsScope = _constructionDepth++ == 0;
+        try
+        {
+            if (ownsScope)
+            {
+                _catalog.Dispose();
+                _catalog = new(_db, XVer.XVerProcessor._exclusionSet);
+                _representations = null;
+                _representationTracking = null;
+                _profileDecisions.Clear();
+                _extensionValueTypes.Clear();
+                _extensionValueTypeNames.Clear();
+                _canonicalTargetElements.Clear();
+                _canonicalTargetResourceNames.Clear();
+                _resourceReferenceLookup.Clear();
+            }
+            return build();
+        }
+        finally
+        {
+            _constructionDepth--;
+            if (ownsScope)
+            {
+                try
+                {
+                    _representations?.ReleasePayloads();
+                }
+                finally
+                {
+                    _catalog.ReleasePayloads();
+                    _profileDecisions.Clear();
+                    _representationTracking = null;
+                    _profileOutcome = null;
+                    _profileElement = null;
+                }
+            }
+        }
+    }
+
+    internal BuiltDefinitions BuildDefinitions(XVerIgExportTrackingRecord igTr) =>
+        InConstructionScope(() => BuildDefinitionsCore(igTr));
+
+    private BuiltDefinitions BuildDefinitionsCore(XVerIgExportTrackingRecord igTr)
     {
         prepareDefinitions(igTr);
         BuiltDefinitionSet extensions = BuildExtensions(igTr);
         BuiltDefinitionSet profiles = BuildProfiles(igTr);
-        return new(extensions.Definitions, profiles.Definitions, profiles.Representations);
+        return new(extensions.Definitions, profiles.Definitions, profiles.Representations)
+        {
+            ProfileDecisions = [.. _profileDecisions[(igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey)]],
+        };
     }
 
     private void prepareDefinitions(XVerIgExportTrackingRecord igTr)
@@ -1340,7 +1402,10 @@ public class StructureFhirExporter
         igTr.ProfileFiles = exported;
     }
 
-    internal BuiltDefinitionSet BuildProfiles(XVerIgExportTrackingRecord igTr)
+    internal BuiltDefinitionSet BuildProfiles(XVerIgExportTrackingRecord igTr) =>
+        InConstructionScope(() => BuildProfilesCore(igTr));
+
+    private BuiltDefinitionSet BuildProfilesCore(XVerIgExportTrackingRecord igTr)
     {
         prepareDefinitions(igTr);
         if (_representationTracking != igTr)
@@ -2585,10 +2650,15 @@ public class StructureFhirExporter
         igTr.ExtensionFiles = exported;
     }
 
-    internal BuiltDefinitionSet BuildExtensions(XVerIgExportTrackingRecord igTr)
+    internal BuiltDefinitionSet BuildExtensions(XVerIgExportTrackingRecord igTr) =>
+        InConstructionScope(() => BuildExtensionsCore(igTr));
+
+    private BuiltDefinitionSet BuildExtensionsCore(XVerIgExportTrackingRecord igTr)
     {
         prepareDefinitions(igTr);
+        _representations?.ReleasePayloads();
         _representations = new(_db, igTr.PackagePair);
+        _representations.BeginConstruction();
         _representationTracking = igTr;
         List<BuiltDefinition> definitions = [];
 

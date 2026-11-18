@@ -418,13 +418,32 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     internal static IReadOnlyList<ProfileRepresentationProof> ClassifyPair(IDbConnection db, FhirPackageComparisonPair pair)
     {
         XVerStructureCatalog catalog = new(db, XVer.XVerProcessor._exclusionSet);
-        using ProfileUseFacts facts = new(catalog, pair.SourcePackageKey, pair.TargetPackageKey,
+        try
+        {
+            return ClassifyPair(db, pair, catalog);
+        }
+        finally
+        {
+            catalog.Dispose();
+        }
+    }
+
+    private static IReadOnlyList<ProfileRepresentationProof> ClassifyPair(
+        IDbConnection db, FhirPackageComparisonPair pair, XVerStructureCatalog catalog)
+    {
+        ImmutableArray<ProfileRepresentationProof> decisions = ClassifyDirection(catalog,
+            pair.SourcePackageKey, pair.TargetPackageKey,
             DbElementComparison.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey));
-        IReadOnlyList<ProfileRepresentationProof> decisions = facts.ClassifyRequiredUses();
-        using ProfileUseFacts reverse = new(catalog, pair.TargetPackageKey, pair.SourcePackageKey,
+        ClassifyDirection(catalog, pair.TargetPackageKey, pair.SourcePackageKey,
             DbElementComparison.SelectList(db, SourceFhirPackageKey: pair.TargetPackageKey, TargetFhirPackageKey: pair.SourcePackageKey));
-        reverse.ClassifyRequiredUses();
         return decisions;
+    }
+
+    internal static ImmutableArray<ProfileRepresentationProof> ClassifyDirection(XVerStructureCatalog catalog,
+        int sourcePackageKey, int targetPackageKey, IReadOnlyList<DbElementComparison> comparisons)
+    {
+        using ProfileUseFacts facts = new(catalog, sourcePackageKey, targetPackageKey, comparisons);
+        return [.. facts.ClassifyRequiredUses()];
     }
 
     internal ProfileRepresentationProof ProveInOwner(ProfileRepresentationProof decision,
@@ -522,10 +541,33 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
 
     internal static void RequirePersistedDecisions(IDbConnection db, FhirPackageComparisonPair pair)
     {
-        IReadOnlyList<ProfileRepresentationProof> required = ClassifyPair(db, pair);
         XVerStructureCatalog catalog = new(db, XVer.XVerProcessor._exclusionSet);
+        try
+        {
+            IReadOnlyList<ProfileRepresentationProof> required = ClassifyPair(db, pair, catalog);
+            RequirePersistedDecisions(db, pair, required, catalog);
+        }
+        finally
+        {
+            catalog.Dispose();
+        }
+    }
+
+    internal static void RequirePersistedDecisions(IDbConnection db, FhirPackageComparisonPair pair,
+        IReadOnlyList<ProfileRepresentationProof> required, XVerStructureCatalog catalog)
+    {
         List<DbStructureOutcome> structureOutcomes = DbStructureOutcome.SelectList(db,
             SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+        List<DbElementOutcome> elementOutcomes = DbElementOutcome.SelectList(db,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+        List<DbElementOutcomeTarget> elementTargets = DbElementOutcomeTarget.SelectList(db,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+        if (required.Any(proof => !proof.IsAcceptedDecision || proof.Input.PackageKey != pair.SourcePackageKey ||
+            proof.TargetPackageKey != pair.TargetPackageKey ||
+            catalog.GetStructure(proof.Input.OwnerKey).FhirPackageKey != pair.SourcePackageKey))
+        {
+            throw new InvalidOperationException("Expected profile decisions contradict the catalog or exact directed pair.");
+        }
         foreach (DbStructureOutcome outcome in structureOutcomes)
         {
             DbStructureDefinition source = catalog.GetStructure(outcome.SourceStructureKey);
@@ -541,8 +583,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 .ToDictionary(proof => (proof.Input, proof.NativeInput), PersistedProfileDecision.FromProof);
         Dictionary<(ProfileUseKey Input, ProfileUseKey? NativeInput), PersistedProfileDecision> actual = [];
         HashSet<int> negativeOutcomes = [];
-        foreach (DbElementOutcome outcome in DbElementOutcome.SelectList(db,
-            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+        foreach (DbElementOutcome outcome in elementOutcomes
             .Where(outcome => IsDecisionDocument(outcome.ExtensionProhibitionReason)))
         {
             if (!outcome.ExtensionDefinitionIsProhibited || outcome.IsEquivalent || outcome.IsIdentical ||
@@ -571,7 +612,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         if (structureOutcomes.Any(outcome => negativeOwners.Contains(outcome.SourceStructureKey) &&
                 (outcome.IsEquivalent || outcome.IsIdentical || outcome.FullyMapsAcrossAllTargets || outcome.FullyMapsToThisTarget ||
                     outcome.TargetCanonicalVersioned is not null || outcome.TargetCanonicalUnversioned is not null)) ||
-            DbElementOutcomeTarget.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            elementTargets
                 .Any(target => negativeOutcomes.Contains(target.ElementOutcomeKey) &&
                     (target.FullyMapsToThisTarget || target.ContextRootExtensionUrl is not null || target.ContextParentExtensionUrl is not null ||
                         target.CardinalityContextRootExtensionUrl is not null || target.CardinalityContextParentExtensionUrl is not null)))
@@ -695,7 +736,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     {
         _uses.Clear();
         _definitions.Clear();
-        catalog.ReleasePayloads();
+        _active.Clear();
     }
 
     internal EffectiveProfileBranch ForDefinition(DbStructureDefinition owner)

@@ -1513,6 +1513,49 @@ public class XVerProfileCatalogTests
 
     private const string QuantityUrl = "http://hl7.org/fhir/StructureDefinition/Quantity";
 
+    [Fact]
+    public void FixedContextBorrowersKeepExactSlicedOwnerAndAlternativeFacts()
+    {
+        StructureDefinition first = ConstraintProfile("FirstQuantity", slicedRoot: true);
+        StructureDefinition second = ConstraintProfile("SecondQuantity", slicedRoot: true);
+        second.Version = "definition-2";
+        first.Snapshot.Element.Single(element => element.Path == "Quantity.comparator").Max = "0";
+        first.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "first-only", Severity = Hl7.Fhir.Model.ConstraintSeverity.Error,
+            Expression = "comparator.empty()", Human = "No comparator.", Source = first.Url,
+        });
+        DefinitionCollection definitions = UseDefinitions(first, second);
+        StructureDefinition holder = definitions.ResourcesByName["UseHolder"];
+        holder.Snapshot.Element.Single(element => element.Path == "UseHolder.quantity").Type =
+            [new() { Code = "Quantity", Profile = [first.Url + "|" + first.Version, second.Url + "|" + second.Version] }];
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        using XVerStructureCatalog catalog = imported.Catalog;
+        DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "UseHolder")!;
+        DbElement occurrence = catalog.ResolveOwnedElement(owner, "UseHolder.quantity")!;
+        using ProfileUseFacts comparison = new(catalog, imported.PackageKey, imported.PackageKey);
+        using ProfileUseFacts classification = new(catalog, imported.PackageKey, imported.PackageKey, []);
+        EffectiveProfileUse uses = classification.AtUse(owner, occurrence, 0);
+        uses.Branches.Length.ShouldBe(2);
+        EffectiveProfileBranch restricted = uses.Branches.Single(branch => branch.Key.ProfileAlternative == first.Url + "|" + first.Version);
+        EffectiveProfileBranch alternative = uses.Branches.Single(branch => branch.Key.ProfileAlternative == second.Url + "|" + second.Version);
+        restricted.Root.Id.ShouldBe("Quantity:fixture");
+        alternative.Root.Id.ShouldBe("Quantity:fixture");
+        restricted.Definition.Key.ShouldNotBe(alternative.Definition.Key);
+        restricted.Definition.Version.ShouldNotBe(alternative.Definition.Version);
+        restricted.Elements[".comparator"].Maximum.ShouldBe(0);
+        alternative.Elements[".comparator"].Maximum.ShouldBe(1);
+        restricted.Elements[""].Invariants.ShouldContain(invariant => invariant.Key == "first-only" &&
+            invariant.Origin.OwnerKey == restricted.Definition.Key && invariant.Origin.ElementId == "Quantity:fixture");
+        alternative.Elements[""].Invariants.ShouldNotContain(invariant => invariant.Key == "first-only");
+        StructureDefinition payload = catalog.ReadPayload(restricted.Definition);
+        comparison.ForDefinition(restricted.Definition);
+        comparison.Dispose();
+        catalog.ReadPayload(restricted.Definition).ShouldBeSameAs(payload);
+        classification.AtUse(owner, occurrence, 0).ShouldBeSameAs(uses);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

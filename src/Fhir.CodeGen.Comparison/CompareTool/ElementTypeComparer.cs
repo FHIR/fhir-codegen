@@ -67,6 +67,23 @@ public class ElementTypeComparer
         DbElement? targetElement,
         int elementComparisonKey)
     {
+        try
+        {
+            return DoTypeComparisonsCore(packagePair, sourceElement, targetElement, elementComparisonKey);
+        }
+        finally
+        {
+            _catalog?.Dispose();
+            _catalog = null;
+        }
+    }
+
+    private ElementTypeComparisonTrackingRecord DoTypeComparisonsCore(
+        FhirPackageComparisonPair packagePair,
+        DbElement sourceElement,
+        DbElement? targetElement,
+        int elementComparisonKey)
+    {
         // get the source types
         List<DbElementType> sourceTypes = EffectiveTypes(sourceElement);
 

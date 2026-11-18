@@ -653,6 +653,7 @@ internal sealed class XVerStructureCatalog : IDisposable
 
     internal string? GetDeclaredType(DbStructureDefinition owner) => RequireFacts(owner).Type;
 
+    // Only the catalog owner ends a payload lifetime; facts are borrowers.
     internal void ReleasePayloads()
     {
         _payloadElements.Clear();

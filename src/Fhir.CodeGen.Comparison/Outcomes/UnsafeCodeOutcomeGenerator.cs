@@ -284,55 +284,72 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             _pair = pair;
             _catalog = new(db, XVer.XVerProcessor._exclusionSet);
             _profileFacts = new(_catalog, pair.SourcePackageKey, pair.TargetPackageKey);
-            _allElements = DbElement.SelectDict(db);
-            Structures = DbStructureDefinition.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
-            SourceElements = DbElement.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
-            _targetElements = DbElement.SelectDict(db, FhirPackageKey: pair.TargetPackageKey);
-            _children = SourceElements.Values.Where(element => element.ParentElementKey is not null).ToLookup(element => element.ParentElementKey!.Value);
-            _looseChildren = SourceElements.Values.Where(element => element.ParentElementKey is null && element.Id.Contains('.', StringComparison.Ordinal))
-                .ToLookup(element => (element.StructureKey, element.Id[..element.Id.LastIndexOf('.')]));
-            Roots = SourceElements.Values.Where(element => element.ParentElementKey is null && !element.Path.Contains('.', StringComparison.Ordinal)).ToLookup(element => element.StructureKey);
-            _types = DbElementType.SelectList(db, FhirPackageKey: pair.SourcePackageKey).ToLookup(type => type.ElementKey);
-            Outcomes = DbStructureOutcome.SelectDict(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
-            foreach (DbStructureOutcome outcome in Outcomes.Values)
+            try
             {
-                if (!_catalog.IsProcessed(outcome.SourceStructureKey) ||
-                    outcome.TargetStructureKey is int targetKey && !_catalog.IsProcessed(targetKey))
+                _allElements = DbElement.SelectDict(db);
+                Structures = DbStructureDefinition.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
+                SourceElements = DbElement.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
+                _targetElements = DbElement.SelectDict(db, FhirPackageKey: pair.TargetPackageKey);
+                _children = SourceElements.Values.Where(element => element.ParentElementKey is not null).ToLookup(element => element.ParentElementKey!.Value);
+                _looseChildren = SourceElements.Values.Where(element => element.ParentElementKey is null && element.Id.Contains('.', StringComparison.Ordinal))
+                    .ToLookup(element => (element.StructureKey, element.Id[..element.Id.LastIndexOf('.')]));
+                Roots = SourceElements.Values.Where(element => element.ParentElementKey is null && !element.Path.Contains('.', StringComparison.Ordinal)).ToLookup(element => element.StructureKey);
+                _types = DbElementType.SelectList(db, FhirPackageKey: pair.SourcePackageKey).ToLookup(type => type.ElementKey);
+                Outcomes = DbStructureOutcome.SelectDict(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+                foreach (DbStructureOutcome outcome in Outcomes.Values)
                 {
-                    throw new InvalidOperationException($"Passive standalone outcome {outcome.Key} is not operational for pair {pair.SourcePackageKey}->{pair.TargetPackageKey}.");
+                    if (!_catalog.IsProcessed(outcome.SourceStructureKey) ||
+                        outcome.TargetStructureKey is int targetKey && !_catalog.IsProcessed(targetKey))
+                    {
+                        throw new InvalidOperationException($"Passive standalone outcome {outcome.Key} is not operational for pair {pair.SourcePackageKey}->{pair.TargetPackageKey}.");
+                    }
                 }
+                _allComparisons = DbElementComparison.SelectDict(db);
+                _structureComparisons = DbStructureComparison.SelectDict(db);
+                _comparisons = _allComparisons.Values.Where(row => row.SourceFhirPackageKey == pair.SourcePackageKey &&
+                    row.TargetFhirPackageKey == pair.TargetPackageKey).ToDictionary(row => row.Key);
+                _mappings = DbElementMapping.SelectDict(db);
+                _elementOutcomes = DbElementOutcome.SelectDict(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+                _targets = DbElementOutcomeTarget.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+                    .Where(target => _elementOutcomes.ContainsKey(target.ElementOutcomeKey))
+                    .ToLookup(target => _elementOutcomes[target.ElementOutcomeKey].SourceElementKey);
+                Dictionary<int, DbValueSet> valueSets = DbValueSet.SelectList(db).Where(row => row.FhirPackageKey == pair.SourcePackageKey || row.FhirPackageKey == pair.TargetPackageKey).ToDictionary(row => row.Key);
+                ILookup<int, DbValueSetConcept> concepts = DbValueSetConcept.SelectList(db).Where(row => valueSets.ContainsKey(row.ValueSetKey)).ToLookup(row => row.ValueSetKey);
+                _bindingResolver = new(valueSets, key => concepts[key]);
+                DbUnsafeCodeElementAnnotation[] annotationRows = [.. DbUnsafeCodeElementAnnotation.SelectList(db)
+                    .Where(row => row.RequiresOmittedMandatoryCode)];
+                _annotationRows = annotationRows;
+                _annotationOwners = [.. DbProfileMapOwnerFacts.SelectList(db)];
+                Annotations = [.. annotationRows
+                    .Select(row => new UnsafeCodeElementAnnotation(
+                        new(row.SourceFhirPackageKey, row.TargetFhirPackageKey, row.SourceElementId, row.TargetElementId),
+                        new(row.SourceRelativeFilename, row.ConceptMapId, row.ConceptMapUrl, row.GroupIndex, row.SourceIndex, row.TargetIndex)))];
+                EvidenceRows = [.. DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)];
+                Evidence = [.. EvidenceRows.Select(row => new UnsafeCodeMapEvidence(
+                    row.SourceFhirPackageKey, row.TargetFhirPackageKey,
+                    new(row.SourceValueSetUrl, row.SourceValueSetVersion), new(row.TargetValueSetUrl, row.TargetValueSetVersion),
+                    new(row.SourceSystem, row.SourceSystemVersion), row.SourceCode,
+                    new(row.TargetSystem, row.TargetSystemVersion), row.TargetCode, row.Relationship, row.ExplicitNoMap, Provenance(row)))];
+                RuleRows = [.. DbUnsafeCodeRule.SelectList(db)];
+                Rules = [.. RuleRows.Select(UnsafeCodeInputStore.ReadRule)];
             }
-            _allComparisons = DbElementComparison.SelectDict(db);
-            _structureComparisons = DbStructureComparison.SelectDict(db);
-            _comparisons = _allComparisons.Values.Where(row => row.SourceFhirPackageKey == pair.SourcePackageKey &&
-                row.TargetFhirPackageKey == pair.TargetPackageKey).ToDictionary(row => row.Key);
-            _mappings = DbElementMapping.SelectDict(db);
-            _elementOutcomes = DbElementOutcome.SelectDict(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
-            _targets = DbElementOutcomeTarget.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-                .Where(target => _elementOutcomes.ContainsKey(target.ElementOutcomeKey))
-                .ToLookup(target => _elementOutcomes[target.ElementOutcomeKey].SourceElementKey);
-            Dictionary<int, DbValueSet> valueSets = DbValueSet.SelectList(db).Where(row => row.FhirPackageKey == pair.SourcePackageKey || row.FhirPackageKey == pair.TargetPackageKey).ToDictionary(row => row.Key);
-            ILookup<int, DbValueSetConcept> concepts = DbValueSetConcept.SelectList(db).Where(row => valueSets.ContainsKey(row.ValueSetKey)).ToLookup(row => row.ValueSetKey);
-            _bindingResolver = new(valueSets, key => concepts[key]);
-            DbUnsafeCodeElementAnnotation[] annotationRows = [.. DbUnsafeCodeElementAnnotation.SelectList(db)
-                .Where(row => row.RequiresOmittedMandatoryCode)];
-            _annotationRows = annotationRows;
-            _annotationOwners = [.. DbProfileMapOwnerFacts.SelectList(db)];
-            Annotations = [.. annotationRows
-                .Select(row => new UnsafeCodeElementAnnotation(
-                    new(row.SourceFhirPackageKey, row.TargetFhirPackageKey, row.SourceElementId, row.TargetElementId),
-                    new(row.SourceRelativeFilename, row.ConceptMapId, row.ConceptMapUrl, row.GroupIndex, row.SourceIndex, row.TargetIndex)))];
-            EvidenceRows = [.. DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)];
-            Evidence = [.. EvidenceRows.Select(row => new UnsafeCodeMapEvidence(
-                row.SourceFhirPackageKey, row.TargetFhirPackageKey,
-                new(row.SourceValueSetUrl, row.SourceValueSetVersion), new(row.TargetValueSetUrl, row.TargetValueSetVersion),
-                new(row.SourceSystem, row.SourceSystemVersion), row.SourceCode,
-                new(row.TargetSystem, row.TargetSystemVersion), row.TargetCode, row.Relationship, row.ExplicitNoMap, Provenance(row)))];
-            RuleRows = [.. DbUnsafeCodeRule.SelectList(db)];
-            Rules = [.. RuleRows.Select(UnsafeCodeInputStore.ReadRule)];
+            finally
+            {
+                _catalog.ReleasePayloads();
+            }
         }
 
-        public void Dispose() => _profileFacts.Dispose();
+        public void Dispose()
+        {
+            try
+            {
+                _profileFacts.Dispose();
+            }
+            finally
+            {
+                _catalog.Dispose();
+            }
+        }
 
         internal bool Permits(DbElement element) => _profileFacts.Permits(element);
 

@@ -162,6 +162,8 @@ internal sealed class ProfileRepresentationIndex
     private readonly Dictionary<(int Outcome, int Source), List<DbElement>> _native = [];
     private readonly Dictionary<(int Outcome, int Source), List<ProfileExtensionAttachment>> _attachments = [];
     private readonly Dictionary<string, RelativeExtensionNode> _extensions = new(StringComparer.Ordinal);
+    private bool _constructionActive;
+    private int _queryDepth;
 
     internal IReadOnlyDictionary<string, RelativeExtensionNode> Extensions => _extensions;
 
@@ -170,56 +172,86 @@ internal sealed class ProfileRepresentationIndex
         _db = db;
         _catalog = new(db);
         _profileFacts = new(_catalog, pair.SourcePackageKey, pair.TargetPackageKey);
-        _elements = DbElement.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
-        foreach (DbElement element in DbElement.SelectList(db, FhirPackageKey: pair.TargetPackageKey))
-        {
-            _elements[element.Key] = element;
-        }
-
-        _structures = DbStructureDefinition.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
-        foreach (DbStructureDefinition structure in DbStructureDefinition.SelectList(db, FhirPackageKey: pair.TargetPackageKey))
-        {
-            _structures[structure.Key] = structure;
-        }
-
-        _children = _elements.Values.Where(element => element.ParentElementKey is not null).ToLookup(element => element.ParentElementKey!.Value);
-        _types = DbElementType.SelectList(db, FhirPackageKey: pair.SourcePackageKey)
-            .Concat(DbElementType.SelectList(db, FhirPackageKey: pair.TargetPackageKey)).ToLookup(type => type.ElementKey);
-        _typesByKey = _types.SelectMany(group => group).ToDictionary(type => type.Key);
-        _valueSets = DbValueSet.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
-        foreach (DbValueSet valueSet in DbValueSet.SelectList(db, FhirPackageKey: pair.TargetPackageKey))
-        {
-            _valueSets[valueSet.Key] = valueSet;
-        }
-        _bindingResolver = new(_valueSets, key =>
-        {
-            if (!_concepts.TryGetValue(key, out List<DbValueSetConcept>? concepts))
-            {
-                concepts = DbValueSetConcept.SelectList(_db, ValueSetKey: key);
-                _concepts.Add(key, concepts);
-            }
-
-            return concepts;
-        });
-        _comparisons = DbElementComparison.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-            .ToLookup(comparison => comparison.SourceElementKey);
-        _comparisonsByTarget = _comparisons.SelectMany(group => group).ToLookup(comparison => comparison.TargetElementKey);
-        _typeComparisons = DbElementTypeComparison.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-            .ToLookup(comparison => comparison.SourceElementKey);
         try
         {
-            _evidence = [.. DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-                .Select(row => new UnsafeCodeMapEvidence(
-                    row.SourceFhirPackageKey, row.TargetFhirPackageKey,
-                    new(row.SourceValueSetUrl, row.SourceValueSetVersion), new(row.TargetValueSetUrl, row.TargetValueSetVersion),
-                    new(row.SourceSystem, row.SourceSystemVersion), row.SourceCode,
-                    new(row.TargetSystem, row.TargetSystemVersion), row.TargetCode, row.Relationship, row.ExplicitNoMap,
-                    new(row.SourceRelativeFilename, row.ConceptMapId, row.ConceptMapUrl, row.GroupIndex, row.SourceIndex, row.TargetIndex)))];
+            _elements = DbElement.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
+            foreach (DbElement element in DbElement.SelectList(db, FhirPackageKey: pair.TargetPackageKey))
+            {
+                _elements[element.Key] = element;
+            }
+
+            _structures = DbStructureDefinition.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
+            foreach (DbStructureDefinition structure in DbStructureDefinition.SelectList(db, FhirPackageKey: pair.TargetPackageKey))
+            {
+                _structures[structure.Key] = structure;
+            }
+
+            _children = _elements.Values.Where(element => element.ParentElementKey is not null).ToLookup(element => element.ParentElementKey!.Value);
+            _types = DbElementType.SelectList(db, FhirPackageKey: pair.SourcePackageKey)
+                .Concat(DbElementType.SelectList(db, FhirPackageKey: pair.TargetPackageKey)).ToLookup(type => type.ElementKey);
+            _typesByKey = _types.SelectMany(group => group).ToDictionary(type => type.Key);
+            _valueSets = DbValueSet.SelectDict(db, FhirPackageKey: pair.SourcePackageKey);
+            foreach (DbValueSet valueSet in DbValueSet.SelectList(db, FhirPackageKey: pair.TargetPackageKey))
+            {
+                _valueSets[valueSet.Key] = valueSet;
+            }
+            _bindingResolver = new(_valueSets, key =>
+            {
+                if (!_concepts.TryGetValue(key, out List<DbValueSetConcept>? concepts))
+                {
+                    concepts = DbValueSetConcept.SelectList(_db, ValueSetKey: key);
+                    _concepts.Add(key, concepts);
+                }
+
+                return concepts;
+            });
+            _comparisons = DbElementComparison.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+                .ToLookup(comparison => comparison.SourceElementKey);
+            _comparisonsByTarget = _comparisons.SelectMany(group => group).ToLookup(comparison => comparison.TargetElementKey);
+            _typeComparisons = DbElementTypeComparison.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+                .ToLookup(comparison => comparison.SourceElementKey);
+            try
+            {
+                _evidence = [.. DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+                    .Select(row => new UnsafeCodeMapEvidence(
+                        row.SourceFhirPackageKey, row.TargetFhirPackageKey,
+                        new(row.SourceValueSetUrl, row.SourceValueSetVersion), new(row.TargetValueSetUrl, row.TargetValueSetVersion),
+                        new(row.SourceSystem, row.SourceSystemVersion), row.SourceCode,
+                        new(row.TargetSystem, row.TargetSystemVersion), row.TargetCode, row.Relationship, row.ExplicitNoMap,
+                        new(row.SourceRelativeFilename, row.ConceptMapId, row.ConceptMapUrl, row.GroupIndex, row.SourceIndex, row.TargetIndex)))];
+            }
+            catch (SqliteException error) when (error.SqliteErrorCode == 1 && error.Message.Contains("no such table: UnsafeCodeMapEvidence", StringComparison.Ordinal))
+            {
+                // Feature readiness belongs to export preflight, not construction.
+                _evidence = [];
+            }
         }
-        catch (SqliteException error) when (error.SqliteErrorCode == 1 && error.Message.Contains("no such table: UnsafeCodeMapEvidence", StringComparison.Ordinal))
+        finally
         {
-            // Feature readiness belongs to export preflight, not construction.
-            _evidence = [];
+            ReleasePayloads();
+        }
+    }
+
+    internal void ReleasePayloads()
+    {
+        _constructionActive = false;
+        try
+        {
+            _profileFacts.Dispose();
+        }
+        finally
+        {
+            _catalog.ReleasePayloads();
+        }
+    }
+
+    internal void BeginConstruction() => _constructionActive = true;
+
+    private void EndQuery()
+    {
+        if (--_queryDepth == 0 && !_constructionActive)
+        {
+            ReleasePayloads();
         }
     }
 
@@ -291,10 +323,33 @@ internal sealed class ProfileRepresentationIndex
     private sealed record ResolvedOccurrence(
         DbElement? Source, List<Projection> Projections, DbElement Target, string? MissingType);
 
-    internal ImmutableArray<RepresentationLocation> Resolve(int outcomeKey, IReadOnlyList<UnsafeCodePathStep> sourcePath) =>
-        BuildLocations(ResolveOccurrence(outcomeKey, sourcePath));
+    internal ImmutableArray<RepresentationLocation> Resolve(int outcomeKey, IReadOnlyList<UnsafeCodePathStep> sourcePath)
+    {
+        _queryDepth++;
+        try
+        {
+            return BuildLocations(ResolveOccurrence(outcomeKey, sourcePath));
+        }
+        finally
+        {
+            EndQuery();
+        }
+    }
 
     internal UnsafeCodeSafetyResolution ResolveSafety(int outcomeKey, ImmutableArray<UnsafeCodePathStep> sourcePath)
+    {
+        _queryDepth++;
+        try
+        {
+            return ResolveSafetyCore(outcomeKey, sourcePath);
+        }
+        finally
+        {
+            EndQuery();
+        }
+    }
+
+    private UnsafeCodeSafetyResolution ResolveSafetyCore(int outcomeKey, ImmutableArray<UnsafeCodePathStep> sourcePath)
     {
         if (!_profiles.TryGetValue(outcomeKey, out (DbStructureOutcome Outcome, DbElement Target) profile))
         {
@@ -872,6 +927,22 @@ internal sealed class ProfileRepresentationIndex
     private int TargetPackageKey => _profiles.Values.First().Outcome.TargetFhirPackageKey;
 
     internal IEnumerable<RepresentationOccurrence> Occurrences(int outcomeKey)
+    {
+        _queryDepth++;
+        try
+        {
+            foreach (RepresentationOccurrence occurrence in EnumerateOccurrences(outcomeKey))
+            {
+                yield return occurrence;
+            }
+        }
+        finally
+        {
+            EndQuery();
+        }
+    }
+
+    private IEnumerable<RepresentationOccurrence> EnumerateOccurrences(int outcomeKey)
     {
         if (!_profiles.TryGetValue(outcomeKey, out (DbStructureOutcome Outcome, DbElement Target) profile))
         {
