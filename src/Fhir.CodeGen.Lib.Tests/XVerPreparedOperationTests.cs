@@ -5,7 +5,14 @@
 
 using System.Data;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Xml;
+using System.Xml.Linq;
+using System.Xml.XPath;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.CompareTool;
@@ -15,9 +22,14 @@ using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.Outcomes;
 using Fhir.CodeGen.Comparison.XVer;
 using Fhir.CodeGen.Lib.Configuration;
+using Fhir.CodeGen.Lib.Loader;
 using Fhir.CodeGen.Lib.Models;
+using Hl7.Fhir.ElementModel;
+using Hl7.Fhir.FhirPath;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
+using Hl7.FhirPath;
+using Hl7.FhirPath.Expressions;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -42,21 +54,288 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
     [Fact]
     public void CharacterizedPipelineProducesStableSemantics()
     {
-        RunSyntheticPipeline();
+        RunSyntheticPipeline(captureSemantics: true);
     }
 
     [Fact]
-    public void IdenticalWorkloadsReportStageCosts()
+    public async System.Threading.Tasks.Task IdenticalWorkloadsReportStageCosts()
     {
         RunSyntheticPipeline();
+        await RunRealCorePipeline();
     }
 
-    private void RunSyntheticPipeline()
+    [Fact]
+    public async System.Threading.Tasks.Task CharacterizedRealCoreConsumersProduceStableSemantics()
+    {
+        await RunRealCorePipeline(captureSemantics: true);
+    }
+
+    private async System.Threading.Tasks.Task RunRealCorePipeline(bool captureSemantics = false)
+    {
+        using WorkloadDirectory directory = new() { RetainCharacterization = captureSemantics };
+        List<StageCost> costs = [];
+        RealCoreWorkload? workload = null;
+        Stopwatch total = Stopwatch.StartNew();
+        Stopwatch operation = new();
+        string stage = "cached definitions";
+        try
+        {
+            List<DefinitionCollection> definitions = [];
+            foreach (FhirReleases.FhirSequenceCodes sequence in _sequences)
+            {
+                definitions.Add(await LoadCore(sequence));
+            }
+            foreach (DefinitionCollection collection in definitions.Where(collection =>
+                collection.FhirSequence is FhirReleases.FhirSequenceCodes.R5 or FhirReleases.FhirSequenceCodes.R4B))
+            {
+                AddCoreCarrier(collection);
+            }
+            stage = "full retained core import";
+            Measure(stage, () => workload = new(directory, definitions));
+            workload!.AssertRetainedInventory(definitions);
+            workload.Reopen();
+            FhirPackageComparisonPair pair = workload.RangePair;
+            stage = "core local maps";
+            Measure(stage, () => workload.LoadRangeMaps(pair));
+            workload.Reopen();
+            operation.Start();
+            stage = "actual Range element/type comparison";
+            Measure(stage, () => workload.CompareRangeElements(pair));
+            workload.Reopen();
+            workload.AssertRangeComparisons(pair);
+            stage = "actual Range element outcomes";
+            Measure(stage, () => workload.GenerateRangeOutcomes(pair));
+            workload.Reopen();
+            stage = "export readiness and write-free build";
+            StructureFhirExporter.BuiltDefinitions? built = null;
+            Measure(stage, () => built = workload.BuildRangeDefinitions(pair));
+            stage = "frozen semantic verification";
+            Measure(stage, () =>
+            {
+                built!.Profiles.ShouldHaveSingleItem().Definition.BaseDefinition.ShouldBe(CoreConsumerUrl);
+                built.Profiles.ShouldHaveSingleItem().Projections.ShouldBeEmpty();
+                built.Extensions.ShouldBeEmpty();
+                AssertGeneratedResource(built.Profiles.Single().Definition, pair, CoreConsumerName,
+                    "consumer-witness", "QuantityConsumerWitnessProfile", CoreConsumerUrl);
+                AssertCoreRows(workload.Connection, pair);
+                workload.ConnectionReopens.ShouldBe(4);
+            });
+            stage = "actual-core expected-rejection witnesses";
+            PersistedProfileDecision[] witnesses = [];
+            Measure(stage, () => witnesses = AssertCoreNegativeWitnesses(workload.Connection));
+            operation.Stop();
+            RecordMeasurementIdentity(workload.Connection, directory, "W2");
+            if (captureSemantics)
+            {
+                File.WriteAllText(Path.Combine(directory.Root, "built-definitions.json"), JsonSerializer.Serialize(new
+                {
+                    Profiles = built!.Profiles.Select(item => new
+                    {
+                        item.FileName, item.OutcomeKey, item.SourceId, Resource = item.Definition.ToJson(),
+                        Projections = item.Projections.Select(PersistedProfileDecision.FromProof),
+                    }),
+                    Extensions = built.Extensions.Select(item => new
+                    {
+                        item.FileName, item.OutcomeKey, Resource = item.Definition.ToJson(),
+                        Projections = item.Projections.Select(PersistedProfileDecision.FromProof),
+                    }),
+                    ExpectedRejections = witnesses,
+                }, new JsonSerializerOptions { WriteIndented = true }));
+                stage = "semantic characterization";
+                CaptureWorkloadSemantics(workload.Connection, directory, "W2");
+            }
+            directory.Completed = true;
+        }
+        finally
+        {
+            if (workload is not null)
+            {
+                Measure("database disposal", workload.Dispose);
+            }
+            total.Stop();
+            output.WriteLine($"W2 last stage={stage}; total including setup/capture/disposal={total.Elapsed.TotalMilliseconds:F3} ms; root={directory.Root}");
+            foreach (StageCost cost in costs)
+            {
+                output.WriteLine(JsonSerializer.Serialize(cost));
+            }
+            File.WriteAllText(Path.Combine(directory.Root, "stage-costs.json"), JsonSerializer.Serialize(new
+            {
+                Workload = "W2", LastStage = stage, directory.Completed,
+                TotalIncludingSetupCaptureAndDisposalMilliseconds = total.Elapsed.TotalMilliseconds, Costs = costs,
+                NetConsumerAndDisposalMilliseconds = operation.Elapsed.TotalMilliseconds +
+                    costs.Where(cost => cost.Stage == "database disposal").Sum(cost => cost.Milliseconds),
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        }
+
+        void Measure(string name, Action action)
+        {
+            using StageMemorySampler memory = new();
+            using Process process = Process.GetCurrentProcess();
+            process.Refresh();
+            long entryPrivate = process.PrivateMemorySize64;
+            long entryManaged = GC.GetTotalMemory(false);
+            long allocated = GC.GetTotalAllocatedBytes(true);
+            Stopwatch elapsed = Stopwatch.StartNew();
+            try
+            {
+                action();
+            }
+            finally
+            {
+                elapsed.Stop();
+                memory.Finish();
+                process.Refresh();
+                costs.Add(new(name, elapsed.Elapsed.TotalMilliseconds, GC.GetTotalAllocatedBytes(true) - allocated,
+                    entryPrivate, process.PrivateMemorySize64, entryManaged, GC.GetTotalMemory(false),
+                    process.PeakWorkingSet64, new FileInfo(Path.Combine(directory.Root, "workload.sqlite")) is { Exists: true } file
+                        ? file.Length : 0, memory.Samples, memory.PeakPrivateBytes, memory.PeakWorkingSetBytes));
+            }
+        }
+    }
+
+    private static async System.Threading.Tasks.Task<DefinitionCollection> LoadCore(FhirReleases.FhirSequenceCodes sequence)
+    {
+        string moniker = sequence.ToCorePackageId() + "#" + sequence.ToLongVersion();
+        string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".fhir", "packages");
+        List<string> prerequisites = [moniker];
+        if (sequence != FhirReleases.FhirSequenceCodes.DSTU2)
+        {
+            prerequisites.Add(moniker.Replace(".core#", ".expansions#", StringComparison.Ordinal));
+        }
+        foreach (string prerequisite in prerequisites)
+        {
+            File.Exists(Path.Combine(cache, prerequisite, "package", "package.json")).ShouldBeTrue(
+                $"Required cached-core prerequisite absent: {prerequisite} under {cache}; no package acquisition attempted.");
+        }
+        using PackageLoader loader = new(new()
+        {
+            OfflineMode = true, ResolvePackageDependencies = false, AutoLoadExpansions = true,
+            LogFactory = NullLoggerFactory.Instance,
+        });
+        DefinitionCollection? definitions = await loader.LoadPackages([moniker]);
+        definitions.ShouldNotBeNull();
+        return definitions;
+    }
+
+    private const string CoreConsumerName = "QuantityConsumerWitness";
+    private const string CoreConsumerUrl = "http://example.org/StructureDefinition/" + CoreConsumerName;
+
+    private static void AddCoreCarrier(DefinitionCollection definitions)
+    {
+        StructureDefinition basis = definitions.ResourcesByName["DomainResource"];
+        StructureDefinition carrier = (StructureDefinition)basis.DeepCopy();
+        carrier.Id = carrier.Name = CoreConsumerName;
+        carrier.Url = CoreConsumerUrl;
+        carrier.Version = definitions.MainPackageVersion;
+        carrier.Type = CoreConsumerName;
+        carrier.Abstract = false;
+        carrier.BaseDefinition = basis.Url + "|" + basis.Version;
+        carrier.Derivation = StructureDefinition.TypeDerivationRule.Specialization;
+        foreach (ElementDefinition element in carrier.Snapshot.Element)
+        {
+            element.ElementId = CoreConsumerName + element.ElementId[basis.Snapshot.Element[0].ElementId.Length..];
+            element.Path = CoreConsumerName + element.Path["DomainResource".Length..];
+        }
+        ElementDefinition use = new()
+        {
+            ElementId = CoreConsumerName + ".measure", Path = CoreConsumerName + ".measure",
+            Min = 0, Max = "1", Short = "Local carrier of the unchanged actual core datatype",
+            Base = new() { Path = CoreConsumerName + ".measure", Min = 0, Max = "1" },
+            Type = [new() { Code = "Range" }],
+        };
+        carrier.Snapshot.Element.Add(use);
+        carrier.Differential = new()
+        {
+            Element = [new() { ElementId = CoreConsumerName, Path = CoreConsumerName }, (ElementDefinition)use.DeepCopy()],
+        };
+        definitions.AddResourceDefinition(carrier, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+    }
+
+    private static PersistedProfileDecision[] AssertCoreNegativeWitnesses(IDbConnection connection)
+    {
+        XVerStructureCatalog catalog = new(connection, XVerProcessor._exclusionSet);
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(connection);
+        int r2 = packages.Single(package => package.PackageVersion == "1.0.2").Key;
+        int r4 = packages.Single(package => package.PackageVersion == "4.0.1").Key;
+        int r5 = packages.Single(package => package.PackageVersion == "5.0.0").Key;
+        using ProfileUseFacts ageFacts = new(catalog, r2, r4);
+        DbStructureDefinition sourceAge = catalog.ResolveDefinition(r2, StructureUrl + "Age|1.0.2")!;
+        DbStructureDefinition targetAge = catalog.ResolveDefinition(r4, StructureUrl + "Age|4.0.1")!;
+        EffectiveProfileBranch source = ageFacts.ForDefinition(sourceAge);
+        EffectiveProfileBranch target = ageFacts.ForDefinition(targetAge);
+        ProfileInvariant sourceInvariant = source.Elements[""].Invariants.Single(invariant => invariant.Key == "age-1");
+        ProfileInvariant targetInvariant = target.Elements[""].Invariants.First(invariant => invariant.Key == "age-1");
+        sourceInvariant.XPath.ShouldNotBeNull();
+        targetInvariant.Expression.ShouldNotBeNull();
+        sourceInvariant.XPath.ShouldContain("not(contains(f:value/@value, '-'))");
+        targetInvariant.Expression.ShouldContain("value > 0");
+        XmlNamespaceManager namespaces = new(new NameTable());
+        namespaces.AddNamespace("f", "http://hl7.org/fhir");
+        FhirPathCompiler compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+        CompiledExpression expression = compiler.Compile(targetInvariant.Expression);
+        foreach (int value in new[] { -1, 0, 1 })
+        {
+            XDocument instance = XDocument.Parse(
+                $"""<Quantity xmlns="http://hl7.org/fhir"><value value="{value}"/><system value="http://unitsofmeasure.org"/><code value="a"/></Quantity>""");
+            ((bool)instance.Root!.XPathEvaluate(sourceInvariant.XPath.Replace("exists(", "boolean(", StringComparison.Ordinal),
+                namespaces)).ShouldBe(value >= 0);
+            Quantity quantity = new() { Value = value, System = "http://unitsofmeasure.org", Code = "a" };
+            expression(quantity.ToTypedElement(), new EvaluationContext()).ShouldHaveSingleItem().Value.ShouldBe(value > 0);
+        }
+        ProfileRepresentationProof age = ageFacts.Prove(source, targetAge);
+        age.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        age.TargetCanonical.ShouldBeNull();
+        age.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.InvariantTransformation);
+        ageFacts.Prove(source, catalog.ResolveNativeType(r4, "Quantity")!).PreservesRestrictions.ShouldBeFalse();
+        const string comparatorSystem = "http://hl7.org/fhir/quantity-comparator";
+        const string comparatorValueSet = "http://hl7.org/fhir/ValueSet/quantity-comparator";
+        DbValueSet sourceDomain = DbValueSet.SelectList(connection, FhirPackageKey: r5).Single(row =>
+            row.UnversionedUrl == comparatorValueSet && row.Version == "5.0.0");
+        DbValueSet targetDomain = DbValueSet.SelectList(connection, FhirPackageKey: r4).Single(row =>
+            row.UnversionedUrl == comparatorValueSet && row.Version == "4.0.1");
+        UnsafeCodeIdentity[] sourceMembers = [.. DbValueSetConcept.SelectList(connection, ValueSetKey: sourceDomain.Key)
+            .Select(member => new UnsafeCodeIdentity(member.System, member.SystemVersion, member.Code))];
+        UnsafeCodeIdentity[] targetMembers = [.. DbValueSetConcept.SelectList(connection, ValueSetKey: targetDomain.Key)
+            .Select(member => new UnsafeCodeIdentity(member.System, member.SystemVersion, member.Code))];
+        sourceMembers.Length.ShouldBe(5);
+        targetMembers.Length.ShouldBe(4);
+        foreach (string comparator in new[] { "<", "<=", ">=", ">", "ad" })
+        {
+            ISourceNode witness = FhirJsonNode.Parse(
+                $$$"""{"resourceType":"Parameters","parameter":[{"name":"witness","valueQuantity":{"value":1,"comparator":"{{{comparator}}}"}}]}""")
+                .Children("parameter").Single().Children("valueQuantity").Single();
+            string actual = witness.Children("comparator").Single().Text!;
+            sourceMembers.ShouldContain(new UnsafeCodeIdentity(comparatorSystem, "5.0.0", actual));
+            targetMembers.Contains(new UnsafeCodeIdentity(comparatorSystem, "4.0.1", actual)).ShouldBe(actual != "ad");
+        }
+        using ProfileUseFacts quantityFacts = new(catalog, r5, r4);
+        DbStructureDefinition targetQuantity = catalog.ResolveNativeType(r4, "Quantity")!;
+        ProfileRepresentationProof binding = quantityFacts.Prove(
+            quantityFacts.ForDefinition(catalog.ResolveNativeType(r5, "Quantity")!), targetQuantity);
+        binding.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        binding.TargetCanonical.ShouldBeNull();
+        binding.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.Binding);
+        foreach (DbStructureDefinition candidate in catalog.GetDefinitions(r4).Where(owner =>
+            owner.ArtifactClass == FhirArtifactClassEnum.ComplexType ||
+            owner.ArtifactClass == FhirArtifactClassEnum.Profile && catalog.GetDeclaredType(owner) == "Quantity")
+            .Where(owner => owner.Key == targetQuantity.Key || catalog.GetAncestors(owner).Any(ancestor => ancestor.Key == targetQuantity.Key)))
+        {
+            EffectiveProfileElement comparator = quantityFacts.ForDefinition(candidate).Elements[".comparator"];
+            (comparator.Prohibited || comparator.Restrictions.Any(restriction =>
+                restriction.Kind == ProfileRestrictionKind.Binding && ProfileUseFacts.Text(restriction.Value, "strength") == "required" &&
+                ProfileUseFacts.Text(restriction.Value, "valueSet") == comparatorValueSet + "|4.0.1")).ShouldBeTrue(candidate.VersionedUrl);
+        }
+        return [PersistedProfileDecision.FromProof(age), PersistedProfileDecision.FromProof(binding)];
+    }
+
+    private void RunSyntheticPipeline(bool captureSemantics = false)
     {
         using WorkloadDirectory directory = new();
+        directory.RetainCharacterization = captureSemantics;
         List<StageCost> costs = [];
         ComparisonDatabase? database = null;
         Stopwatch total = Stopwatch.StartNew();
+        Stopwatch operation = new();
         string stage = "synthetic definitions/import";
         try
         {
@@ -66,22 +345,12 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
                 database = new(definitions, directory.Root, "workload.sqlite", NullLoggerFactory.Instance);
                 database.TryLoadFromDefinitionCollections(XVerProcessor._exclusionSet, XVerProcessor._escapeValveCodes)
                     .ShouldBeTrue();
+                AssertEffectiveRootTypeUses(database.DbConnection, definitions);
             });
             IDbConnection connection = database!.DbConnection;
-            XVerStructureCatalog catalog = new(connection, XVerProcessor._exclusionSet);
             List<DbFhirPackage> packages = DbFhirPackage.SelectList(connection,
                 orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
             packages.Select(package => package.PackageVersion).ShouldBe(["1.0.2", "3.0.2", "4.0.1", "4.3.0", "5.0.0"]);
-            foreach (DbFhirPackage package in packages)
-            {
-                catalog.GetDefinitions(package.Key).Count(owner => owner.ArtifactClass == FhirArtifactClassEnum.Profile)
-                    .ShouldBe(4);
-                catalog.GetProcessedStructures(package.Key).Count(owner => owner.ArtifactClass == FhirArtifactClassEnum.Profile)
-                    .ShouldBe(2);
-                catalog.ResolveRoot(catalog.ResolveDefinition(package.Key, StructureUrl + "SimpleQuantity")!).Id
-                    .ShouldBe(package.DefinitionFhirSequence == FhirReleases.FhirSequenceCodes.STU3
-                        ? "Quantity:simplequantity" : "Quantity");
-            }
             stage = "fixture maps";
             Measure(stage, () =>
             {
@@ -92,6 +361,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
             DbStructureMapping.SelectList(connection).ShouldContain(map => map.IsFallback);
             DbStructureMapping.SelectList(connection).ShouldContain(map => !map.IsFallback && map.ConceptMapSourceKey != null);
             stage = "FhirDbComparer.Compare";
+            operation.Start();
             Measure(stage, () => new FhirDbComparer(database, NullLoggerFactory.Instance).Compare(
                 processValueSets: true, processStructures: true, maxStepSize: 4));
             DbUnsafeCodePairState.SelectList(connection).Count.ShouldBe(20);
@@ -135,10 +405,17 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
                 resources.ShouldNotBeEmpty();
                 output.WriteLine($"W1 emitted StructureDefinitions={resources.Length}");
             });
-            stage = "semantic characterization";
+            stage = "frozen semantic verification";
+            Measure(stage, () => AssertSyntheticSemantics(connection, directory));
             output.WriteLine($"W1 rows: definitions={DbStructureDefinition.SelectList(connection).Count}, " +
                 $"facts={DbStructureDefinitionFacts.SelectList(connection).Count}, elements={DbElement.SelectList(connection).Count}, " +
                 $"types={DbElementType.SelectList(connection).Count}, negatives={negatives.Length}");
+            operation.Stop();
+            RecordMeasurementIdentity(connection, directory, "W1");
+            if (captureSemantics)
+            {
+                CaptureWorkloadSemantics(connection, directory, "W1");
+            }
             directory.Completed = true;
         }
         finally
@@ -158,10 +435,18 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
             {
                 output.WriteLine(JsonSerializer.Serialize(cost));
             }
+            File.WriteAllText(Path.Combine(directory.Root, "stage-costs.json"), JsonSerializer.Serialize(new
+            {
+                Workload = "W1", LastStage = stage, directory.Completed,
+                TotalIncludingSetupCaptureAndDisposalMilliseconds = total.Elapsed.TotalMilliseconds, Costs = costs,
+                NetConsumerAndDisposalMilliseconds = operation.Elapsed.TotalMilliseconds +
+                    costs.Where(cost => cost.Stage == "database disposal").Sum(cost => cost.Milliseconds),
+            }, new JsonSerializerOptions { WriteIndented = true }));
         }
 
         void Measure(string name, Action action)
         {
+            using StageMemorySampler memory = new();
             using Process process = Process.GetCurrentProcess();
             process.Refresh();
             long entryPrivate = process.PrivateMemorySize64;
@@ -175,13 +460,624 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
             finally
             {
                 elapsed.Stop();
+                memory.Finish();
                 process.Refresh();
                 costs.Add(new(name, elapsed.Elapsed.TotalMilliseconds, GC.GetTotalAllocatedBytes(true) - allocated,
                     entryPrivate, process.PrivateMemorySize64, entryManaged, GC.GetTotalMemory(false),
                     process.PeakWorkingSet64, new FileInfo(Path.Combine(directory.Root, "workload.sqlite")) is { Exists: true } file
-                        ? file.Length : 0));
+                        ? file.Length : 0, memory.Samples, memory.PeakPrivateBytes, memory.PeakWorkingSetBytes));
             }
         }
+    }
+
+    private void AssertEffectiveRootTypeUses(IDbConnection connection, DefinitionCollection[] definitions)
+    {
+        XVerStructureCatalog catalog = new(connection, XVerProcessor._exclusionSet);
+        DefinitionInventoryPackageCounts[] declarations = JsonSerializer.Deserialize<DefinitionInventoryPackageCounts[]>(
+            DefinitionInventoryStore.ReadState(connection)!.ExpectedPackageCountsJson)!;
+        try
+        {
+            foreach (DefinitionCollection collection in definitions)
+            {
+                DbFhirPackage package = DbFhirPackage.SelectList(connection).Single(row =>
+                    row.PackageId == collection.MainPackageId && row.PackageVersion == collection.MainPackageVersion);
+                StructureDefinition[] authored =
+                [
+                    .. collection.PrimitiveTypesByName.Values, .. collection.ComplexTypesByName.Values,
+                    .. collection.ResourcesByName.Values, .. collection.ProfilesByUrl.Values,
+                ];
+                ElementDefinition[] elements = [.. authored.SelectMany(owner => owner.Snapshot.Element)];
+                int expectedTypes = authored.Sum(owner => owner.Snapshot.Element.Sum(element =>
+                    element.Type.Sum(type => Math.Max(1, type.Profile.Count()) * Math.Max(1, type.TargetProfile.Count())) +
+                    (ReferenceEquals(element, owner.Snapshot.Element[0]) && element.Type.Count == 0 ? 1 : 0)));
+                DefinitionInventoryPackageCounts expected = new(package.Key,
+                    collection.PrimitiveTypesByName.Count, collection.ComplexTypesByName.Count,
+                    collection.ResourcesByName.Count, collection.ProfilesByUrl.Count, elements.Length, expectedTypes,
+                    elements.Sum(element => element.Binding?.Additional.Count ?? 0));
+                declarations.Single(row => row.FhirPackageKey == package.Key).ShouldBe(expected);
+                catalog.GetDefinitions(package.Key).Count.ShouldBe(authored.Length);
+                DbStructureDefinitionFacts.SelectList(connection, FhirPackageKey: package.Key).Count.ShouldBe(authored.Length);
+                DbElement.SelectList(connection, FhirPackageKey: package.Key).Count.ShouldBe(expected.ElementCount);
+                DbElementType.SelectList(connection, FhirPackageKey: package.Key).Count.ShouldBe(expected.ElementTypeCount);
+                DbElementAdditionalBinding.SelectList(connection, FhirPackageKey: package.Key).Count
+                    .ShouldBe(expected.AdditionalBindingCount);
+                catalog.GetProcessedStructures(package.Key).Count(owner => owner.ArtifactClass == FhirArtifactClassEnum.Profile)
+                    .ShouldBe(2);
+                using ProfileUseFacts facts = new(catalog, package.Key, package.Key);
+                foreach (StructureDefinition source in authored)
+                {
+                    DbStructureDefinition owner = catalog.ResolveDefinition(package.Key, source.Url + "|" + source.Version)!;
+                    StructureDefinition payload = catalog.ReadPayload(owner);
+                    payload.ToJson().ShouldBe(source.ToJson());
+                    payload.Type.ShouldBe(source.Type);
+                    ElementDefinition normalizedRoot = payload.Snapshot.Element[0];
+                    source.Snapshot.Element[0].Type.ShouldBeEmpty();
+                    normalizedRoot.Type.ShouldBeEmpty();
+                    DbElement root = catalog.ResolveRoot(owner);
+                    root.FhirPackageKey.ShouldBe(package.Key);
+                    root.StructureKey.ShouldBe(owner.Key);
+                    root.Id.ShouldBe(source.Snapshot.Element[0].ElementId);
+                    root.Path.ShouldBe(source.Type);
+                    root.ParentElementKey.ShouldBeNull();
+                    DbElementType type = catalog.GetTypeUses(root).ShouldHaveSingleItem();
+                    type.FhirPackageKey.ShouldBe(package.Key);
+                    type.StructureKey.ShouldBe(owner.Key);
+                    type.ElementKey.ShouldBe(root.Key);
+                    string.Equals(type.TypeName, source.Type, StringComparison.Ordinal).ShouldBeTrue();
+                    type.TypeProfile.ShouldBeNull();
+                    type.TypeProfileStructureKey.ShouldBeNull();
+                    type.TargetProfile.ShouldBeNull();
+                    type.TargetProfileStructureKey.ShouldBeNull();
+                    type.TypeStructureKey.ShouldBe(catalog.ResolveNativeType(package.Key, source.Type)!.Key);
+                    EffectiveProfileBranch effective = facts.ForDefinition(owner);
+                    effective.Diagnostics.ShouldBeEmpty();
+                    string.Equals(effective.Elements[""].Types.ShouldHaveSingleItem().Code, source.Type, StringComparison.Ordinal)
+                        .ShouldBeTrue();
+                }
+                foreach (string name in new[] { "Quantity", "SimpleQuantity" })
+                {
+                    DbStructureDefinition owner = catalog.ResolveDefinition(package.Key, StructureUrl + name)!;
+                    DbElement root = catalog.ResolveRoot(owner);
+                    string expectedId = name == "SimpleQuantity" && collection.FhirSequence == FhirReleases.FhirSequenceCodes.STU3
+                        ? "Quantity:simplequantity" : "Quantity";
+                    root.Id.ShouldBe(expectedId);
+                    EffectiveProfileBranch definition = facts.ForDefinition(owner);
+                    definition.Diagnostics.ShouldBeEmpty();
+                    string.Equals(definition.Elements[""].Types.ShouldHaveSingleItem().Code, "Quantity", StringComparison.Ordinal)
+                        .ShouldBeTrue();
+                    EffectiveProfileUse use = facts.AtUse(root, catalog.GetTypeUses(root).ShouldHaveSingleItem());
+                    use.Diagnostics.ShouldBeEmpty();
+                    EffectiveProfileBranch branch = use.Branches.ShouldHaveSingleItem();
+                    branch.Diagnostics.ShouldBeEmpty();
+                    branch.Key.PackageKey.ShouldBe(package.Key);
+                    branch.Key.OwnerKey.ShouldBe(owner.Key);
+                    branch.Key.ElementKey.ShouldBe(root.Key);
+                    branch.Key.ProfileAlternative.ShouldBeNull();
+                    branch.Key.TargetProfileAlternative.ShouldBeNull();
+                    branch.Elements[""].ElementId.ShouldBe(expectedId);
+                    string.Equals(branch.Elements[""].Types.ShouldHaveSingleItem().Code, "Quantity", StringComparison.Ordinal)
+                        .ShouldBeTrue();
+                    foreach (EffectiveProfileBranch actual in new[] { definition, branch })
+                    {
+                        actual.Elements[".comparator"].Maximum.ShouldBe(name == "SimpleQuantity" ? 0 : 1);
+                        actual.Elements[".comparator"].Origins.ShouldContain(origin =>
+                            origin.PackageKey == package.Key && origin.OwnerKey == owner.Key &&
+                            origin.ElementId == expectedId + ".comparator");
+                        if (name == "SimpleQuantity")
+                        {
+                            actual.Elements[""].Invariants.ShouldContain(invariant =>
+                                invariant.Key == "sqty-1" && invariant.Expression == "comparator.empty()" &&
+                                invariant.Origin.PackageKey == package.Key && invariant.Origin.OwnerKey == owner.Key &&
+                                invariant.Origin.ElementId == expectedId);
+                            catalog.GetOwnedElements(owner).ShouldAllBe(element =>
+                                element.Id == expectedId || element.Id.StartsWith(expectedId + ".", StringComparison.Ordinal));
+                        }
+                    }
+                }
+                output.WriteLine($"W1 independently authored inventory: {JsonSerializer.Serialize(expected)}");
+            }
+        }
+        finally
+        {
+            catalog.ReleasePayloads();
+        }
+    }
+
+    private static void AssertGeneratedResource(StructureDefinition actual, FhirPackageComparisonPair pair,
+        string type, string id, string name, string basis)
+    {
+        DateTimeOffset.TryParse(actual.Date, out _).ShouldBeTrue();
+        string title = $"Cross-version Profile for {pair.SourceFhirSequence}.{type} resource for use in FHIR {pair.TargetFhirSequence}";
+        string description = $"This cross-version profile allows {pair.SourceFhirSequence} {type} resource content to be represented via FHIR {pair.TargetFhirSequence} {type} resources.";
+        StructureDefinition expected = new()
+        {
+            Id = id, Url = type == CoreConsumerName ? "http://example.org/StructureDefinition/consumer-witness"
+                : $"http://hl7.org/fhir/{pair.SourcePackage.FhirVersionShort}/StructureDefinition/{id}",
+            Version = "0.1.0", Name = name, Title = title, Status = PublicationStatus.Active,
+            Experimental = false, Date = actual.Date, Publisher = "FHIR Infrastructure",
+            Contact = [new()
+            {
+                Name = "FHIR Infrastructure", Telecom = [new()
+                {
+                    System = ContactPoint.ContactPointSystem.Url,
+                    Value = "http://www.hl7.org/Special/committees/fiwg",
+                }],
+            }],
+            Description = description, FhirVersion = EnumUtilityVersion(pair.TargetPackage.PackageVersion),
+            Kind = StructureDefinition.StructureDefinitionKind.Resource, Abstract = false, Type = type,
+            BaseDefinition = basis, Derivation = StructureDefinition.TypeDerivationRule.Constraint,
+            Extension =
+            [
+                new("http://hl7.org/fhir/StructureDefinition/structuredefinition-wg", new Code("fhir")),
+                new()
+                {
+                    Url = "http://hl7.org/fhir/StructureDefinition/package-source",
+                    Extension =
+                    [
+                        new("packageId", new Id($"hl7.fhir.uv.xver-{pair.SourceFhirSequence.ToRLiteral().ToLowerInvariant()}.{pair.TargetFhirSequence.ToRLiteral().ToLowerInvariant()}")),
+                        new("version", new FhirString("0.1.0")),
+                    ],
+                },
+            ],
+            Differential = new()
+            {
+                Element = [new()
+                {
+                    ElementId = type, Path = type, Short = title, Definition = description, Min = 0, Max = "*",
+                }],
+            },
+        };
+        actual.ToJson().ShouldBe(expected.ToJson());
+    }
+
+    private static void AssertSyntheticSemantics(IDbConnection connection, WorkloadDirectory directory)
+    {
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(connection);
+        XVerStructureCatalog catalog = new(connection, XVerProcessor._exclusionSet);
+        Dictionary<int, DbElement> elementRows = DbElement.SelectList(connection).ToDictionary(row => row.Key);
+        List<DbStructureComparison> structures = DbStructureComparison.SelectList(connection);
+        List<DbElementComparison> elements = DbElementComparison.SelectList(connection);
+        List<DbElementTypeComparison> types = DbElementTypeComparison.SelectList(connection);
+        List<DbStructureOutcome> outcomes = DbStructureOutcome.SelectList(connection);
+        List<DbElementOutcome> elementOutcomes = DbElementOutcome.SelectList(connection);
+        List<DbElementOutcomeTarget> targets = DbElementOutcomeTarget.SelectList(connection);
+        structures.Count.ShouldBe(360);
+        elements.Count.ShouldBe(980);
+        types.Count.ShouldBe(1100);
+        outcomes.Count.ShouldBe(260);
+        elementOutcomes.Count.ShouldBe(980);
+        targets.Count.ShouldBe(980);
+        string[] comparedOwners = ["code", "string", "uri", "decimal", "id", "Element", "BackboneElement",
+            "Coding", "CodeableConcept", "Quantity", "Range", "Extension", "Resource", "DomainResource",
+            "Basic", ConsumerName, "SimpleQuantity", "NegativeQuantity"];
+        foreach (DbFhirPackage source in packages)
+        {
+            foreach (DbFhirPackage target in packages.Where(package => package.Key != source.Key))
+            {
+                DbStructureComparison[] pairRows = [.. structures.Where(row =>
+                    row.SourceFhirPackageKey == source.Key && row.TargetFhirPackageKey == target.Key)];
+                pairRows.Select(row => row.SourceId).Order(StringComparer.Ordinal).ShouldBe(comparedOwners.Order(StringComparer.Ordinal));
+                foreach (DbStructureComparison row in pairRows)
+                {
+                    row.SourceCanonicalVersioned.ShouldBe(catalog.GetStructure(row.SourceStructureKey).VersionedUrl);
+                    row.TargetCanonicalVersioned.ShouldBe(catalog.GetStructure(row.TargetStructureKey!.Value).VersionedUrl);
+                    bool negative = row.SourceId == "NegativeQuantity" && (source.Key == 5 || target.Key == 5);
+                    row.Relationship.ShouldBe(negative ? ConceptMap.ConceptMapRelationship.SourceIsBroaderThanTarget
+                        : row.SourceId == ConsumerName ? ConceptMap.ConceptMapRelationship.RelatedTo
+                        : ConceptMap.ConceptMapRelationship.Equivalent);
+                    row.NotMapped.ShouldBeFalse();
+                    row.IsBasedOnFallbackMapping.ShouldBeFalse();
+                    if (row.SourceId == "SimpleQuantity")
+                    {
+                        DbStructureMapping map = DbStructureMapping.SelectSingle(connection, Key: row.StructureMappingKey!.Value)!;
+                        map.IsFallback.ShouldBeFalse();
+                        map.Comments.ShouldBe("Primary authority");
+                        map.ConceptMapSourceKey.ShouldNotBeNull();
+                    }
+                }
+                DbElementComparison rename = elements.Single(row => row.SourceFhirPackageKey == source.Key &&
+                    row.TargetFhirPackageKey == target.Key &&
+                    row.SourceElementId == ConsumerName + (source.Key == 5 ? ".renamed" : ".label"));
+                rename.TargetElementId.ShouldBe(ConsumerName + (target.Key == 5 ? ".renamed" : ".label"));
+                rename.Relationship.ShouldBe(ConceptMap.ConceptMapRelationship.Equivalent);
+                int steps = Math.Abs(source.DefinitionFhirSequence - target.DefinitionFhirSequence);
+                rename.Steps.ShouldBe(steps);
+                if (steps == 1)
+                {
+                    rename.ElementMappingKey.ShouldNotBeNull();
+                    DbElementMapping mapping = DbElementMapping.SelectSingle(connection, Key: rename.ElementMappingKey!.Value)!;
+                    mapping.SourceElementKey.ShouldBe(rename.SourceElementKey);
+                    mapping.TargetElementKey.ShouldBe(rename.TargetElementKey);
+                    mapping.ConceptMapSourceKey.ShouldNotBeNull();
+                }
+                else
+                {
+                    rename.ElementMappingKey.ShouldBeNull();
+                }
+                outcomes.Count(row => row.SourceFhirPackageKey == source.Key && row.TargetFhirPackageKey == target.Key).ShouldBe(13);
+            }
+        }
+        outcomes.ShouldAllBe(row => !row.RequiresXVerDefinition &&
+            catalog.IsProcessed(row.SourceStructureKey) && catalog.IsProcessed(row.TargetStructureKey!.Value));
+        elementOutcomes.ShouldAllBe(row => !row.RequiresXVerDefinition && !row.RequiresExtensionDefinition);
+        foreach (DbElementOutcomeTarget target in targets)
+        {
+            DbElementOutcome owner = elementOutcomes.Single(row => row.Key == target.ElementOutcomeKey);
+            owner.SourceFhirPackageKey.ShouldBe(target.SourceFhirPackageKey);
+            owner.TargetFhirPackageKey.ShouldBe(target.TargetFhirPackageKey);
+            DbElementComparison comparison = elements.Single(row => row.Key == target.ElementComparisonKey);
+            comparison.SourceElementKey.ShouldBe(owner.SourceElementKey);
+            comparison.TargetElementKey.ShouldBe(target.TargetElementKey);
+            comparison.TargetElementId.ShouldBe(target.TargetElementId);
+        }
+        foreach (DbElementTypeComparison type in types)
+        {
+            type.Relationship.ShouldBe(type.SourceElementId == "Quantity" &&
+                catalog.GetStructure(elementRows[type.SourceElementKey].StructureKey).Id == "NegativeQuantity" &&
+                (type.SourceFhirPackageKey == 5 || type.TargetFhirPackageKey == 5)
+                    ? ConceptMap.ConceptMapRelationship.SourceIsBroaderThanTarget
+                    : ConceptMap.ConceptMapRelationship.Equivalent);
+        }
+        AssertNegativeDocuments(connection, 8);
+        string[] files = Directory.GetFiles(Path.Combine(directory.Root, "output"), "StructureDefinition-*.json",
+            SearchOption.AllDirectories);
+        List<string> expectedFiles = [];
+        foreach (DbFhirPackage source in packages)
+        {
+            foreach (DbFhirPackage target in packages.Where(package => package.Key != source.Key &&
+                package.DefinitionFhirSequence is FhirReleases.FhirSequenceCodes.STU3 or FhirReleases.FhirSequenceCodes.R4 or FhirReleases.FhirSequenceCodes.R4B))
+            {
+                FhirPackageComparisonPair pair = new(source, target);
+                foreach (string resource in new[] { "Basic", "DomainResource", ConsumerName, "Resource" })
+                {
+                    string relative = $"output/hl7.fhir.uv.xver-{source.DefinitionFhirSequence.ToRLiteral().ToLowerInvariant()}.{target.DefinitionFhirSequence.ToRLiteral().ToLowerInvariant()}/input/resources/StructureDefinition-profile-{resource}.json";
+                    expectedFiles.Add(relative);
+                    string path = Path.Combine(directory.Root, relative.Replace('/', Path.DirectorySeparatorChar));
+                    StructureDefinition definition = new FhirJsonParser().Parse<StructureDefinition>(File.ReadAllText(path));
+                    AssertGeneratedResource(definition, pair, resource, "profile-" + resource,
+                        $"Profile_{source.DefinitionFhirSequence.ToRLiteral()}_{resource}_{target.DefinitionFhirSequence.ToRLiteral()}",
+                        StructureUrl + resource);
+                }
+            }
+        }
+        files.Select(path => Path.GetRelativePath(directory.Root, path).Replace('\\', '/')).Order(StringComparer.Ordinal)
+            .ShouldBe(expectedFiles.Order(StringComparer.Ordinal));
+        catalog.ReleasePayloads();
+    }
+
+    private static void AssertNegativeDocuments(IDbConnection connection, int expectedCount)
+    {
+        XVerStructureCatalog catalog = new(connection, XVerProcessor._exclusionSet);
+        Dictionary<(int, string), JsonElement> normalized = [];
+        DbElementOutcome[] negatives = [.. DbElementOutcome.SelectList(connection)
+            .Where(row => row.ExtensionProhibitionReason?.Contains("\"ProfileDecisionFormat\":", StringComparison.Ordinal) == true)];
+        negatives.Length.ShouldBe(expectedCount);
+        foreach (DbElementOutcome outcome in negatives)
+        {
+            outcome.ExtensionDefinitionIsProhibited.ShouldBeTrue();
+            outcome.IsEquivalent.ShouldBeFalse();
+            outcome.GenUrl.ShouldBeNull();
+            foreach (PersistedProfileDecision decision in ProfileUseFacts.ReadDecisions(outcome.ExtensionProhibitionReason!))
+            {
+                decision.Input.OwnerKey.ShouldBe(outcome.SourceStructureKey);
+                decision.Input.ElementKey.ShouldBe(outcome.SourceElementKey);
+                decision.Input.PackageKey.ShouldBe(outcome.SourceFhirPackageKey);
+                decision.TargetPackageKey.ShouldBe(outcome.TargetFhirPackageKey);
+                CheckDecision(decision);
+            }
+        }
+        catalog.ReleasePayloads();
+
+        void CheckDecision(PersistedProfileDecision decision)
+        {
+            decision.FormatVersion.ShouldBe(1);
+            decision.Diagnostics.IsDefault.ShouldBeFalse();
+            decision.RequiredFacts.ShouldContainKey("");
+            decision.NativeFacts.ShouldContainKey("");
+            if (decision.Kind == ProfileProofKind.Unrepresentable)
+            {
+                decision.Reasons.ShouldNotBeEmpty();
+                decision.TargetCanonical.ShouldBeNull();
+            }
+            else
+            {
+                decision.Kind.ShouldBe(ProfileProofKind.NativeReuse);
+                decision.TargetCanonical.ShouldNotBeNullOrEmpty();
+            }
+            foreach (ProfileDecisionReason reason in decision.Reasons)
+            {
+                reason.Category.ShouldNotBe(ProfileReasonCategory.InvalidFacts);
+                reason.Category.ShouldNotBe(ProfileReasonCategory.UnclassifiedRestriction);
+                CheckOrigin(reason.Origin);
+                if (reason.Restriction is not null)
+                {
+                    CheckRestriction(reason.Restriction);
+                }
+            }
+            foreach (EffectiveProfileElement element in decision.RequiredFacts.Values.Concat(decision.NativeFacts.Values))
+            {
+                element.MinimumKnown.ShouldBeTrue();
+                element.MaximumKnown.ShouldBeTrue();
+                element.Origins.ShouldNotBeEmpty();
+                foreach (ProfileFactOrigin origin in element.Origins)
+                {
+                    CheckOrigin(origin);
+                }
+                foreach (ProfileRestriction restriction in element.Restrictions)
+                {
+                    CheckRestriction(restriction);
+                }
+            }
+            foreach (PersistedProfileDecision child in decision.Children)
+            {
+                CheckDecision(child);
+            }
+        }
+
+        JsonElement CheckOrigin(ProfileFactOrigin origin)
+        {
+            DbStructureDefinition owner = catalog.GetStructure(origin.OwnerKey);
+            owner.FhirPackageKey.ShouldBe(origin.PackageKey);
+            owner.UnversionedUrl.ShouldBe(origin.Canonical);
+            owner.Version.ShouldBe(origin.Version);
+            if (!normalized.TryGetValue((owner.Key, origin.ElementId), out JsonElement element))
+            {
+                DbElement row = catalog.ResolveOwnedElement(owner, origin.ElementId)!;
+                using JsonDocument document = JsonDocument.Parse(catalog.ReadElement(row).ToJson());
+                element = document.RootElement.Clone();
+                normalized.Add((owner.Key, origin.ElementId), element);
+            }
+            return element;
+        }
+
+        void CheckRestriction(ProfileRestriction restriction)
+        {
+            JsonElement element = CheckOrigin(restriction.Origin);
+            bool found = element.EnumerateObject().Any(property =>
+                JsonElement.DeepEquals(property.Value, restriction.Value) ||
+                property.Value.ValueKind == JsonValueKind.Array &&
+                    property.Value.EnumerateArray().Any(item => JsonElement.DeepEquals(item, restriction.Value)));
+            found.ShouldBeTrue($"Restriction {restriction.Kind}/{restriction.Name} must retain exact normalized facts from {restriction.Origin}.");
+        }
+    }
+
+    private static void AssertCoreRows(IDbConnection connection, FhirPackageComparisonPair pair)
+    {
+        DbStructureComparison.SelectList(connection).Select(row => row.SourceId).Order(StringComparer.Ordinal)
+            .ShouldBe(new[] { CoreConsumerName, "Range" }.Order(StringComparer.Ordinal));
+        DbElementComparison[] comparisons = [.. DbElementComparison.SelectList(connection)];
+        comparisons.Select(row => row.SourceElementId).Order(StringComparer.Ordinal).ShouldBe(new[]
+        {
+            CoreConsumerName, CoreConsumerName + ".meta", CoreConsumerName + ".implicitRules", CoreConsumerName + ".language",
+            CoreConsumerName + ".text", CoreConsumerName + ".contained", CoreConsumerName + ".measure", "Range", "Range.low", "Range.high",
+        }.Order(StringComparer.Ordinal));
+        comparisons.ShouldAllBe(row => row.SourceElementId == row.TargetElementId &&
+            row.Relationship == (row.SourceElementId == CoreConsumerName + ".contained"
+                ? ConceptMap.ConceptMapRelationship.SourceIsBroaderThanTarget : ConceptMap.ConceptMapRelationship.Equivalent));
+        DbElementTypeComparison.SelectList(connection).Count.ShouldBe(7);
+        DbElementTypeComparison.SelectList(connection).ShouldAllBe(row =>
+            row.Relationship == ConceptMap.ConceptMapRelationship.Equivalent && row.SourceTypeLiteral == row.TargetTypeLiteral);
+        DbElementOutcomeTarget.SelectList(connection).Count.ShouldBe(10);
+        DbStructureOutcome[] outcomes = [.. DbStructureOutcome.SelectList(connection)];
+        outcomes.Length.ShouldBe(2);
+        outcomes.Single(row => row.SourceId == CoreConsumerName).RequiresXVerDefinition.ShouldBeTrue();
+        outcomes.Single(row => row.SourceId == "Range").RequiresXVerDefinition.ShouldBeFalse();
+        DbUnsafeCodePairState completed = DbUnsafeCodePairState.SelectSingle(connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)!;
+        completed.ComparisonRevision.ShouldNotBeNullOrEmpty();
+        completed.OutcomeComparisonRevision.ShouldBe(completed.ComparisonRevision);
+        completed.OutcomeFormatVersion.ShouldBe(2);
+        AssertNegativeDocuments(connection, 129);
+    }
+
+    private void CaptureWorkloadSemantics(IDbConnection connection, WorkloadDirectory directory, string workload)
+    {
+        using StageMemorySampler memory = new();
+        Stopwatch elapsed = Stopwatch.StartNew();
+        List<TableSemantics> tables = [];
+        using (IDbCommand command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name";
+            using IDataReader reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                tables.Add(new(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), []));
+            }
+        }
+        foreach (TableSemantics table in tables)
+        {
+            using IDbCommand command = connection.CreateCommand();
+            command.CommandText = $"SELECT * FROM \"{table.Name.Replace("\"", "\"\"", StringComparison.Ordinal)}\" ORDER BY rowid";
+            using IDataReader reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                Dictionary<string, object?> row = new(StringComparer.Ordinal);
+                for (int index = 0; index < reader.FieldCount; index++)
+                {
+                    row.Add(reader.GetName(index), reader.IsDBNull(index) ? null : reader.GetValue(index));
+                }
+                table.Rows.Add(row);
+            }
+        }
+        List<FileSemantics> files = [];
+        foreach (string path in Directory.GetFiles(directory.Root, "*", SearchOption.AllDirectories)
+            .Where(path => !path.Contains("workload.sqlite", StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal))
+        {
+            byte[] bytes = File.ReadAllBytes(path);
+            files.Add(new(Path.GetRelativePath(directory.Root, path).Replace('\\', '/'),
+                Convert.ToBase64String(bytes), Path.GetExtension(path) is ".json" or ".md" or ".xml" or ".ini" or ".txt" or ".yaml"
+                    ? Encoding.UTF8.GetString(bytes) : null));
+        }
+        List<MetadataSubstitution> substitutions = [];
+        AddSubstitution(Path.GetFileName(directory.Root)["xver-prepared-".Length..], "fixture-run-id", "fixture directory GUID");
+        DbDefinitionInventoryState inventory = DefinitionInventoryStore.ReadState(connection)!;
+        AddSubstitution(inventory.StartedRevision, "inventory-revision", "DefinitionInventoryState.StartedRevision");
+        AddSubstitution(inventory.CompletedRevision, "inventory-completed-revision", "DefinitionInventoryState.CompletedRevision");
+        foreach (DbUnsafeCodeInputState input in DbUnsafeCodeInputState.SelectList(connection).OrderBy(row => row.Key))
+        {
+            AddSubstitution(input.SnapshotId, $"input-snapshot-{input.Key}", "UnsafeCodeInputState.SnapshotId");
+            AddSubstitution(input.CompletedInputRevision, $"input-revision-{input.Key}", "UnsafeCodeInputState.CompletedInputRevision");
+        }
+        foreach (DbUnsafeCodePairState pair in DbUnsafeCodePairState.SelectList(connection)
+            .OrderBy(row => row.SourceFhirPackageKey).ThenBy(row => row.TargetFhirPackageKey))
+        {
+            AddSubstitution(pair.ComparisonRevision, $"comparison-{pair.SourceFhirPackageKey}-{pair.TargetFhirPackageKey}",
+                "UnsafeCodePairState.ComparisonRevision");
+        }
+        foreach (FileSemantics file in files.Where(file =>
+            file.RelativeFilename.StartsWith("output/", StringComparison.Ordinal) &&
+            file.RelativeFilename.EndsWith(".json", StringComparison.Ordinal)))
+        {
+            JsonNode? resource = JsonNode.Parse(file.Text!);
+            if (resource is JsonObject value && value["resourceType"] is not null)
+            {
+                AddTimestamp(value["date"], file.RelativeFilename + "#date");
+                AddTimestamp(value["meta"]?["lastUpdated"], file.RelativeFilename + "#meta.lastUpdated");
+                AddTimestamp(value["expansion"]?["timestamp"], file.RelativeFilename + "#expansion.timestamp");
+            }
+        }
+        string repository = Directory.GetParent(Directory.GetParent(directory.Root)!.FullName)!.FullName;
+        string harnessPath = Path.Combine(repository, "src", "Fhir.CodeGen.Lib.Tests", "XVerPreparedOperationTests.cs");
+        byte[] harness = File.ReadAllBytes(harnessPath);
+        string harnessSha256 = Convert.ToHexString(SHA256.HashData(harness));
+        string runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription;
+        const string productionBaseline = "d749a7b5e88889e3d5ac7b49e781de478b87e499";
+        object identity = new
+        {
+            Workload = workload, ProductionBaseline = productionBaseline,
+            HarnessPath = "src/Fhir.CodeGen.Lib.Tests/XVerPreparedOperationTests.cs",
+            HarnessSha256 = harnessSha256, HarnessSource = Encoding.UTF8.GetString(harness),
+            Runtime = runtime,
+            OS = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+            Packages = DbFhirPackage.SelectList(connection),
+            Repetitions, ComparatorTerminologyVersion, MaxStepSize = 4,
+            CompareVocabulary = workload == "W1", CompareStructures = workload == "W1",
+            ConsumerScope = workload == "W1" ? "20 comparer/outcome directions; 12 exports"
+                : "full five-core operands; R5->R4B Range/carrier element comparison/outcomes and one write-free build",
+            ExportTargets = workload == "W1" ? new[] { "R3", "R4", "R4B" } : ["R4B"],
+            Scripts = false, FixtureRoot = directory.Root,
+        };
+        NegativeSemantics[] negatives = [.. DbElementOutcome.SelectList(connection)
+            .Where(row => row.ExtensionProhibitionReason?.Contains("\"ProfileDecisionFormat\":", StringComparison.Ordinal) == true)
+            .Select(row => new NegativeSemantics(row.Key,
+                JsonSerializer.Deserialize<ProfileDecisionDocument>(row.ExtensionProhibitionReason!)!))];
+        string builtPath = Path.Combine(directory.Root, "built-definitions.json");
+        if (File.Exists(builtPath))
+        {
+            JsonNode built = JsonNode.Parse(File.ReadAllText(builtPath))!;
+            foreach (JsonNode? item in built["Profiles"]!.AsArray().Concat(built["Extensions"]!.AsArray()))
+            {
+                JsonNode resource = JsonNode.Parse(item!["Resource"]!.GetValue<string>())!;
+                AddTimestamp(resource["date"], "built-definitions.json#" + item["FileName"]!.GetValue<string>() + ".date");
+            }
+        }
+        string capturePath = Path.Combine(directory.Root, "baseline-semantics.json");
+        using (FileStream stream = File.Create(capturePath))
+        {
+            JsonSerializer.Serialize(stream, new
+            {
+                Identity = identity, Substitutions = substitutions, Tables = tables, NegativeDocuments = negatives, Files = files,
+            }, new JsonSerializerOptions { WriteIndented = true });
+        }
+        elapsed.Stop();
+        memory.Finish();
+        File.WriteAllText(Path.Combine(directory.Root, "capture-costs.json"), JsonSerializer.Serialize(new
+        {
+            CaptureMilliseconds = elapsed.Elapsed.TotalMilliseconds, memory.Samples,
+            memory.PeakPrivateBytes, memory.PeakWorkingSetBytes,
+            RetainedRows = tables.Sum(table => table.Rows.Count),
+            RetainedNormalizedJsonBytes = tables.Single(table => table.Name == DbStructureDefinitionFacts.DefaultTableName)
+                .Rows.Sum(row => Encoding.UTF8.GetByteCount((string)row[nameof(DbStructureDefinitionFacts.StructureDefinitionJson)]!)),
+            RetainedDecisionJsonBytes = DbElementOutcome.SelectList(connection)
+                .Sum(row => Encoding.UTF8.GetByteCount(row.ExtensionProhibitionReason ?? "")),
+        }, new JsonSerializerOptions { WriteIndented = true }));
+        output.WriteLine($"{workload} characterization retained: {capturePath}; harness SHA256={harnessSha256}; " +
+            $"production baseline={productionBaseline}; runtime={runtime}; capture-only ms={elapsed.Elapsed.TotalMilliseconds:F3}");
+        output.WriteLine($"{workload} metadata substitutions={JsonSerializer.Serialize(substitutions)}");
+
+        void AddSubstitution(string? value, string token, string source)
+        {
+            if (!string.IsNullOrEmpty(value) && substitutions.All(existing => existing.Value != value))
+            {
+                substitutions.Add(new(value, "<" + token + ">", source));
+            }
+        }
+
+        void AddTimestamp(JsonNode? value, string source)
+        {
+            if (value is JsonValue scalar && scalar.TryGetValue(out string? timestamp) && timestamp is not null)
+            {
+                AddSubstitution(timestamp, $"runtime-timestamp-{substitutions.Count(row => row.Source.Contains('#'))}", source);
+            }
+        }
+    }
+
+    private sealed record TableSemantics(string Name, string? Schema, List<Dictionary<string, object?>> Rows);
+    private sealed record FileSemantics(string RelativeFilename, string Base64Bytes, string? Text);
+    private sealed record MetadataSubstitution(string Value, string Token, string Source);
+    private sealed record NegativeSemantics(int OutcomeKey, ProfileDecisionDocument Document);
+
+    private static void RecordMeasurementIdentity(IDbConnection connection, WorkloadDirectory directory, string workload)
+    {
+        string repository = Directory.GetParent(Directory.GetParent(directory.Root)!.FullName)!.FullName;
+        string harnessPath = Path.Combine(repository, "src", "Fhir.CodeGen.Lib.Tests", "XVerPreparedOperationTests.cs");
+        Dictionary<string, long> rows = new(StringComparer.Ordinal);
+        List<string> tables = [];
+        using (IDbCommand command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name";
+            using IDataReader reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                tables.Add(reader.GetString(0));
+            }
+        }
+        foreach (string table in tables)
+        {
+            using IDbCommand command = connection.CreateCommand();
+            command.CommandText = $"SELECT COUNT(*) FROM \"{table.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+            rows.Add(table, Convert.ToInt64(command.ExecuteScalar()));
+        }
+        using IncrementalHash payloadHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        long payloadBytes = 0;
+        using (IDbCommand command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT FhirPackageKey, StructureKey, StructureDefinitionJson FROM StructureDefinitionFacts ORDER BY FhirPackageKey, StructureKey";
+            using IDataReader reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                byte[] json = Encoding.UTF8.GetBytes(reader.GetString(2));
+                payloadBytes += json.LongLength;
+                payloadHash.AppendData(Encoding.UTF8.GetBytes($"{reader.GetInt64(0)}/{reader.GetInt64(1)}/{json.Length}:"));
+                payloadHash.AppendData(json);
+            }
+        }
+        using IDbCommand decisions = connection.CreateCommand();
+        decisions.CommandText = "SELECT COALESCE(SUM(length(CAST(ExtensionProhibitionReason AS BLOB))), 0) FROM ElementOutcomes";
+        long decisionBytes = Convert.ToInt64(decisions.ExecuteScalar());
+        string mapRoot = Path.Combine(directory.Root, workload == "W1" ? "input" : "local-maps");
+        object[] maps = [.. Directory.GetFiles(mapRoot, "*.json", SearchOption.AllDirectories).Order(StringComparer.Ordinal)
+            .Select(path => (object)new
+            {
+                Path = Path.GetRelativePath(directory.Root, path).Replace('\\', '/'),
+                Bytes = new FileInfo(path).Length, Sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))),
+            })];
+        File.WriteAllText(Path.Combine(directory.Root, "measurement-identity.json"), JsonSerializer.Serialize(new
+        {
+            Workload = workload, ProductionBaseline = "d749a7b5e88889e3d5ac7b49e781de478b87e499",
+            HarnessSha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(harnessPath))),
+            Runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
+            OS = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+            ProcessId = Environment.ProcessId, ProcessArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString(),
+            Cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".fhir", "packages"),
+            Packages = DbFhirPackage.SelectList(connection), Repetitions, ComparatorTerminologyVersion,
+            MaxStepSize = 4, Scripts = false, FixtureRoot = directory.Root, Rows = rows,
+            RetainedRows = rows.Values.Sum(), RetainedNormalizedJsonBytes = payloadBytes,
+            NormalizedPayloadSha256 = Convert.ToHexString(payloadHash.GetHashAndReset()),
+            RetainedDecisionJsonBytes = decisionBytes, Maps = maps,
+            EvidenceScope = "Post-verification database image sizes and input identities, outside net operation clocks; not live object sizes.",
+        }, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     private static DefinitionCollection SyntheticDefinitions(FhirReleases.FhirSequenceCodes sequence)
@@ -422,9 +1318,400 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         Code = source, Target = [new() { Code = target, Relationship = relationship, Comment = comment }],
     };
 
+    private sealed class RealCoreWorkload : IDisposable
+    {
+        private readonly WorkloadDirectory _directory;
+
+        internal RealCoreWorkload(WorkloadDirectory directory, List<DefinitionCollection> definitions)
+        {
+            _directory = directory;
+            Database = new([.. definitions], directory.Root, "workload.sqlite", NullLoggerFactory.Instance);
+            Database.TryLoadFromDefinitionCollections(XVerProcessor._exclusionSet, XVerProcessor._escapeValveCodes).ShouldBeTrue();
+        }
+
+        internal ComparisonDatabase Database { get; private set; }
+        internal IDbConnection Connection => Database.DbConnection;
+        internal XVerStructureCatalog Catalog => new(Connection, XVerProcessor._exclusionSet);
+        internal int ConnectionReopens { get; private set; }
+        internal FhirPackageComparisonPair RangePair
+        {
+            get
+            {
+                List<DbFhirPackage> packages = DbFhirPackage.SelectList(Connection);
+                return new(packages.Single(package => package.PackageVersion == "5.0.0"),
+                    packages.Single(package => package.PackageVersion == "4.3.0"));
+            }
+        }
+
+        internal void AssertRetainedInventory(List<DefinitionCollection> definitions)
+        {
+            XVerStructureCatalog catalog = Catalog;
+            List<DbFhirPackage> packages = DbFhirPackage.SelectList(Connection);
+            packages.Count.ShouldBe(5);
+            foreach (DefinitionCollection collection in definitions)
+            {
+                DbFhirPackage package = packages.Single(row => row.PackageId == collection.MainPackageId &&
+                    row.PackageVersion == collection.MainPackageVersion);
+                StructureDefinition[] authored =
+                [
+                    .. collection.PrimitiveTypesByName.Values, .. collection.ComplexTypesByName.Values,
+                    .. collection.ResourcesByName.Values, .. collection.ProfilesByUrl.Values,
+                ];
+                catalog.GetDefinitions(package.Key).Select(owner => (owner.UnversionedUrl, owner.Version)).Order()
+                    .ShouldBe(authored.Select(owner => (owner.Url, owner.Version)).Order());
+                catalog.GetDefinitions(package.Key).Where(owner => owner.ArtifactClass == FhirArtifactClassEnum.Profile)
+                    .Select(owner => (owner.UnversionedUrl, owner.Version)).Order().ShouldBe(
+                        collection.ProfilesByUrl.Values.Select(owner => (owner.Url, owner.Version)).Order());
+                DbStructureDefinitionFacts.SelectList(Connection, FhirPackageKey: package.Key).Count.ShouldBe(authored.Length);
+                DbStructureDefinition range = catalog.ResolveNativeType(package.Key, "Range")!;
+                DbStructureDefinition simple = catalog.ResolveDefinition(package.Key, StructureUrl + "SimpleQuantity")!;
+                foreach (string bound in new[] { "low", "high" })
+                {
+                    DbElementType type = catalog.GetTypeUses(catalog.ResolveOwnedElement(range, "Range." + bound)!)
+                        .ShouldHaveSingleItem();
+                    type.TypeName.ShouldBe("Quantity");
+                    type.TypeProfile.ShouldBe(simple.UnversionedUrl);
+                    type.TypeProfileStructureKey.ShouldBe(simple.Key);
+                    type.TypeStructureKey.ShouldBe(catalog.ResolveNativeType(package.Key, "Quantity")!.Key);
+                }
+                if (collection.FhirSequence == FhirReleases.FhirSequenceCodes.STU3)
+                {
+                    catalog.ResolveRoot(simple).Id.ShouldBe("Quantity:simplequantity");
+                }
+            }
+            catalog.ReleasePayloads();
+        }
+
+        internal void Reopen()
+        {
+            Dispose();
+            Database = new(_directory.Root, "workload.sqlite", NullLoggerFactory.Instance);
+            DbMappingClasses.LoadIndices(Connection);
+            DbComparisonClasses.LoadIndices(Connection);
+            DbOutcomeClasses.LoadIndices(Connection);
+            ConnectionReopens++;
+        }
+
+        internal void LoadRangeMaps(FhirPackageComparisonPair pair)
+        {
+            XVerStructureCatalog catalog = Catalog;
+            string sourceRoot = Path.Combine(_directory.Root, "local-maps");
+            string suffix = pair.SourcePackage.FhirVersionShort + "to" + pair.TargetPackage.FhirVersionShort;
+            WriteMap("resources", new ConceptMap.GroupComponent
+            {
+                Source = $"http://hl7.org/fhir/{pair.SourcePackage.FhirVersionShort}/resource-types",
+                Target = $"http://hl7.org/fhir/{pair.TargetPackage.FhirVersionShort}/resource-types",
+                Element = [new()
+                {
+                    Code = CoreConsumerName,
+                    Target = [new() { Code = CoreConsumerName, Relationship = ConceptMap.ConceptMapRelationship.RelatedTo }],
+                }],
+            });
+            List<ConceptMap.GroupComponent> groups = [];
+            foreach (string canonical in new[] { CoreConsumerUrl, StructureUrl + "Range" })
+            {
+                DbStructureDefinition source = catalog.ResolveDefinition(pair.SourcePackageKey, canonical)!;
+                DbStructureDefinition target = catalog.ResolveDefinition(pair.TargetPackageKey, canonical)!;
+                groups.Add(new()
+                {
+                    Source = source.VersionedUrl, Target = target.VersionedUrl,
+                    Element = [.. catalog.GetOwnedElements(source).Select(element => new ConceptMap.SourceElementComponent
+                    {
+                        Code = element.Id,
+                        Target = [new() { Code = element.Id, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                    })],
+                });
+            }
+            WriteMap("elements", [.. groups]);
+            WriteMap("types", new ConceptMap.GroupComponent
+            {
+                Source = $"http://hl7.org/fhir/{pair.SourcePackage.FhirVersionShort}/data-types",
+                Target = $"http://hl7.org/fhir/{pair.TargetPackage.FhirVersionShort}/data-types",
+                Element = [.. new[] { "Range", "Quantity", "SimpleQuantity", "Meta", "Narrative" }
+                    .Select(name => new ConceptMap.SourceElementComponent
+                    {
+                        Code = name, Target = [new() { Code = name, Relationship = ConceptMap.ConceptMapRelationship.Equivalent }],
+                    })],
+            });
+            new MappingLoader(Connection, NullLoggerFactory.Instance)
+                .TryLoadCrossVersionSourceMaps(sourceRoot, useInternalTypeMaps: true).ShouldBeTrue();
+
+            void WriteMap(string category, params ConceptMap.GroupComponent[] mapGroups)
+            {
+                string directory = Path.Combine(sourceRoot, "input", category);
+                Directory.CreateDirectory(directory);
+                ConceptMap map = new()
+                {
+                    Id = category + "-" + suffix,
+                    Url = "http://example.org/ConceptMap/consumer-" + category + "-" + suffix,
+                    Status = PublicationStatus.Active, Group = [.. mapGroups],
+                };
+                File.WriteAllText(Path.Combine(directory, "ConceptMap-" + category + "-" + suffix + ".json"), map.ToJson());
+            }
+        }
+
+        internal void CompareRangeElements(FhirPackageComparisonPair pair)
+        {
+            DbComparisonClasses.CreateTables(Connection);
+            string? revision = UnsafeCodeInputStore.BeginComparison(Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+            DbComparisonCache<DbElementComparison> elements = new();
+            DbComparisonCache<DbElementTypeComparison> types = new();
+            ElementComparer comparer = new(Connection, NullLoggerFactory.Instance, elements, types, DbFhirPackage.SelectList(Connection));
+            XVerStructureCatalog catalog = Catalog;
+            foreach (string canonical in new[] { CoreConsumerUrl, StructureUrl + "Range" })
+            {
+                DbStructureDefinition source = catalog.ResolveDefinition(pair.SourcePackageKey, canonical)!;
+                DbStructureDefinition target = catalog.ResolveDefinition(pair.TargetPackageKey, canonical)!;
+                DbStructureMapping map = DbStructureMapping.SelectList(Connection, SourceStructureKey: source.Key,
+                    TargetStructureKey: target.Key).ShouldHaveSingleItem();
+                CoreStructureComparison envelope = new(pair, source, target, map.Key);
+                envelope.Key = DbStructureComparison.Insert(Connection, envelope);
+                comparer.DoElementComparisons(new StructureComparer.StructureComparisonTrackingRecord
+                {
+                    PackagePair = pair, SourcePackage = pair.SourcePackage, TargetPackage = pair.TargetPackage,
+                    SourceStructure = source, TargetStructure = target, TargetStructureKey = target.Key,
+                    ExplicitMapping = map, ExplicitMappingSource = DbMappingSourceFile.SelectSingle(Connection, Key: map.ConceptMapSourceKey!.Value),
+                    ComparisonRecordKey = envelope.Key,
+                }).ShouldNotBeEmpty();
+            }
+            elements.ToAdd.Insert(Connection, insertPrimaryKey: true);
+            types.ToAdd.Insert(Connection, insertPrimaryKey: true);
+            UnsafeCodeInputStore.CompleteComparison(Connection, pair.SourcePackageKey, pair.TargetPackageKey, revision);
+        }
+
+        internal void AssertRangeComparisons(FhirPackageComparisonPair pair)
+        {
+            XVerStructureCatalog catalog = Catalog;
+            DbStructureDefinition range = catalog.ResolveNativeType(pair.SourcePackageKey, "Range")!;
+            DbStructureDefinition simple = catalog.ResolveDefinition(pair.TargetPackageKey, StructureUrl + "SimpleQuantity|4.3.0")!;
+            foreach (string bound in new[] { "low", "high" })
+            {
+                DbElement element = catalog.ResolveOwnedElement(range, "Range." + bound)!;
+                DbElementComparison comparison = DbElementComparison.SelectList(Connection, SourceElementKey: element.Key).ShouldHaveSingleItem();
+                comparison.TargetElementId.ShouldBe(element.Id);
+                DbElementMapping map = DbElementMapping.SelectSingle(Connection, Key: comparison.ElementMappingKey!.Value)!;
+                map.SourceElementKey.ShouldBe(element.Key);
+                map.TargetElementKey.ShouldBe(comparison.TargetElementKey);
+                map.ConceptMapSourceKey.ShouldNotBeNull();
+                DbElementTypeComparison type = DbElementTypeComparison.SelectList(Connection,
+                    ElementComparisonKey: comparison.Key).ShouldHaveSingleItem();
+                type.NotMapped.ShouldBeFalse();
+                type.Relationship.ShouldBe(ConceptMap.ConceptMapRelationship.Equivalent);
+                ProfileDecisionDocument document = JsonSerializer.Deserialize<ProfileDecisionDocument>(type.TechnicalMessage!)!;
+                document.ProfileDecisionFormat.ShouldBe(1);
+                PersistedProfileDecision decision = document.Decisions.ShouldHaveSingleItem();
+                decision.Kind.ShouldBe(ProfileProofKind.NativeReuse);
+                decision.TargetCanonical.ShouldBe(simple.VersionedUrl);
+                decision.RequiredFacts[".comparator"].Maximum.ShouldBe(0);
+                decision.NativeFacts[".comparator"].Maximum.ShouldBe(0);
+                ElementDefinition.ConstraintComponent invariant = catalog.ReadPayload(simple).Snapshot.Element[0]
+                    .Constraint.Single(constraint => constraint.Key == "sqty-1");
+                FhirPathCompiler compiler = new(new SymbolTable().AddStandardFP().AddFhirExtensions());
+                CompiledExpression expression = compiler.Compile(invariant.Expression!);
+                foreach (bool prohibited in new[] { false, true })
+                {
+                    Quantity witness = new()
+                    {
+                        Value = 1, Comparator = prohibited ? Quantity.QuantityComparator.LessThan : null,
+                    };
+                    expression(witness.ToTypedElement(), new EvaluationContext()).ShouldHaveSingleItem().Value.ShouldBe(!prohibited);
+                    (witness.Comparator is null).ShouldBe(!prohibited);
+                }
+            }
+            catalog.ReleasePayloads();
+        }
+
+        internal void GenerateRangeOutcomes(FhirPackageComparisonPair pair)
+        {
+            DbOutcomeClasses.CreateTables(Connection);
+            DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+            DbRecordCache<DbElementOutcome> elements = new();
+            DbRecordCache<DbElementOutcomeTarget> targets = new();
+            ElementOutcomeGenerator generator = new(Connection, NullLoggerFactory.Instance, pair, elements, targets);
+            XVerStructureCatalog catalog = Catalog;
+            foreach (DbStructureComparison comparison in DbStructureComparison.SelectList(Connection))
+            {
+                DbStructureDefinition source = catalog.GetStructure(comparison.SourceStructureKey);
+                DbStructureDefinition target = catalog.GetStructure(comparison.TargetStructureKey!.Value);
+                CoreStructureOutcome schedule = new(pair, source, target, comparison.Key)
+                {
+                    RequiresXVerDefinition = source.UnversionedUrl == CoreConsumerUrl,
+                };
+                schedule.Key = DbStructureOutcome.Insert(Connection, schedule);
+                generator.ProcessSourceStructure(source, new()
+                {
+                    [target.Key] = new()
+                    {
+                        SourceStructure = source, TargetStructure = target, StructureComparison = comparison,
+                        SourceRootElement = catalog.ResolveRoot(source), TargetRootElement = catalog.ResolveRoot(target),
+                        StructureOutcomeKey = schedule.Key,
+                        IsFullyMappedAcrossAllTargets = true, IsFullyMappedToThisTarget = true,
+                    },
+                });
+            }
+            elements.ToAdd.Insert(Connection, insertPrimaryKey: true);
+            targets.ToAdd.Insert(Connection, insertPrimaryKey: true);
+            new UnsafeCodeOutcomeGenerator(Connection).GenerateForPair(pair, dependency);
+        }
+
+        internal StructureFhirExporter.BuiltDefinitions BuildRangeDefinitions(FhirPackageComparisonPair pair)
+        {
+            UnsafeCodeInputStore.RequireExportReady(Connection, [pair]);
+            XVerStructureCatalog catalog = Catalog;
+            DbStructureOutcome.SelectList(Connection).ShouldAllBe(outcome =>
+                catalog.IsProcessed(outcome.SourceStructureKey) && catalog.IsProcessed(outcome.TargetStructureKey!.Value));
+            DbElementOutcome.SelectList(Connection).ShouldAllBe(outcome => catalog.IsProcessed(outcome.SourceStructureKey));
+            ConfigXVer config = new()
+            {
+                OutputDirectory = Path.Combine(_directory.Root, "core-output"),
+                ExportR2 = false, ExportR3 = false, ExportR4 = true, ExportR4B = true,
+                ExportR5 = false, ExportR6 = false, LogFactory = NullLoggerFactory.Instance,
+            };
+            XVerExporter exporter = new(Connection, config);
+            IgExporter ig = new(Connection, NullLoggerFactory.Instance, config.OutputDirectory, null, exporter, config);
+            StructureFhirExporter.BuiltDefinitions built = new StructureFhirExporter(exporter, Connection, NullLoggerFactory.Instance)
+                .BuildDefinitions(ig.PrepareXVerIgs(ig.BuildExportSchedule(specificPairs: [pair.SequencePair])).XVerIgs.ShouldHaveSingleItem());
+            Directory.Exists(config.OutputDirectory).ShouldBeFalse();
+            catalog.ReleasePayloads();
+            return built;
+        }
+
+        public void Dispose()
+        {
+            SqliteConnection connection = (SqliteConnection)Connection;
+            ((IDisposable)Database).Dispose();
+            SqliteConnection.ClearPool(connection);
+        }
+    }
+
+    // Conservative structure envelopes and a single carrier artifact schedule; all
+    // element/type comparisons, outcomes, profile proofs and builds use real consumers.
+    private sealed class CoreStructureComparison : DbStructureComparison
+    {
+        [SetsRequiredMembers]
+        internal CoreStructureComparison(FhirPackageComparisonPair pair, DbStructureDefinition source,
+            DbStructureDefinition target, int mappingKey)
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey;
+            TargetFhirPackageKey = pair.TargetPackageKey;
+            SourceFhirSequence = pair.SourceFhirSequence;
+            TargetFhirSequence = pair.TargetFhirSequence;
+            SourceStructureKey = source.Key;
+            TargetStructureKey = target.Key;
+            SourceCanonicalVersioned = source.VersionedUrl;
+            SourceCanonicalUnversioned = source.UnversionedUrl;
+            SourceId = source.Id;
+            SourceName = source.Name;
+            SourceVersion = source.Version;
+            TargetCanonicalVersioned = target.VersionedUrl;
+            TargetCanonicalUnversioned = target.UnversionedUrl;
+            TargetId = target.Id;
+            TargetName = target.Name;
+            TargetVersion = target.Version;
+            StructureMappingKey = mappingKey;
+            Steps = Math.Abs(pair.SourcePackage.PackageArrayIndex - pair.TargetPackage.PackageArrayIndex);
+            Relationship = ConceptMap.ConceptMapRelationship.RelatedTo;
+            int?[] keys = new int?[6];
+            keys[pair.SourcePackage.PackageArrayIndex] = source.Key;
+            keys[pair.TargetPackage.PackageArrayIndex] = target.Key;
+            ContentKeys = keys;
+        }
+    }
+
+    private sealed class CoreStructureOutcome : DbStructureOutcome
+    {
+        [SetsRequiredMembers]
+        internal CoreStructureOutcome(FhirPackageComparisonPair pair, DbStructureDefinition source,
+            DbStructureDefinition target, int comparisonKey)
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey;
+            TargetFhirPackageKey = pair.TargetPackageKey;
+            SourceFhirSequence = pair.SourceFhirSequence;
+            TargetFhirSequence = pair.TargetFhirSequence;
+            StructureComparisonKey = comparisonKey;
+            SourceStructureKey = source.Key;
+            TargetStructureKey = target.Key;
+            SourceArtifactClass = source.ArtifactClass;
+            TargetArtifactClass = target.ArtifactClass;
+            SourceCanonicalVersioned = source.VersionedUrl;
+            SourceCanonicalUnversioned = source.UnversionedUrl;
+            SourceId = source.Id;
+            SourceName = source.Name;
+            SourceVersion = source.Version;
+            TargetCanonicalVersioned = target.VersionedUrl;
+            TargetCanonicalUnversioned = target.UnversionedUrl;
+            TargetId = target.Id;
+            TargetName = target.Name;
+            TargetVersion = target.Version;
+            RequiresXVerDefinition = true;
+            TotalSourceCount = 1;
+            TotalTargetCount = 1;
+            GenShortId = "consumer-witness";
+            GenLongId = GenShortId;
+            GenName = "QuantityConsumerWitnessProfile";
+            GenUrl = "http://example.org/StructureDefinition/consumer-witness";
+            GenFileName = "StructureDefinition-consumer-witness";
+            ElementConceptMapLongId = "consumer-witness-elements";
+            ElementConceptMapShortId = ElementConceptMapLongId;
+            ElementConceptMapName = "QuantityConsumerWitnessElements";
+            ElementConceptMapUrl = "http://example.org/ConceptMap/consumer-witness-elements";
+            ElementConceptMapFileName = "ConceptMap-consumer-witness-elements";
+            Comments = "Explicit local carrier schedule; no whole-core export claim.";
+        }
+    }
+
     private sealed record StageCost(string Stage, double Milliseconds, long AllocatedBytes,
         long EntryPrivateBytes, long ExitPrivateBytes, long EntryManagedBytes, long ExitManagedBytes,
-        long ProcessPeakWorkingSetBytes, long DatabaseBytes);
+        long ProcessPeakWorkingSetBytes, long DatabaseBytes, int Samples, long SampledPeakPrivateBytes, long SampledPeakWorkingSetBytes);
+
+    private sealed class StageMemorySampler : IDisposable
+    {
+        private readonly object _gate = new();
+        private readonly Process _process = Process.GetCurrentProcess();
+        private readonly System.Threading.Timer _timer;
+        private bool _finished;
+
+        internal StageMemorySampler()
+        {
+            Sample();
+            _timer = new(_ => Sample(), null, 25, 25);
+        }
+
+        internal int Samples { get; private set; }
+        internal long PeakPrivateBytes { get; private set; }
+        internal long PeakWorkingSetBytes { get; private set; }
+
+        private void Sample()
+        {
+            lock (_gate)
+            {
+                if (_finished)
+                {
+                    return;
+                }
+                _process.Refresh();
+                Samples++;
+                PeakPrivateBytes = Math.Max(PeakPrivateBytes, _process.PrivateMemorySize64);
+                PeakWorkingSetBytes = Math.Max(PeakWorkingSetBytes, _process.WorkingSet64);
+            }
+        }
+
+        internal void Finish()
+        {
+            _timer.Dispose();
+            lock (_gate)
+            {
+                if (!_finished)
+                {
+                    Sample();
+                    _finished = true;
+                    _process.Dispose();
+                }
+            }
+        }
+
+        public void Dispose() => Finish();
+    }
 
     private sealed class WorkloadDirectory : IDisposable
     {
@@ -442,13 +1729,11 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
 
         internal string Root { get; }
         internal bool Completed { get; set; }
+        internal bool RetainCharacterization { get; set; }
 
         public void Dispose()
         {
-            if (Completed)
-            {
-                Directory.Delete(Root, recursive: true);
-            }
+            // Measurement and characterization evidence survive disposal for review.
         }
     }
 }
