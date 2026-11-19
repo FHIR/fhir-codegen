@@ -385,6 +385,42 @@ internal static class UnsafeCodeInputStore
         return pair;
     }
 
+    internal static DbUnsafeCodePairState BeginOutcomes(IDbConnection db, int sourceKey, int targetKey,
+        XVerPreparedOperation operation)
+    {
+        operation.OutcomeDecisions(sourceKey, targetKey);
+        DbUnsafeCodePairState pair = RequireComparison(db, sourceKey, targetKey, operation);
+        ClearOutcome(pair);
+        operation.Evidence.BeginOutcomePair(sourceKey, targetKey, pair, () =>
+        {
+            DbUnsafeCodePairState.Update(db, [pair]);
+            DbUnsafeCodeTrigger.Delete(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        });
+        return pair;
+    }
+
+    internal static void CompleteOutcomes(IDbConnection db, DbUnsafeCodePairState dependency,
+        XVerPreparedOperation operation)
+    {
+        DbUnsafeCodePairState pair = RequireComparison(db, dependency.SourceFhirPackageKey, dependency.TargetFhirPackageKey, operation);
+        if (pair.InputRevision != dependency.InputRevision || pair.ComparisonRevision != dependency.ComparisonRevision ||
+            pair.OutcomeInputRevision is not null || pair.OutcomeComparisonRevision is not null || pair.OutcomeFormatVersion is not null)
+        {
+            operation.Dispose();
+            throw new InvalidOperationException("Unsafe-code dependencies changed during outcomes. Rerun comparisons and outcomes.");
+        }
+        Dictionary<int, DbFhirPackage> packages = operation.Evidence.Rows<DbFhirPackage>(DbFhirPackage.DefaultTableName).ToDictionary(row => row.Key);
+        ProfileUseFacts.RequirePersistedDecisions(db, new(packages[pair.SourceFhirPackageKey], packages[pair.TargetFhirPackageKey]),
+            operation.OutcomeDecisions(pair.SourceFhirPackageKey, pair.TargetFhirPackageKey), operation.Catalog);
+        operation.Audit();
+        pair.OutcomeInputRevision = pair.InputRevision;
+        pair.OutcomeComparisonRevision = pair.ComparisonRevision;
+        pair.OutcomeFormatVersion = UnsafeCodeConstants.OutcomeFormatVersion;
+        operation.Evidence.ApplyOutcomeWrites(
+            new(XVerOperandFamily.PairControl, XVerOutputTransitionKind.PairComplete, pair.SourceFhirPackageKey, pair.TargetFhirPackageKey),
+            [], [pair], () => DbUnsafeCodePairState.Update(db, [pair]));
+    }
+
     internal static void CompleteOutcomes(IDbConnection db, DbUnsafeCodePairState dependency)
     {
         DbUnsafeCodePairState pair = RequireComparison(db, dependency.SourceFhirPackageKey, dependency.TargetFhirPackageKey);
@@ -404,7 +440,7 @@ internal static class UnsafeCodeInputStore
 
     internal static void InsertTriggers(
         IDbConnection db,
-        IEnumerable<UnsafeCodeTrigger> triggers)
+        IEnumerable<UnsafeCodeTrigger> triggers, XVerPreparedOperation? operation = null)
     {
         List<DbUnsafeCodeTrigger> rows = triggers.Select(trigger => new DbUnsafeCodeTrigger
         {
@@ -424,7 +460,21 @@ internal static class UnsafeCodeInputStore
             RuleKeysJson = JsonSerializer.Serialize(trigger.RuleKeys),
             AnnotationKeysJson = JsonSerializer.Serialize(trigger.AnnotationKeys),
         }).ToList();
-        rows.Insert(db, insertPrimaryKey: true);
+        if (operation is null)
+        {
+            rows.Insert(db, insertPrimaryKey: true);
+        }
+        else if (rows.Count == 0)
+        {
+            operation.Audit();
+        }
+        else
+        {
+            operation.Evidence.ApplyOutcomeWrites(
+                new(XVerOperandFamily.StructureOutcomes, XVerOutputTransitionKind.PairFlush,
+                    rows[0].SourceFhirPackageKey, rows[0].TargetFhirPackageKey),
+                rows, [], () => rows.Insert(db, insertPrimaryKey: true));
+        }
     }
 
     private static void ClearOutcome(DbUnsafeCodePairState pair)

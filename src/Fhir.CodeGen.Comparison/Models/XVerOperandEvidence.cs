@@ -152,12 +152,23 @@ internal sealed class XVerOperandEvidence : IDisposable
 
     internal void ApplyComparisonWrites(XVerOutputTransition transition, IEnumerable<DbRecordBase> inserts,
         IEnumerable<DbRecordBase> updates, Action write)
+        => ApplyOutputWrites(transition, inserts, updates, write, outcomes: false);
+
+    internal void ApplyOutcomeWrites(XVerOutputTransition transition, IEnumerable<DbRecordBase> inserts,
+        IEnumerable<DbRecordBase> updates, Action write)
+        => ApplyOutputWrites(transition, inserts, updates, write, outcomes: true);
+
+    private void ApplyOutputWrites(XVerOutputTransition transition, IEnumerable<DbRecordBase> inserts,
+        IEnumerable<DbRecordBase> updates, Action write, bool outcomes)
     {
         try
         {
             Audit();
             transition.RequireOutputFamily();
-            if (transition.Family is not (XVerOperandFamily.StructureComparisons or XVerOperandFamily.VocabularyComparisons or XVerOperandFamily.PairControl) ||
+            bool permitted = outcomes
+                ? transition.Family is XVerOperandFamily.StructureOutcomes or XVerOperandFamily.VocabularyOutcomes or XVerOperandFamily.PairControl
+                : transition.Family is XVerOperandFamily.StructureComparisons or XVerOperandFamily.VocabularyComparisons or XVerOperandFamily.PairControl;
+            if (!permitted ||
                 transition.SourcePackageKey is null || transition.TargetPackageKey is null)
             {
                 throw new InvalidOperationException("Comparison writes require an exact directed comparison or pair-control transition.");
@@ -167,12 +178,18 @@ internal sealed class XVerOperandEvidence : IDisposable
             DbRecordBase[] changed = [.. updates];
             foreach (DbRecordBase row in added.Concat(changed))
             {
-                XVerTableManifest manifest = Manifest.Single(table => table.RowType == row.GetType());
+                XVerTableManifest manifest = Manifest.Single(table => table.RowType.IsInstanceOfType(row));
                 if (manifest.Family != transition.Family ||
                     row is DbComparisonBase comparison &&
                         (comparison.SourceFhirPackageKey != transition.SourcePackageKey || comparison.TargetFhirPackageKey != transition.TargetPackageKey) ||
                     row is DbUnsafeCodePairState pair &&
-                        (pair.SourceFhirPackageKey != transition.SourcePackageKey || pair.TargetFhirPackageKey != transition.TargetPackageKey))
+                        (pair.SourceFhirPackageKey != transition.SourcePackageKey || pair.TargetFhirPackageKey != transition.TargetPackageKey) ||
+                    row is DbOutcomeBase outcome &&
+                        (outcome.SourceFhirPackageKey != transition.SourcePackageKey || outcome.TargetFhirPackageKey != transition.TargetPackageKey) ||
+                    row is DbElementOutcomeTarget target &&
+                        (target.SourceFhirPackageKey != transition.SourcePackageKey || target.TargetFhirPackageKey != transition.TargetPackageKey) ||
+                    row is DbUnsafeCodeTrigger trigger &&
+                        (trigger.SourceFhirPackageKey != transition.SourcePackageKey || trigger.TargetFhirPackageKey != transition.TargetPackageKey))
                 {
                     throw new InvalidOperationException("An expected write must belong to its exact output family and directed pair.");
                 }
@@ -205,6 +222,32 @@ internal sealed class XVerOperandEvidence : IDisposable
                         Integer(row.SourceCodeTreatedAsEscapeValve), Integer(row.TargetCodeTreatedAsEscapeValve)])), row => row.Key, row => row.ToRow());
             AddChanges<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand>(DbUnsafeCodePairState.DefaultTableName,
                 row => DbUnsafeCodePairStateOperand.Copy(row), row => row.Key, row => row.ToRow());
+            AddChanges<DbStructureOutcome, DbStructureOutcomeOperand>(DbStructureOutcome.DefaultTableName,
+                row => DbStructureOutcomeOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString(), row.SourceArtifactClass.ToString(), row.TargetArtifactClass?.ToString()],
+                    OutcomeIntegers(row))), row => row.Key, row => row.ToRow());
+            AddChanges<DbElementOutcome, DbElementOutcomeOperand>(DbElementOutcome.DefaultTableName,
+                row => DbElementOutcomeOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString()],
+                    [.. OutcomeIntegers(row), Integer(row.RequiresExtensionDefinition), Integer(row.RequiresSliceDefinition),
+                        Integer(row.RequiresCardinalityDefinition), Integer(row.RequiresCardinalitySlice), Integer(row.SourceUsedAsContentReference),
+                        Integer(row.ContentReferenceRequiresXVerDefinition), Integer(row.RequiresDefinitionAsContentReference),
+                        Integer(row.ExtensionDefinitionIsProhibited), Integer(row.SourceIsModifier), Integer(row.DefineAsModifier),
+                        Integer(row.SourceIsDeprecated)])), row => row.Key, row => row.ToRow());
+            AddChanges<DbElementOutcomeTarget, DbElementOutcomeTargetOperand>(DbElementOutcomeTarget.DefaultTableName,
+                row => DbElementOutcomeTargetOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString()],
+                    [Integer(row.FullyMapsToThisTarget), Integer(row.TargetIsModifier)])), row => row.Key, row => row.ToRow());
+            AddChanges<DbUnsafeCodeTrigger, DbUnsafeCodeTriggerOperand>(DbUnsafeCodeTrigger.DefaultTableName,
+                row => DbUnsafeCodeTriggerOperand.Copy(row, new([], [Integer(row.IsWildcardVersion)])), row => row.Key, row => row.ToRow());
+            AddChanges<DbValueSetOutcome, DbValueSetOutcomeOperand>(DbValueSetOutcome.DefaultTableName,
+                row => DbValueSetOutcomeOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString()], OutcomeIntegers(row))),
+                row => row.Key, row => row.ToRow());
+            AddChanges<DbValueSetConceptOutcome, DbValueSetConceptOutcomeOperand>(DbValueSetConceptOutcome.DefaultTableName,
+                row => DbValueSetConceptOutcomeOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString()], OutcomeIntegers(row))),
+                row => row.Key, row => row.ToRow());
             AcceptExpected(expected, _schemaVersion, write);
 
             void AddChanges<T, TRow>(string table, Func<T, TRow> snapshot, Func<TRow, int> key, Func<TRow, T> copy)
@@ -216,6 +259,7 @@ internal sealed class XVerOperandEvidence : IDisposable
                 {
                     return;
                 }
+
                 TableImage<T, TRow> image = (TableImage<T, TRow>)expected[table];
                 Dictionary<int, TRow> rows = image.StoredRows.ToDictionary(key);
                 foreach (T row in additions)
@@ -234,6 +278,85 @@ internal sealed class XVerOperandEvidence : IDisposable
                 }
                 expected[table] = new TableImage<T, TRow>(rows.OrderBy(entry => entry.Key).Select(entry => entry.Value), copy);
             }
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+    }
+
+    private static long?[] OutcomeIntegers(DbOutcomeBase row) =>
+        [Integer(row.RequiresXVerDefinition), Integer(row.IsRenamed), Integer(row.IsUnmapped), Integer(row.IsIdentical),
+            Integer(row.IsEquivalent), Integer(row.IsBroaderThanTarget), Integer(row.IsNarrowerThanTarget),
+            Integer(row.FullyMapsToThisTarget), Integer(row.FullyMapsAcrossAllTargets)];
+
+    internal void ResetOutcomes(bool vocabulary, Action reset)
+    {
+        try
+        {
+            Audit();
+            Dictionary<string, IXVerTableImage> expected = new(_images, StringComparer.Ordinal);
+            long schema = _schemaVersion;
+            Reset<DbStructureOutcome, DbStructureOutcomeOperand>(DbStructureOutcome.DefaultTableName, 3, row => row.ToRow());
+            Reset<DbElementOutcome, DbElementOutcomeOperand>(DbElementOutcome.DefaultTableName, 7, row => row.ToRow());
+            Reset<DbElementOutcomeTarget, DbElementOutcomeTargetOperand>(DbElementOutcomeTarget.DefaultTableName, 3, row => row.ToRow());
+            Reset<DbUnsafeCodeTrigger, DbUnsafeCodeTriggerOperand>(DbUnsafeCodeTrigger.DefaultTableName, 2, row => row.ToRow());
+            if (vocabulary)
+            {
+                Reset<DbValueSetOutcome, DbValueSetOutcomeOperand>(DbValueSetOutcome.DefaultTableName, 2, row => row.ToRow());
+                Reset<DbValueSetConceptOutcome, DbValueSetConceptOutcomeOperand>(DbValueSetConceptOutcome.DefaultTableName, 3, row => row.ToRow());
+            }
+            string control = DbUnsafeCodePairState.DefaultTableName;
+            TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand> pairs =
+                (TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand>)_images[control];
+            expected[control] = new TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand>(
+                pairs.StoredRows.Select(row => row with
+                {
+                    OutcomeInputRevision = null, OutcomeComparisonRevision = null, OutcomeFormatVersion = null,
+                }), row => row.ToRow());
+            AcceptExpected(expected, schema, reset);
+
+            void Reset<T, TRow>(string table, int indexes, Func<TRow, T> copy)
+                where T : DbRecordBase where TRow : IEquatable<TRow>
+            {
+                schema += (_images[table] is MissingTable ? 0 : 1) + 1 + indexes;
+                expected[table] = new TableImage<T, TRow>([], copy);
+            }
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+    }
+
+    internal void BeginOutcomePair(int sourceKey, int targetKey, DbUnsafeCodePairState pair, Action begin)
+    {
+        try
+        {
+            Audit();
+            string table = DbUnsafeCodeTrigger.DefaultTableName;
+            TableImage<DbUnsafeCodeTrigger, DbUnsafeCodeTriggerOperand> triggers =
+                (TableImage<DbUnsafeCodeTrigger, DbUnsafeCodeTriggerOperand>)_images[table];
+            string control = DbUnsafeCodePairState.DefaultTableName;
+            TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand> pairs =
+                (TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand>)_images[control];
+            if (pair.SourceFhirPackageKey != sourceKey || pair.TargetFhirPackageKey != targetKey)
+            {
+                throw new InvalidOperationException("Outcome begin requires its exact pair.");
+            }
+            Dictionary<string, IXVerTableImage> expected = new(_images, StringComparer.Ordinal)
+            {
+                [table] = new TableImage<DbUnsafeCodeTrigger, DbUnsafeCodeTriggerOperand>(
+                    triggers.StoredRows.Where(row => row.SourceFhirPackageKey != sourceKey || row.TargetFhirPackageKey != targetKey), row => row.ToRow()),
+                [control] = new TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand>(
+                    pairs.StoredRows.Select(row => row.Key == pair.Key ? row with
+                    {
+                        OutcomeInputRevision = null, OutcomeComparisonRevision = null, OutcomeFormatVersion = null,
+                    } : row), row => row.ToRow()),
+            };
+            AcceptExpected(expected, _schemaVersion, begin);
         }
         catch
         {

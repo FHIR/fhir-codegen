@@ -46,6 +46,7 @@ public class StructureOutcomeGenerator
     private DbRecordCache<DbStructureOutcome> _sdOutcomeCache;
     private DbRecordCache<DbElementOutcome> _edOutcomeCache;
     private DbRecordCache<DbElementOutcomeTarget> _edOutcomeTargetCache;
+    private XVerPreparedOperation? _operation;
 
     public StructureOutcomeGenerator(
         IDbConnection db,
@@ -65,54 +66,64 @@ public class StructureOutcomeGenerator
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
-        // get the list of packages
-        _packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
+            new(XVerPreparationKind.Outcomes, XVerProcessor._exclusionSet, maxStepSize: maxStepSize,
+                specificPairs: specificPairs, processVocabulary: false));
+        operation.PrepareOutcomes();
+        CreateOutcomesForStructures(operation);
+    }
 
-        List<FhirPackageComparisonPair> packagePairs = [];
-        maxStepSize ??= _packages.Count - 1;
-
-        // we want to process closer versions first, so we do a stepped approach
-        for (int stepSize = 1; stepSize <= maxStepSize; stepSize++)
+    internal void CreateOutcomesForStructures(XVerPreparedOperation operation)
+    {
+        _operation = operation;
+        try
         {
-            for (int i = 0; i < _packages.Count - stepSize; i++)
+            operation.RequireConnection(_db);
+            foreach (FhirPackageComparisonPair packagePair in operation.OutcomeSchedule)
             {
-                DbFhirPackage sourcePackage = _packages[i];
-                DbFhirPackage targetPackage = _packages[i + stepSize];
-
-                packagePairs.Add(new(sourcePackage, targetPackage));
-                packagePairs.Add(new(targetPackage, sourcePackage));
+                DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(_db,
+                    packagePair.SourcePackageKey, packagePair.TargetPackageKey, operation);
+                try
+                {
+                    ElementOutcomeGenerator elementOutcomeGenerator = new(
+                        _db, _loggerFactory, packagePair, _edOutcomeCache, _edOutcomeTargetCache, operation);
+                    buildOutcomes(packagePair, elementOutcomeGenerator);
+                    applyCachedChanges(packagePair);
+                    elementOutcomeGenerator.DoPostProcessing(packagePair);
+                    applyCachedChanges(packagePair);
+                    new UnsafeCodeOutcomeGenerator(_db).GenerateForPair(packagePair, dependency, operation);
+                }
+                finally
+                {
+                    operation.ReleasePairWorkingFacts(packagePair.SourcePackageKey, packagePair.TargetPackageKey);
+                }
             }
         }
-
-        // iterate over our pairs in the order we built them
-        foreach (FhirPackageComparisonPair packagePair in packagePairs)
+        catch
         {
-            if ((specificPairs is not null) &&
-                !specificPairs.Contains((packagePair.SourceFhirSequence, packagePair.TargetFhirSequence)))
-            {
-                continue;
-            }
-
-            DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey);
-
-            // create our element outcome generator for this package pair
-            ElementOutcomeGenerator elementOutcomeGenerator = new(
-                _db,
-                _loggerFactory,
-                packagePair,
-                _edOutcomeCache,
-                _edOutcomeTargetCache);
-
-            buildOutcomes(packagePair, elementOutcomeGenerator);
-            applyCachedChanges(packagePair);
-
-            elementOutcomeGenerator.DoPostProcessing(packagePair);
-            //updateOutcomeContextsForContentReferences(packagePair);
-            applyCachedChanges(packagePair);
-            new UnsafeCodeOutcomeGenerator(_db).GenerateForPair(packagePair, dependency);
+            operation.Dispose();
+            throw;
+        }
+        finally
+        {
+            _operation = null;
+            _packages.Clear();
+            _sdOutcomeCache.Clear();
+            _edOutcomeCache.Clear();
+            _edOutcomeTargetCache.Clear();
         }
     }
     private void applyCachedChanges(FhirPackageComparisonPair packagePair)
+    {
+        _operation!.Evidence.ApplyOutcomeWrites(
+            new(XVerOperandFamily.StructureOutcomes, XVerOutputTransitionKind.PairFlush,
+                packagePair.SourcePackageKey, packagePair.TargetPackageKey),
+            [.. _sdOutcomeCache.ToAdd, .. _edOutcomeCache.ToAdd, .. _edOutcomeTargetCache.ToAdd],
+            [.. _sdOutcomeCache.ToUpdate, .. _edOutcomeCache.ToUpdate, .. _edOutcomeTargetCache.ToUpdate],
+            () => writeCachedChanges(packagePair));
+    }
+
+    private void writeCachedChanges(FhirPackageComparisonPair packagePair)
     {
         DbFhirPackage sourcePackage = packagePair.SourcePackage;
         DbFhirPackage targetPackage = packagePair.TargetPackage;
@@ -165,7 +176,7 @@ public class StructureOutcomeGenerator
         _logger.LogInformation($"Generating Structure Outcomes for {packagePair.SourcePackageShortName}->{packagePair.TargetPackageShortName}...");
 
         // just get all the source and target structures and elements now to avoid hitting the db so much
-        XVerStructureCatalog catalog = new(_db, XVerProcessor._exclusionSet);
+        XVerStructureCatalog catalog = _operation!.Catalog;
         Dictionary<int, DbStructureDefinition> allSourceStructures = catalog.GetProcessedStructures(packagePair.SourcePackageKey).ToDictionary(owner => owner.Key);
         Dictionary<int, DbStructureDefinition> allTargetStructures = catalog.GetProcessedStructures(packagePair.TargetPackageKey).ToDictionary(owner => owner.Key);
 

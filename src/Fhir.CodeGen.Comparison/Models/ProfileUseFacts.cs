@@ -465,10 +465,13 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     }
 
     internal static void PersistNegativeDecisions(IDbConnection db, FhirPackageComparisonPair pair,
-        IReadOnlyList<ProfileRepresentationProof> decisions)
+        IReadOnlyList<ProfileRepresentationProof> decisions, XVerPreparedOperation? operation = null)
     {
-        List<DbElementOutcome> outcomes = DbElementOutcome.SelectList(db,
-            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+        operation?.Audit();
+        List<DbElementOutcome> outcomes = operation is null ? DbElementOutcome.SelectList(db,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            : [.. operation.Evidence.Rows<DbElementOutcome>(DbElementOutcome.DefaultTableName)
+                .Where(row => row.SourceFhirPackageKey == pair.SourcePackageKey && row.TargetFhirPackageKey == pair.TargetPackageKey)];
         List<DbElementOutcome> updates = [];
         List<DbElementOutcome> inserts = [];
         foreach (IGrouping<int, ProfileRepresentationProof> group in decisions.Where(proof => !proof.PreservesRestrictions)
@@ -482,8 +485,18 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             DbElementOutcome outcome;
             if (matches.Length == 0)
             {
-                DbElement element = DbElement.SelectSingle(db, Key: group.Key)!;
-                DbStructureDefinition owner = DbStructureDefinition.SelectSingle(db, Key: element.StructureKey)!;
+                DbStructureDefinition owner;
+                DbElement element;
+                if (operation is null)
+                {
+                    element = DbElement.SelectSingle(db, Key: group.Key)!;
+                    owner = DbStructureDefinition.SelectSingle(db, Key: element.StructureKey)!;
+                }
+                else
+                {
+                    owner = operation.Catalog.GetStructure(group.First().Input.OwnerKey);
+                    element = operation.Catalog.GetOwnedElements(owner).Single(row => row.Key == group.Key);
+                }
                 outcome = NegativeOutcome(pair, owner, element);
                 inserts.Add(outcome);
             }
@@ -509,9 +522,11 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             outcome.ContentReferenceExtensionUrl = null;
         }
         HashSet<int> negativeOutcomes = [.. inserts.Concat(updates).Select(outcome => outcome.Key)];
-        List<DbElementOutcomeTarget> targets = DbElementOutcomeTarget.SelectList(db,
+        List<DbElementOutcomeTarget> targets = [.. (operation is null ? DbElementOutcomeTarget.SelectList(db,
             SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-            .Where(target => negativeOutcomes.Contains(target.ElementOutcomeKey)).ToList();
+            : operation.Evidence.Rows<DbElementOutcomeTarget>(DbElementOutcomeTarget.DefaultTableName))
+            .Where(target => target.SourceFhirPackageKey == pair.SourcePackageKey && target.TargetFhirPackageKey == pair.TargetPackageKey &&
+                negativeOutcomes.Contains(target.ElementOutcomeKey))];
         foreach (DbElementOutcomeTarget target in targets)
         {
             target.FullyMapsToThisTarget = false;
@@ -521,9 +536,11 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             target.CardinalityContextParentExtensionUrl = null;
         }
         HashSet<int> negativeOwners = [.. decisions.Where(proof => !proof.PreservesRestrictions).Select(proof => proof.Input.OwnerKey)];
-        List<DbStructureOutcome> structures = DbStructureOutcome.SelectList(db,
+        List<DbStructureOutcome> structures = [.. (operation is null ? DbStructureOutcome.SelectList(db,
             SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-            .Where(outcome => negativeOwners.Contains(outcome.SourceStructureKey)).ToList();
+            : operation.Evidence.Rows<DbStructureOutcome>(DbStructureOutcome.DefaultTableName))
+            .Where(outcome => outcome.SourceFhirPackageKey == pair.SourcePackageKey && outcome.TargetFhirPackageKey == pair.TargetPackageKey &&
+                negativeOwners.Contains(outcome.SourceStructureKey))];
         foreach (DbStructureOutcome outcome in structures)
         {
             outcome.IsEquivalent = false;
@@ -533,10 +550,23 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             outcome.TargetCanonicalVersioned = null;
             outcome.TargetCanonicalUnversioned = null;
         }
-        inserts.Insert(db, insertPrimaryKey: true);
-        updates.Update(db);
-        targets.Update(db);
-        structures.Update(db);
+        void Write()
+        {
+            inserts.Insert(db, insertPrimaryKey: true);
+            updates.Update(db);
+            targets.Update(db);
+            structures.Update(db);
+        }
+        if (operation is null)
+        {
+            Write();
+        }
+        else
+        {
+            operation.Evidence.ApplyOutcomeWrites(
+                new(XVerOperandFamily.StructureOutcomes, XVerOutputTransitionKind.PostProcess, pair.SourcePackageKey, pair.TargetPackageKey),
+                inserts, [.. updates, .. targets, .. structures], Write);
+        }
     }
 
     internal static void RequirePersistedDecisions(IDbConnection db, FhirPackageComparisonPair pair)

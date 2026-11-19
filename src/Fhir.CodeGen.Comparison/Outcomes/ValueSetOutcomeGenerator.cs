@@ -25,6 +25,7 @@ public class ValueSetOutcomeGenerator
 
     private DbRecordCache<DbValueSetOutcome> _vsOutcomeCache;
     private DbRecordCache<DbValueSetConceptOutcome> _conceptOutcomeCache;
+    private XVerPreparedOperation? _operation;
 
     public ValueSetOutcomeGenerator(
         IDbConnection db,
@@ -42,6 +43,34 @@ public class ValueSetOutcomeGenerator
     public void CreateOutcomesForValueSets(
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
+        => CreateOutcomesForValueSets(null, maxStepSize, specificPairs);
+
+    internal void CreateOutcomesForValueSets(XVerPreparedOperation? operation,
+        int? maxStepSize = null,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
+    {
+        _operation = operation;
+        try
+        {
+            operation?.RequireConnection(_db);
+            CreateOutcomesCore(maxStepSize, specificPairs);
+        }
+        catch
+        {
+            operation?.Dispose();
+            throw;
+        }
+        finally
+        {
+            _operation = null;
+            _packages.Clear();
+            _vsOutcomeCache.Clear();
+            _conceptOutcomeCache.Clear();
+        }
+    }
+
+    private void CreateOutcomesCore(int? maxStepSize,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs)
     {
         // get the list of packages
         _packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
@@ -77,6 +106,21 @@ public class ValueSetOutcomeGenerator
     }
 
     private void applyCachedChanges(FhirPackageComparisonPair packagePair)
+    {
+        if (_operation is null)
+        {
+            writeCachedChanges(packagePair);
+            return;
+        }
+        _operation.Evidence.ApplyOutcomeWrites(
+            new(XVerOperandFamily.VocabularyOutcomes, XVerOutputTransitionKind.PairFlush,
+                packagePair.SourcePackageKey, packagePair.TargetPackageKey),
+            [.. _vsOutcomeCache.ToAdd, .. _conceptOutcomeCache.ToAdd],
+            [.. _vsOutcomeCache.ToUpdate, .. _conceptOutcomeCache.ToUpdate],
+            () => writeCachedChanges(packagePair));
+    }
+
+    private void writeCachedChanges(FhirPackageComparisonPair packagePair)
     {
         DbFhirPackage sourcePackage = packagePair.SourcePackage;
         DbFhirPackage targetPackage = packagePair.TargetPackage;

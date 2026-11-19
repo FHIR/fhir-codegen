@@ -1298,11 +1298,16 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         internal void GenerateRangeElementOutcomes(FhirPackageComparisonPair pair)
         {
             DbOutcomeClasses.CreateTables(Connection);
-            DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(Connection, pair.SourcePackageKey, pair.TargetPackageKey);
+            using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(Connection,
+                new(XVerPreparationKind.Outcomes, XVerProcessor._exclusionSet, processVocabulary: false));
+            operation.PrepareOutcomes([pair]);
+            IReadOnlyList<ProfileRepresentationProof> expected = operation.OutcomeDecisions(pair.SourcePackageKey, pair.TargetPackageKey);
+            expected.ShouldContain(proof => proof.SourceRoot.Canonical == QuantityUrl.Replace("Quantity", "SimpleQuantity"));
+            DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(Connection, pair.SourcePackageKey, pair.TargetPackageKey, operation);
             DbRecordCache<DbElementOutcome> elements = new();
             DbRecordCache<DbElementOutcomeTarget> targets = new();
-            ElementOutcomeGenerator generator = new(Connection, NullLoggerFactory.Instance, pair, elements, targets);
-            XVerStructureCatalog catalog = Catalog;
+            ElementOutcomeGenerator generator = new(Connection, NullLoggerFactory.Instance, pair, elements, targets, operation);
+            XVerStructureCatalog catalog = operation.Catalog;
             foreach (DbStructureComparison comparison in DbStructureComparison.SelectList(Connection))
             {
                 DbStructureDefinition source = catalog.GetStructure(comparison.SourceStructureKey);
@@ -1313,7 +1318,10 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
                 {
                     schedule.RequiresXVerDefinition = false;
                 }
-                schedule.Key = DbStructureOutcome.Insert(Connection, schedule);
+                schedule.Key = DbStructureOutcome.GetIndex();
+                operation.Evidence.ApplyOutcomeWrites(
+                    new(XVerOperandFamily.StructureOutcomes, XVerOutputTransitionKind.PairFlush, pair.SourcePackageKey, pair.TargetPackageKey),
+                    [schedule], [], () => DbStructureOutcome.Insert(Connection, schedule, insertPrimaryKey: true));
                 generator.ProcessSourceStructure(source, new()
                 {
                     [target.Key] = new()
@@ -1325,9 +1333,16 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
                     },
                 });
             }
-            elements.ToAdd.Insert(Connection, insertPrimaryKey: true);
-            targets.ToAdd.Insert(Connection, insertPrimaryKey: true);
-            new UnsafeCodeOutcomeGenerator(Connection).GenerateForPair(pair, dependency);
+            operation.Evidence.ApplyOutcomeWrites(
+                new(XVerOperandFamily.StructureOutcomes, XVerOutputTransitionKind.PairFlush, pair.SourcePackageKey, pair.TargetPackageKey),
+                [.. elements.ToAdd, .. targets.ToAdd], [], () =>
+                {
+                    elements.ToAdd.Insert(Connection, insertPrimaryKey: true);
+                    targets.ToAdd.Insert(Connection, insertPrimaryKey: true);
+                });
+            new UnsafeCodeOutcomeGenerator(Connection).GenerateForPair(pair, dependency, operation);
+            ProfileUseFacts.RequirePersistedDecisions(Connection, pair, expected, catalog);
+            operation.Audit();
         }
 
         private void Close()

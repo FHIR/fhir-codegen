@@ -304,6 +304,8 @@ internal sealed class XVerPreparedOperation : IDisposable
     private readonly IDbConnection _connection;
     private readonly Dictionary<(int Source, int Target, XVerProfileContext Context), XVerProfileWorkPacket> _packets = [];
     private readonly Dictionary<(int Source, int Target), XVerDirectionalOperands> _directionalOperands = [];
+    private readonly Dictionary<(int Source, int Target), ImmutableArray<ProfileRepresentationProof>> _outcomeProducts = [];
+    private ImmutableArray<FhirPackageComparisonPair> _outcomeSchedule;
     private XVerStructureCatalog? _catalog;
     private string? _inventoryRevision;
     private bool _disposed;
@@ -443,6 +445,91 @@ internal sealed class XVerPreparedOperation : IDisposable
     internal XVerProfileWorkPacket GetComparisonPacket(int sourcePackageKey, int targetPackageKey) =>
         GetPacket(XVerDirectionalOperands.WithoutCorrespondence(_evidence, sourcePackageKey, targetPackageKey), XVerProfileContext.Comparison);
 
+    internal ImmutableArray<FhirPackageComparisonPair> PrepareOutcomes(
+        IEnumerable<FhirPackageComparisonPair>? schedule = null)
+    {
+        try
+        {
+            RequireActive();
+            if (!_outcomeSchedule.IsDefault)
+            {
+                throw new InvalidOperationException("Outcome preparation belongs to one fresh invocation.");
+            }
+            ImmutableArray<FhirPackageComparisonPair> pairs = schedule is null ? BuildOutcomeSchedule() : [.. schedule];
+            foreach (FhirPackageComparisonPair pair in pairs)
+            {
+                UnsafeCodeInputStore.RequireComparison(_connection, pair.SourcePackageKey, pair.TargetPackageKey, this);
+                XVerDirectionalProduct forward = Direction(pair.SourcePackageKey, pair.TargetPackageKey);
+                XVerDirectionalProduct reverse = Direction(pair.TargetPackageKey, pair.SourcePackageKey);
+                _outcomeProducts.Add((pair.SourcePackageKey, pair.TargetPackageKey), ComposePair(forward, reverse));
+            }
+            Audit();
+            _outcomeSchedule = pairs;
+            return pairs;
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+
+        XVerDirectionalProduct Direction(int sourceKey, int targetKey)
+        {
+            XVerProfileWorkPacket packet = GetPacket(CaptureDirection(sourceKey, targetKey), XVerProfileContext.Classification);
+            XVerDirectionalProduct product = packet.Classify();
+            packet.ReleaseWorkingFacts();
+            Catalog.ReleasePayloads();
+            return product;
+        }
+    }
+
+    internal ImmutableArray<FhirPackageComparisonPair> OutcomeSchedule
+    {
+        get
+        {
+            RequireActive();
+            if (_outcomeSchedule.IsDefault)
+            {
+                throw new InvalidOperationException("All scheduled outcome products must be prepared before outcome writes.");
+            }
+            return _outcomeSchedule;
+        }
+    }
+
+    internal ImmutableArray<ProfileRepresentationProof> OutcomeDecisions(int sourceKey, int targetKey)
+    {
+        RequireActive();
+        if (_outcomeSchedule.IsDefault || !_outcomeProducts.TryGetValue((sourceKey, targetKey), out ImmutableArray<ProfileRepresentationProof> decisions))
+        {
+            throw new InvalidOperationException("Outcome work requires its independently prepared scheduled product.");
+        }
+        return decisions;
+    }
+
+    private ImmutableArray<FhirPackageComparisonPair> BuildOutcomeSchedule()
+    {
+        List<DbFhirPackage> packages = [.. Evidence.Rows<DbFhirPackage>(DbFhirPackage.DefaultTableName)
+            .OrderBy(package => package.PackageVersion, StringComparer.Ordinal)];
+        List<FhirPackageComparisonPair> pairs = [];
+        for (int step = 1; step <= (Evidence.Options.MaxStepSize ?? packages.Count - 1); step++)
+        {
+            for (int index = 0; index < packages.Count - step; index++)
+            {
+                Add(new(packages[index], packages[index + step]));
+                Add(new(packages[index + step], packages[index]));
+            }
+        }
+        return [.. pairs];
+
+        void Add(FhirPackageComparisonPair pair)
+        {
+            if (Evidence.Options.SpecificPairs is null || Evidence.Options.SpecificPairs.Contains(pair.SequencePair))
+            {
+                pairs.Add(pair);
+            }
+        }
+    }
+
     internal void ComparisonFlushed(int sourcePackageKey, int targetPackageKey)
     {
         Audit();
@@ -543,6 +630,8 @@ internal sealed class XVerPreparedOperation : IDisposable
         }
         _packets.Clear();
         _directionalOperands.Clear();
+        _outcomeProducts.Clear();
+        _outcomeSchedule = default;
         _catalog?.Dispose();
         _catalog = null;
         _inventoryRevision = null;

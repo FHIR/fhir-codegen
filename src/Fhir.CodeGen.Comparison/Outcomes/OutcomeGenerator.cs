@@ -42,25 +42,37 @@ public class OutcomeGenerator
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
-        if (processStructures)
-        {
-            UnsafeCodeInputStore.RequireInputs(_db);
-        }
+        using XVerPreparedOperation? operation = processStructures
+            ? XVerPreparedOperation.Prepare(_db, new(XVerPreparationKind.Outcomes, XVer.XVerProcessor._exclusionSet,
+                maxStepSize: maxStepSize, specificPairs: specificPairs, processVocabulary: processValueSets))
+            : null;
+        operation?.PrepareOutcomes();
 
         // ensure out tables exist and are empty
-        DbOutcomeClasses.DropTables(_db, forValueSets: processValueSets, forStructures: processStructures);
-        DbOutcomeClasses.CreateTables(_db, forValueSets: processValueSets, forStructures: processStructures);
+        void Reset()
+        {
+            DbOutcomeClasses.DropTables(_db, forValueSets: processValueSets, forStructures: processStructures);
+            DbOutcomeClasses.CreateTables(_db, forValueSets: processValueSets, forStructures: processStructures);
+        }
+        if (operation is null)
+        {
+            Reset();
+        }
+        else
+        {
+            operation.Evidence.ResetOutcomes(processValueSets, Reset);
+        }
 
         if (processValueSets)
         {
             ValueSetOutcomeGenerator vsGenerator = new(_db, _loggerFactory);
-            vsGenerator.CreateOutcomesForValueSets(maxStepSize: maxStepSize, specificPairs: specificPairs);
+            vsGenerator.CreateOutcomesForValueSets(operation, maxStepSize: maxStepSize, specificPairs: specificPairs);
         }
 
         if (processStructures)
         {
             StructureOutcomeGenerator sdGenerator = new(_db, _loggerFactory);
-            sdGenerator.CreateOutcomesForStructures(maxStepSize: maxStepSize, specificPairs: specificPairs);
+            sdGenerator.CreateOutcomesForStructures(operation!);
         }
     }
 }

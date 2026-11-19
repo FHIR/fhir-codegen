@@ -82,6 +82,7 @@ public class ElementOutcomeGenerator
 
     private readonly IDbConnection _db;
     private readonly XVerStructureCatalog _catalog;
+    private readonly XVerPreparedOperation? _operation;
     private readonly DbElement? _targetBasicRoot;
     private readonly DbElement? _targetExtensionRoot;
 
@@ -130,9 +131,22 @@ public class ElementOutcomeGenerator
         FhirPackageComparisonPair packagePair,
         DbRecordCache<DbElementOutcome> edOutcomeCache,
         DbRecordCache<DbElementOutcomeTarget> edOutcomeTargetCache)
+        : this(db, loggerFactory, packagePair, edOutcomeCache, edOutcomeTargetCache, null)
+    {
+    }
+
+    internal ElementOutcomeGenerator(
+        IDbConnection db,
+        ILoggerFactory loggerFactory,
+        FhirPackageComparisonPair packagePair,
+        DbRecordCache<DbElementOutcome> edOutcomeCache,
+        DbRecordCache<DbElementOutcomeTarget> edOutcomeTargetCache,
+        XVerPreparedOperation? operation)
     {
         _db = db;
-        _catalog = new(db, XVerProcessor._exclusionSet);
+        _operation = operation;
+        operation?.RequireConnection(db);
+        _catalog = operation?.Catalog ?? new(db, XVerProcessor._exclusionSet);
         try
         {
             _loggerFactory = loggerFactory;
@@ -310,12 +324,24 @@ public class ElementOutcomeGenerator
         }
         finally
         {
-            _catalog.ReleasePayloads();
+            if (_operation is null)
+            {
+                _catalog.ReleasePayloads();
+            }
         }
     }
 
     internal void DoPostProcessing(FhirPackageComparisonPair packagePair)
     {
+        if (_operation is null)
+        {
+            using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
+                new(XVerPreparationKind.ElementOutcomes, XVerProcessor._exclusionSet));
+            ElementOutcomeGenerator generator = new(_db, _loggerFactory, packagePair, _edOutcomeCache, _edOutcomeTargetCache, operation);
+            generator.DoPostProcessing(packagePair);
+            operation.Audit();
+            return;
+        }
         DbFhirPackage sourcePackage = packagePair.SourcePackage;
         DbFhirPackage targetPackage = packagePair.TargetPackage;
 
@@ -330,23 +356,15 @@ public class ElementOutcomeGenerator
         DbFhirPackage targetPackage)
     {
         // get the element outcomes that are used as content references and not exporting extensions
-        List<DbElementOutcome> edOutcomes = DbElementOutcome.SelectList(
-            _db,
-            SourceFhirPackageKey: sourcePackage.Key,
-            TargetFhirPackageKey: targetPackage.Key,
-            SourceUsedAsContentReference: true,
-            RequiresExtensionDefinition: false);
+        List<DbElementOutcome> pairOutcomes = [.. _operation!.Evidence.Rows<DbElementOutcome>(DbElementOutcome.DefaultTableName)
+            .Where(row => row.SourceFhirPackageKey == sourcePackage.Key && row.TargetFhirPackageKey == targetPackage.Key)];
+        List<DbElementOutcome> edOutcomes = [.. pairOutcomes.Where(row => row.SourceUsedAsContentReference && !row.RequiresExtensionDefinition)];
 
         // iterate acros the outcomes to check if any targets need extension definitions
         foreach (DbElementOutcome edOutcome in edOutcomes)
         {
             // check if any require this to have an extension
-           int count = DbElementOutcome.SelectCount(
-                _db,
-                SourceFhirPackageKey: sourcePackage.Key,
-                TargetFhirPackageKey: targetPackage.Key,
-                ContentReferenceOutcomeKey: edOutcome.Key,
-                RequiresXVerDefinition: true);
+            int count = pairOutcomes.Count(row => row.ContentReferenceOutcomeKey == edOutcome.Key && row.RequiresXVerDefinition);
 
             if (count != 0)
             {
@@ -417,13 +435,32 @@ public class ElementOutcomeGenerator
         DbStructureDefinition sourceSd,
         Dictionary<int, StructureOutcomeGenerator.StructureOutcomeTrackingRecord> structureTrackingRecords)
     {
+        if (_operation is null)
+        {
+            try
+            {
+                using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
+                    new(XVerPreparationKind.ElementOutcomes, XVerProcessor._exclusionSet));
+                ElementOutcomeGenerator generator = new(_db, _loggerFactory, _packagePair, _edOutcomeCache, _edOutcomeTargetCache, operation);
+                generator.ProcessSourceStructure(operation.Catalog.GetStructure(sourceSd.Key), structureTrackingRecords);
+                operation.Audit();
+            }
+            finally
+            {
+                _catalog.ReleasePayloads();
+            }
+            return;
+        }
         try
         {
             ProcessSourceStructureCore(sourceSd, structureTrackingRecords);
         }
         finally
         {
-            _catalog.ReleasePayloads();
+            if (_operation is null)
+            {
+                _catalog.ReleasePayloads();
+            }
         }
     }
 
@@ -1987,7 +2024,7 @@ public class ElementOutcomeGenerator
             if ((unmappedTypes.Count > 0) &&
                 (currentTargetElements.Count > 0))
             {
-                using ProfileUseFacts facts = new(_catalog, _packagePair.SourcePackageKey, _packagePair.TargetPackageKey);
+                ProfileUseFacts facts = _operation!.GetComparisonPacket(_packagePair.SourcePackageKey, _packagePair.TargetPackageKey).Facts;
                 foreach (DbElementType unmappedType in unmappedTypes.Values.ToArray())
                 {
                     DbStructureDefinition sourceDefinition = _catalog.ResolveTypeUse(unmappedType);
@@ -2003,9 +2040,10 @@ public class ElementOutcomeGenerator
                         foreach (DbElementType targetType in _targetElementTypesByElementKey[targetEd.Key])
                         {
                             DbStructureDefinition targetDefinition = _catalog.ResolveTypeUse(targetType);
-                            List<DbStructureMapping> authorities = DbStructureMapping.SelectList(_db,
-                                SourceFhirPackageKey: _packagePair.SourcePackageKey, TargetFhirPackageKey: _packagePair.TargetPackageKey,
-                                SourceStructureKey: sourceDefinition.Key, TargetStructureKey: targetDefinition.Key);
+                            List<DbStructureMapping> authorities = [.. _operation.Evidence.Rows<DbStructureMapping>(DbStructureMapping.DefaultTableName)
+                                .Where(row => row.SourceFhirPackageKey == _packagePair.SourcePackageKey &&
+                                    row.TargetFhirPackageKey == _packagePair.TargetPackageKey &&
+                                    row.SourceStructureKey == sourceDefinition.Key && row.TargetStructureKey == targetDefinition.Key)];
                             DbStructureMapping[] applicable = [.. authorities.Where(mapping =>
                                 mapping.IsFallback == !authorities.Any(candidate => !candidate.IsFallback))];
                             if (applicable.Select(mapping => mapping.Relationship).Distinct().Count() > 1)

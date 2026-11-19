@@ -53,6 +53,520 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         FhirReleases.FhirSequenceCodes.R5,
     ];
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void LateOutcomePreparationFailurePreservesExistingRows(bool direct, bool captureFailure)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        PrepareOutcomeComparisons(fixture);
+        new OutcomeGenerator(fixture.Connection, NullLoggerFactory.Instance).GenerateOutcomes(maxStepSize: 1);
+        DbUnsafeCodePairState late = DbUnsafeCodePairState.SelectSingle(fixture.Connection,
+            SourceFhirPackageKey: fixture.Packages[2].Key, TargetFhirPackageKey: fixture.Packages[1].Key)!;
+        if (!captureFailure)
+        {
+            late.ComparisonRevision = null;
+            DbUnsafeCodePairState.Update(fixture.Connection, [late]);
+        }
+        string before = OutcomeRawImage(fixture.Connection);
+        long changes = ReadOperandInteger(fixture.Connection, "SELECT total_changes()");
+        long schema = ReadOperandInteger(fixture.Connection, "PRAGMA schema_version");
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        int classified = 0;
+        connection.BeforeExecute = sql =>
+        {
+            if (sql.StartsWith("SELECT", StringComparison.Ordinal) &&
+                new StackTrace().GetFrames().Any(frame => frame.GetMethod()?.DeclaringType == typeof(XVerDirectionalOperands)))
+            {
+                classified++;
+                if (captureFailure && classified == 5)
+                {
+                    throw new InvalidOperationException("Injected later directional preparation read failure.");
+                }
+            }
+        };
+        Should.Throw<InvalidOperationException>(() =>
+        {
+            if (direct)
+            {
+                new StructureOutcomeGenerator(connection, NullLoggerFactory.Instance).CreateOutcomesForStructures(maxStepSize: 1);
+            }
+            else
+            {
+                new OutcomeGenerator(connection, NullLoggerFactory.Instance).GenerateOutcomes(maxStepSize: 1);
+            }
+        });
+        classified.ShouldBeGreaterThan(0);
+        OutcomeRawImage(fixture.Connection).ShouldBe(before);
+        ReadOperandInteger(fixture.Connection, "SELECT total_changes()").ShouldBe(changes);
+        ReadOperandInteger(fixture.Connection, "PRAGMA schema_version").ShouldBe(schema);
+        connection.Subscriptions.ShouldBe(0);
+    }
+
+    [Fact]
+    public void OutcomesGenerateAndCompleteUseCompatibleProducts()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        PrepareOutcomeComparisons(fixture);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        StructureOutcomeGenerator generator = new(connection, NullLoggerFactory.Instance);
+        HashSet<XVerPreparedOperation> operations = [];
+        HashSet<XVerStructureCatalog> catalogs = [];
+        Dictionary<(int, int), object> products = [];
+        int legacyReads = 0;
+        connection.BeforeExecute = sql =>
+        {
+            XVerPreparedOperation? operation = PrivateField<XVerPreparedOperation?>(generator, "_operation");
+            if (operation is not null)
+            {
+                operations.Add(operation);
+                catalogs.Add(operation.Catalog);
+                foreach (XVerProfileWorkPacket packet in PrivateField<System.Collections.IDictionary>(operation, "_packets").Values)
+                {
+                    if (!packet.Context.Equals(XVerProfileContext.Classification))
+                    {
+                        continue;
+                    }
+                    object product = packet.Classify();
+                    (int, int) direction = (packet.Operands.SourcePackageKey, packet.Operands.TargetPackageKey);
+                    if (products.TryGetValue(direction, out object? prior))
+                    {
+                        product.ShouldBeSameAs(prior);
+                    }
+                    products[direction] = product;
+                }
+            }
+            if (sql.StartsWith("SELECT", StringComparison.Ordinal) &&
+                new StackTrace().GetFrames().Any(frame => frame.GetMethod() is System.Reflection.ConstructorInfo constructor &&
+                    constructor.DeclaringType == typeof(XVerStructureCatalog) &&
+                    constructor.GetParameters()[0].ParameterType == typeof(IDbConnection)))
+            {
+                legacyReads++;
+            }
+        };
+        generator.CreateOutcomesForStructures(maxStepSize: 1);
+        operations.ShouldHaveSingleItem();
+        catalogs.ShouldHaveSingleItem();
+        products.Count.ShouldBe(4);
+        legacyReads.ShouldBe(0);
+        AssertNoPayloads(catalogs.Single());
+        DbUnsafeCodePairState.SelectList(fixture.Connection).Count(row => row.OutcomeFormatVersion == UnsafeCodeConstants.OutcomeFormatVersion).ShouldBe(4);
+        connection.Subscriptions.ShouldBe(0);
+    }
+
+    [Fact]
+    public void NoCandidateOutcomesStillClassifyRequiredUses()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        (FhirPackageComparisonPair pair, _, DbElement source, _) = fixture.AddOwnerProjectionAlternatives(0, "profiles");
+        DbUnsafeCodeRule.Delete(fixture.Connection);
+        DbUnsafeCodeMapEvidence.Delete(fixture.Connection);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection,
+            new(XVerPreparationKind.Outcomes, processVocabulary: false));
+        operation.PrepareOutcomes([pair]);
+        IReadOnlyList<ProfileRepresentationProof> expected = operation.OutcomeDecisions(pair.SourcePackageKey, pair.TargetPackageKey);
+        expected.ShouldContain(proof => proof.Input.ElementKey == source.Key && !proof.PreservesRestrictions);
+        DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey, operation);
+        new UnsafeCodeOutcomeGenerator(fixture.Connection).GenerateForPair(pair, dependency, operation);
+        DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldBeEmpty();
+        DbElementOutcome outcome = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: source.Key)!;
+        ProfileUseFacts.ReadDecisions(outcome.ExtensionProhibitionReason!).ShouldNotBeEmpty();
+        ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog);
+        // Even a well-formed replacement cannot become the independent expectation.
+        JsonObject envelope = JsonNode.Parse(outcome.ExtensionProhibitionReason!)!.AsObject();
+        envelope["Decisions"]![0]!["Reasons"]![0]!["Detail"] = "forged independent proof";
+        outcome.ExtensionProhibitionReason = envelope.ToJsonString();
+        DbElementOutcome.Update(fixture.Connection, [outcome]);
+        Should.Throw<InvalidOperationException>(() =>
+            ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog));
+    }
+
+    [Fact]
+    public void ReusedOutcomeGeneratorEntersFresh()
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        PrepareOutcomeComparisons(fixture);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        StructureOutcomeGenerator generator = new(connection, NullLoggerFactory.Instance);
+        HashSet<XVerPreparedOperation> operations = [];
+        connection.BeforeExecute = _ =>
+        {
+            XVerPreparedOperation? current = PrivateField<XVerPreparedOperation?>(generator, "_operation");
+            if (current is not null)
+            {
+                operations.Add(current);
+            }
+        };
+        generator.CreateOutcomesForStructures(maxStepSize: 1);
+        DbElement element = DbElement.SelectList(fixture.Connection).First();
+        element.Short = "fresh outcomes";
+        DbElement.Update(fixture.Connection, [element]);
+        generator.CreateOutcomesForStructures(maxStepSize: 1);
+        operations.Count.ShouldBe(2);
+        DbStructureDefinitionFacts facts = DbStructureDefinitionFacts.SelectList(fixture.Connection).First();
+        string json = facts.StructureDefinitionJson;
+        facts.StructureDefinitionJson = "{}";
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        Should.Throw<InvalidOperationException>(() => generator.CreateOutcomesForStructures(maxStepSize: 1));
+        PrivateField<XVerPreparedOperation?>(generator, "_operation").ShouldBeNull();
+        PrivateField<DbRecordCache<DbElementOutcome>>(generator, "_edOutcomeCache").ToAddCount.ShouldBe(0);
+        facts.StructureDefinitionJson = json;
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        generator.CreateOutcomesForStructures(maxStepSize: 1);
+        operations.Count.ShouldBe(3);
+        connection.Subscriptions.ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData("none", false)]
+    [InlineData("update", false)]
+    [InlineData("insert", false)]
+    [InlineData("delete", false)]
+    [InlineData("stable", false)]
+    [InlineData("update", true)]
+    [InlineData("insert", true)]
+    [InlineData("delete", true)]
+    [InlineData("stable", true)]
+    public void LegitimateOutcomeWritesDoNotRebaseStableInputs(string mutation, bool secondConnection)
+    {
+        using UnsafeCodeTestFixture fixture = new(persistDatabase: true);
+        PrepareOutcomeComparisons(fixture);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        using SqliteConnection other = new(fixture.Connection.ConnectionString);
+        other.Open();
+        SqliteConnection.ClearPool(other);
+        IDbConnection writer = secondConnection ? other : connection;
+        bool flushed = false;
+        bool injected = false;
+        List<string> writes = [];
+        connection.AfterExecute = sql =>
+        {
+            if (sql.TrimStart().StartsWith("INSERT OR IGNORE INTO ValueSetConceptOutcomes", StringComparison.Ordinal))
+            {
+                flushed = true;
+                writes.Add(sql);
+            }
+        };
+        connection.BeforeExecute = sql =>
+        {
+            if (mutation == "none" || !flushed || injected || sql != "PRAGMA data_version")
+            {
+                return;
+            }
+            injected = true;
+            long count = ReadOperandInteger(writer, "SELECT COUNT(*) FROM ValueSetConceptOutcomes");
+            string stamp = ReadOperandText(writer, "SELECT CompletedInputRevision FROM UnsafeCodeInputState");
+            if (mutation == "insert")
+            {
+                DbValueSetConceptOutcome row = DbValueSetConceptOutcome.SelectList(writer).First();
+                row.Key += 100000;
+                DbValueSetConceptOutcome.Insert(writer, [row], insertPrimaryKey: true);
+            }
+            else
+            {
+                ExecuteOperandSql(writer, mutation switch
+                {
+                    "update" => "UPDATE ValueSetConceptOutcomes SET Comments = '' WHERE Key = (SELECT min(Key) FROM ValueSetConceptOutcomes)",
+                    "delete" => "DELETE FROM ValueSetConceptOutcomes WHERE Key = (SELECT min(Key) FROM ValueSetConceptOutcomes)",
+                    "stable" => "UPDATE Elements SET Short = 'unexpected stable change' WHERE Key = (SELECT min(Key) FROM Elements)",
+                    _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
+                });
+            }
+            if (mutation is "update" or "stable")
+            {
+                ReadOperandInteger(writer, "SELECT COUNT(*) FROM ValueSetConceptOutcomes").ShouldBe(count);
+            }
+            ReadOperandText(writer, "SELECT CompletedInputRevision FROM UnsafeCodeInputState").ShouldBe(stamp);
+        };
+        OutcomeGenerator generator = new(connection, NullLoggerFactory.Instance);
+        if (mutation == "none")
+        {
+            generator.GenerateOutcomes(maxStepSize: 1);
+            writes.Count.ShouldBe(9);
+            DbUnsafeCodePairState.SelectList(connection).Count(row => row.OutcomeFormatVersion != null).ShouldBe(4);
+            DbValueSetOutcome.SelectList(connection).ShouldNotBeEmpty();
+        }
+        else
+        {
+            Should.Throw<InvalidOperationException>(() => generator.GenerateOutcomes(maxStepSize: 1)).Message.ShouldContain("changed");
+            injected.ShouldBeTrue();
+            DbUnsafeCodePairState.SelectList(connection).ShouldAllBe(row => row.OutcomeInputRevision == null);
+            connection.BeforeExecute = null;
+            connection.AfterExecute = null;
+            generator.GenerateOutcomes(maxStepSize: 1);
+            DbUnsafeCodePairState.SelectList(connection).Count(row => row.OutcomeFormatVersion != null).ShouldBe(4);
+        }
+        connection.Subscriptions.ShouldBe(0);
+    }
+
+    [Fact]
+    public void VocabularyOutcomeProducerFlushCopiesInsertsAndUpdatesBeforeClearing()
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        PrepareOutcomeComparisons(fixture);
+        new OutcomeGenerator(fixture.Connection, NullLoggerFactory.Instance).GenerateOutcomes(maxStepSize: 1);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        ValueSetOutcomeGenerator vocabulary = new(connection, NullLoggerFactory.Instance);
+        FhirPackageComparisonPair pair = new(fixture.Packages[0], fixture.Packages[1]);
+        DbValueSetOutcome valueSet = DbValueSetOutcome.SelectList(connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey).First();
+        DbValueSetConceptOutcome concept = DbValueSetConceptOutcome.SelectList(connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey).First();
+        valueSet.Comments = "intended value set update";
+        concept.Comments = "intended concept update";
+        DbRecordCache<DbValueSetOutcome> valueSets = PrivateField<DbRecordCache<DbValueSetOutcome>>(vocabulary, "_vsOutcomeCache");
+        DbRecordCache<DbValueSetConceptOutcome> concepts = PrivateField<DbRecordCache<DbValueSetConceptOutcome>>(vocabulary, "_conceptOutcomeCache");
+        valueSets.CacheUpdate(valueSet);
+        concepts.CacheUpdate(concept);
+        // INSERT OR IGNORE must retain the existing row before the queued UPDATE.
+        DbValueSetOutcome ignoredValueSet = DbValueSetOutcome.SelectSingle(connection, Key: valueSet.Key)!;
+        ignoredValueSet.Comments = "ignored duplicate";
+        valueSets.CacheAdd(ignoredValueSet);
+        DbValueSetConceptOutcome ignoredConcept = DbValueSetConceptOutcome.SelectSingle(connection, Key: concept.Key)!;
+        ignoredConcept.Comments = "ignored duplicate";
+        concepts.CacheAdd(ignoredConcept);
+        DbValueSetOutcome unchanged = DbValueSetOutcome.SelectList(connection).First(row => row.SourceFhirPackageKey != pair.SourcePackageKey);
+        ExecuteOperandSql(connection, $"UPDATE ValueSetOutcomes SET IsEquivalent = 2, Comments = '' WHERE Key = {unchanged.Key}");
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection, new(XVerPreparationKind.Outcomes, maxStepSize: 1));
+        operation.PrepareOutcomes();
+        vocabulary.CreateOutcomesForValueSets(operation, maxStepSize: 1);
+        valueSets.ToAddCount.ShouldBe(0);
+        valueSets.ToUpdateCount.ShouldBe(0);
+        concepts.ToAddCount.ShouldBe(0);
+        concepts.ToUpdateCount.ShouldBe(0);
+        DbValueSetOutcome.SelectSingle(connection, Key: valueSet.Key)!.Comments.ShouldBe("intended value set update");
+        DbValueSetConceptOutcome.SelectSingle(connection, Key: concept.Key)!.Comments.ShouldBe("intended concept update");
+        valueSet.Comments = "mutated after producer cache clear";
+        concept.Comments = "mutated after producer cache clear";
+        operation.Audit();
+        ReadOperandInteger(connection, $"SELECT IsEquivalent FROM ValueSetOutcomes WHERE Key = {unchanged.Key}").ShouldBe(2);
+        ReadOperandText(connection, $"SELECT Comments FROM ValueSetOutcomes WHERE Key = {unchanged.Key}").ShouldBe("");
+        PrivateField<XVerPreparedOperation?>(vocabulary, "_operation").ShouldBeNull();
+        new StructureOutcomeGenerator(connection, NullLoggerFactory.Instance).CreateOutcomesForStructures(operation);
+        operation.Audit();
+    }
+
+    [Fact]
+    public void VocabularyOnlyOutcomesKeepMissingProfileSchemaIndependent()
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        PrepareOutcomeComparisons(fixture);
+        DbStructureDefinitionFacts.DropTable(fixture.Connection);
+        DbDefinitionInventoryState.DropTable(fixture.Connection);
+        DbUnsafeCodePairState.DropTable(fixture.Connection);
+        DbUnsafeCodeInputState.DropTable(fixture.Connection);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        new OutcomeGenerator(connection, NullLoggerFactory.Instance).GenerateOutcomes(processStructures: false, maxStepSize: 1);
+        DbValueSetOutcome.SelectList(connection).ShouldNotBeEmpty();
+        DefinitionInventoryStore.TableExists(connection, DbStructureDefinitionFacts.DefaultTableName).ShouldBeFalse();
+        DefinitionInventoryStore.TableExists(connection, DbUnsafeCodePairState.DefaultTableName).ShouldBeFalse();
+        connection.Subscriptions.ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData("element")]
+    [InlineData("target")]
+    [InlineData("structure")]
+    [InlineData("negative")]
+    public void FailedPostProcessingCannotPublishCompletion(string family)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        PrepareOutcomeComparisons(fixture);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        bool flushed = false;
+        bool injected = false;
+        connection.AfterExecute = sql =>
+        {
+            if (sql.StartsWith("INSERT OR IGNORE INTO ElementOutcomeTargets", StringComparison.Ordinal))
+            {
+                flushed = true;
+            }
+        };
+        connection.BeforeExecute = sql =>
+        {
+            if (!flushed || injected || sql != "PRAGMA data_version")
+            {
+                return;
+            }
+            injected = true;
+            ExecuteOperandSql(connection, family switch
+            {
+                "element" => "UPDATE ElementOutcomes SET ExtensionContextsLiteral = '' WHERE Key = (SELECT min(Key) FROM ElementOutcomes)",
+                "target" => "UPDATE ElementOutcomeTargets SET ContextParentExtensionUrl = 'urn:unexpected' WHERE Key = (SELECT min(Key) FROM ElementOutcomeTargets)",
+                "structure" => "UPDATE StructureOutcomes SET TargetCanonicalVersioned = 'urn:unexpected' WHERE Key = (SELECT min(Key) FROM StructureOutcomes)",
+                "negative" => "UPDATE ElementOutcomes SET ExtensionProhibitionReason = '{\"ProfileDecisionFormat\":1}' WHERE Key = (SELECT min(Key) FROM ElementOutcomes)",
+                _ => throw new ArgumentOutOfRangeException(nameof(family)),
+            });
+        };
+        Should.Throw<InvalidOperationException>(() => new OutcomeGenerator(connection, NullLoggerFactory.Instance)
+            .GenerateOutcomes(processValueSets: false, maxStepSize: 1)).Message.ShouldContain("changed");
+        injected.ShouldBeTrue();
+        DbUnsafeCodePairState.SelectList(connection).ShouldAllBe(row => row.OutcomeInputRevision == null);
+        connection.Subscriptions.ShouldBe(0);
+    }
+
+    [Fact]
+    public void FilteredOutcomesStillResetUnscheduledFamilies()
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        PrepareOutcomeComparisons(fixture);
+        OutcomeGenerator generator = new(fixture.Connection, NullLoggerFactory.Instance);
+        generator.GenerateOutcomes(maxStepSize: 1);
+        FhirPackageComparisonPair pair = new(fixture.Packages[0], fixture.Packages[1]);
+        generator.GenerateOutcomes(maxStepSize: 1, specificPairs: [pair.SequencePair]);
+        DbUnsafeCodePairState.SelectList(fixture.Connection).Where(row => row.OutcomeInputRevision != null)
+            .ShouldHaveSingleItem().SourceFhirPackageKey.ShouldBe(pair.SourcePackageKey);
+        DbStructureOutcome.SelectList(fixture.Connection).ShouldAllBe(row =>
+            row.SourceFhirPackageKey == pair.SourcePackageKey && row.TargetFhirPackageKey == pair.TargetPackageKey);
+        DbValueSetOutcome.SelectList(fixture.Connection).ShouldAllBe(row =>
+            row.SourceFhirPackageKey == pair.SourcePackageKey && row.TargetFhirPackageKey == pair.TargetPackageKey);
+        DbUnsafeCodePairState.SelectList(fixture.Connection).Count(row => row.ComparisonRevision != null).ShouldBe(4);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ContentReferenceOutcomeUpdatesUseIndependentExpectedRows(bool failAfterWrite)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        PrepareOutcomeComparisons(fixture);
+        new OutcomeGenerator(fixture.Connection, NullLoggerFactory.Instance).GenerateOutcomes(maxStepSize: 1);
+        FhirPackageComparisonPair pair = new(fixture.Packages[0], fixture.Packages[1]);
+        List<DbElementOutcome> rows = DbElementOutcome.SelectList(fixture.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+        DbElementOutcome referenced = rows.First();
+        DbElementOutcome referencing = rows.First(row => row.Key != referenced.Key);
+        referenced.SourceUsedAsContentReference = true;
+        referenced.RequiresExtensionDefinition = false;
+        referencing.ContentReferenceOutcomeKey = referenced.Key;
+        referencing.RequiresXVerDefinition = true;
+        DbElementOutcome.Update(fixture.Connection, [referenced, referencing]);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection,
+            new(XVerPreparationKind.Outcomes, processVocabulary: false));
+        operation.PrepareOutcomes([pair]);
+        DbUnsafeCodePairState dependency = UnsafeCodeInputStore.BeginOutcomes(connection, pair.SourcePackageKey, pair.TargetPackageKey, operation);
+        DbRecordCache<DbElementOutcome> elements = new();
+        DbRecordCache<DbElementOutcomeTarget> targets = new();
+        ElementOutcomeGenerator producer = new(connection, NullLoggerFactory.Instance, pair, elements, targets, operation);
+        producer.DoPostProcessing(pair);
+        elements.ToUpdate.ShouldHaveSingleItem().Key.ShouldBe(referenced.Key);
+        StructureOutcomeGenerator generator = new(connection, NullLoggerFactory.Instance);
+        typeof(StructureOutcomeGenerator).GetField("_operation", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(generator, operation);
+        PrivateField<DbRecordCache<DbElementOutcome>>(generator, "_edOutcomeCache").CacheUpdate(elements.ToUpdate.Single());
+        bool wrote = false;
+        connection.AfterExecute = sql =>
+        {
+            if (sql.TrimStart().StartsWith("UPDATE ElementOutcomes", StringComparison.Ordinal))
+            {
+                wrote = true;
+            }
+        };
+        connection.BeforeExecute = sql =>
+        {
+            if (failAfterWrite && wrote && sql == "PRAGMA data_version")
+            {
+                wrote = false;
+                ExecuteOperandSql(connection, $"UPDATE ElementOutcomes SET GenUrl = 'urn:unexpected' WHERE Key = {referenced.Key}");
+            }
+        };
+        System.Reflection.MethodInfo flush = typeof(StructureOutcomeGenerator).GetMethod("applyCachedChanges",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        if (failAfterWrite)
+        {
+            Should.Throw<System.Reflection.TargetInvocationException>(() => flush.Invoke(generator, [pair]))
+                .InnerException.ShouldBeOfType<InvalidOperationException>();
+            fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
+        }
+        else
+        {
+            flush.Invoke(generator, [pair]);
+            DbElementOutcome stored = DbElementOutcome.SelectSingle(connection, Key: referenced.Key)!;
+            stored.RequiresExtensionDefinition.ShouldBeTrue();
+            stored.Comments.ShouldBe(referenced.Comments +
+                $"\nCreating extension because element `{referenced.SourceId}` is a content reference and requires an extesion definition.");
+            operation.Audit();
+            new UnsafeCodeOutcomeGenerator(connection).GenerateForPair(pair, dependency, operation);
+        }
+    }
+
+    [Theory]
+    [InlineData("inputs")]
+    [InlineData("comparison")]
+    [InlineData("begin")]
+    [InlineData("complete")]
+    public void PreparedOutcomeGuardsAuditRawOutputsAtEveryBoundary(string boundary)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        PrepareOutcomeComparisons(fixture);
+        new OutcomeGenerator(fixture.Connection, NullLoggerFactory.Instance).GenerateOutcomes(maxStepSize: 1);
+        FhirPackageComparisonPair pair = new(fixture.Packages[0], fixture.Packages[1]);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection,
+            new(XVerPreparationKind.Outcomes, processVocabulary: false));
+        operation.PrepareOutcomes([pair]);
+        DbUnsafeCodePairState dependency = fixture.PairState(pair);
+        if (boundary == "complete")
+        {
+            dependency = UnsafeCodeInputStore.BeginOutcomes(connection, pair.SourcePackageKey, pair.TargetPackageKey, operation);
+        }
+        ExecuteOperandSql(connection, "UPDATE StructureOutcomes SET IsEquivalent = 2 WHERE Key = (SELECT min(Key) FROM StructureOutcomes)");
+        long changes = ReadOperandInteger(connection, "SELECT total_changes()");
+        Should.Throw<InvalidOperationException>(() =>
+        {
+            switch (boundary)
+            {
+                case "inputs": UnsafeCodeInputStore.RequireInputs(connection, operation); break;
+                case "comparison": UnsafeCodeInputStore.RequireComparison(connection, pair.SourcePackageKey, pair.TargetPackageKey, operation); break;
+                case "begin": UnsafeCodeInputStore.BeginOutcomes(connection, pair.SourcePackageKey, pair.TargetPackageKey, operation); break;
+                case "complete": UnsafeCodeInputStore.CompleteOutcomes(connection, dependency, operation); break;
+                default: throw new ArgumentOutOfRangeException(nameof(boundary));
+            }
+        }).Message.ShouldContain("StructureOutcomes");
+        ReadOperandInteger(connection, "SELECT total_changes()").ShouldBe(changes);
+        connection.Subscriptions.ShouldBe(0);
+    }
+
+    private static void PrepareOutcomeComparisons(UnsafeCodeTestFixture fixture)
+    {
+        fixture.Load().ShouldBeTrue();
+        AddRelationshipMappings(fixture);
+        fixture.SetExpandable(true);
+        DbComparisonClasses.CreateTables(fixture.Connection);
+        DbOutcomeClasses.CreateTables(fixture.Connection);
+        new ValueSetComparer(fixture.Connection, NullLoggerFactory.Instance).CompareValueSets(maxStepSize: 1);
+        new StructureComparer(fixture.Connection, NullLoggerFactory.Instance).CompareStructures(maxStepSize: 1);
+    }
+
+    private static string OutcomeRawImage(IDbConnection connection)
+    {
+        List<(string Table, List<object?[]> Rows)> image = [];
+        foreach (XVerOperandEvidence.XVerTableManifest table in XVerOperandEvidence.Manifest.Where(table =>
+            table.Family is XVerOperandFamily.StructureOutcomes or XVerOperandFamily.VocabularyOutcomes or XVerOperandFamily.PairControl))
+        {
+            using IDbCommand command = connection.CreateCommand();
+            command.CommandText = $"SELECT {string.Join(", ", table.PersistedFields)} FROM {table.TableName} ORDER BY Key";
+            using IDataReader reader = command.ExecuteReader();
+            List<object?[]> rows = [];
+            while (reader.Read())
+            {
+                rows.Add([.. Enumerable.Range(0, reader.FieldCount).Select(index => reader.IsDBNull(index) ? null : reader.GetValue(index))]);
+            }
+            image.Add((table.TableName, rows));
+        }
+        using IDbCommand schema = connection.CreateCommand();
+        schema.CommandText = "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name";
+        using IDataReader definitions = schema.ExecuteReader();
+        List<object?[]> schemas = [];
+        while (definitions.Read())
+        {
+            schemas.Add([.. Enumerable.Range(0, definitions.FieldCount).Select(index => definitions.IsDBNull(index) ? null : definitions.GetValue(index))]);
+        }
+        return JsonSerializer.Serialize(new { Rows = image.Select(table => new { table.Table, table.Rows }), Schema = schemas });
+    }
+
     [Fact]
     public void PreparedComparisonUsesOneValidationAndNoFallbackCatalogs()
     {
