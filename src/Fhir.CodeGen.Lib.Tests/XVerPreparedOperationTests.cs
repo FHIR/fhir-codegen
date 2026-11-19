@@ -53,6 +53,702 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         FhirReleases.FhirSequenceCodes.R5,
     ];
 
+    [Fact]
+    public void ExportReadinessAndConstructionShareExpectedProducts()
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair[] schedule = PrepareExportPairs(fixture);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        int legacyCatalogs = 0;
+        int legacyClassifications = 0;
+        connection.BeforeExecute = sql =>
+        {
+            if (!sql.StartsWith("SELECT", StringComparison.Ordinal))
+            {
+                return;
+            }
+            System.Reflection.MethodBase[] methods = [.. new StackTrace().GetFrames().Select(frame => frame.GetMethod()!)];
+            if (methods.Any(method => method is System.Reflection.ConstructorInfo constructor &&
+                constructor.DeclaringType == typeof(XVerStructureCatalog) &&
+                constructor.GetParameters()[0].ParameterType == typeof(IDbConnection)))
+            {
+                legacyCatalogs++;
+            }
+            if (methods.Any(method => method.DeclaringType == typeof(ProfileUseFacts) && method.Name == "ClassifyPair"))
+            {
+                legacyClassifications++;
+            }
+        };
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection,
+            new(XVerPreparationKind.Export, XVerProcessor._exclusionSet, processVocabulary: false));
+        UnsafeCodeInputStore.RequireExportReady(connection, schedule, operation);
+        StructureFhirExporter builder = new(new XVerExporter(connection, ExportConfiguration(fixture)), connection, NullLoggerFactory.Instance);
+        XVerStructureCatalog catalog = operation.Catalog;
+        foreach (FhirPackageComparisonPair pair in schedule)
+        {
+            StructureFhirExporter.BuiltDefinitions built = builder.BuildDefinitions(ExportTracking(pair), operation);
+            built.ProfileDecisions.Zip(operation.ExportDecisions(pair.SourcePackageKey, pair.TargetPackageKey))
+                .ShouldAllBe(proofs => ReferenceEquals(proofs.First, proofs.Second));
+            operation.Catalog.ShouldBeSameAs(catalog);
+            AssertReleasedBuilder(builder);
+            AssertReleasedIndex(built.Representations);
+        }
+        UnsafeCodeInputStore.AuditExportReady(connection, schedule, operation);
+        legacyCatalogs.ShouldBe(0);
+        legacyClassifications.ShouldBe(0);
+        PrivateField<System.Collections.IDictionary>(operation, "_packets").Count.ShouldBe(6);
+        operation.Dispose();
+        AssertNoPayloads(catalog);
+        connection.Subscriptions.ShouldBe(0);
+        retained.Completed = true;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PreparedStructurePagesBorrowWithoutReleasingSharedState(bool fail)
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair[] schedule = PrepareExportPairs(fixture, includeDatatypes: true);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        ConfigXVer config = ExportConfiguration(fixture);
+        XVerExporter exporter = new(connection, config);
+        IgExporter ig = new(connection, NullLoggerFactory.Instance, config.OutputDirectory, null, exporter, config);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection,
+            new(XVerPreparationKind.Export, XVerProcessor._exclusionSet, processVocabulary: false));
+        UnsafeCodeInputStore.RequireExportReady(connection, schedule, operation);
+        IgExporter.XVerExportTrackingRecord tr = ig.PrepareXVerIgs(
+            ig.BuildExportSchedule(specificPairs: [.. schedule.Select(pair => pair.SequencePair)]));
+        StructureFhirExporter builder = new(exporter, connection, NullLoggerFactory.Instance);
+        List<StructureFhirExporter.BuiltDefinitions> plans = [.. tr.XVerIgs.Select(tracking => builder.BuildDefinitions(tracking, operation))];
+        StructurePageExporter pages = new(exporter, connection, NullLoggerFactory.Instance, operation);
+        Directory.Exists(config.OutputDirectory).ShouldBeFalse();
+        UnsafeCodeInputStore.AuditExportReady(connection, schedule, operation);
+        ig.MaterializeXVerIgs(tr, false);
+        for (int index = 0; index < plans.Count; index++)
+        {
+            builder.Emit(tr.XVerIgs[index], plans[index], operation);
+        }
+        XVerStructureCatalog catalog = operation.Catalog;
+        DbStructureDefinition owner = catalog.GetStructure(fixture.Structure(schedule[0].SourcePackage).Key);
+        using ProfileUseFacts sibling = new(catalog, schedule[0].SourcePackageKey, schedule[0].TargetPackageKey);
+        EffectiveProfileBranch use = sibling.ForDefinition(owner);
+        StructureDefinition payload = catalog.ReadPayload(owner);
+        int pageReads = 0;
+        int legacyCatalogReads = 0;
+        connection.BeforeExecute = sql =>
+        {
+            System.Reflection.MethodBase[] callers = [.. new StackTrace().GetFrames().Select(frame => frame.GetMethod()!)];
+            if (sql.StartsWith("SELECT", StringComparison.Ordinal) && callers.Any(method =>
+                method.DeclaringType == typeof(XVerStructureCatalog) && method.IsConstructor))
+            {
+                legacyCatalogReads++;
+            }
+            if (sql.StartsWith("SELECT", StringComparison.Ordinal) &&
+                callers.Any(method => method.DeclaringType == typeof(StructurePageExporter)))
+            {
+                PrivateField<XVerStructureCatalog?>(pages, "_catalog").ShouldBeSameAs(catalog);
+                operation.Catalog.ShouldBeSameAs(catalog);
+                pageReads++;
+                if (fail)
+                {
+                    throw new InvalidOperationException("Injected page-reader failure.");
+                }
+            }
+        };
+        if (fail)
+        {
+            Should.Throw<InvalidOperationException>(() => pages.Export(tr, operation)).Message.ShouldContain("page-reader failure");
+        }
+        else
+        {
+            pages.Export(tr, operation);
+        }
+        connection.BeforeExecute = null;
+        pageReads.ShouldBeGreaterThan(0);
+        legacyCatalogReads.ShouldBe(0);
+        PrivateField<XVerStructureCatalog?>(pages, "_catalog").ShouldBeNull();
+        catalog.ReadPayload(owner).ShouldBeSameAs(payload);
+        sibling.ForDefinition(owner).Elements.ShouldBeSameAs(use.Elements);
+        operation.Audit();
+        operation.Dispose();
+        AssertNoPayloads(catalog);
+        Should.Throw<ObjectDisposedException>(() => catalog.GetStructure(owner.Key));
+        connection.Subscriptions.ShouldBe(0);
+        retained.Completed = true;
+    }
+
+    [Fact]
+    public void OrchestratedStructurePagesMatchStandaloneBytesAndTracking()
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair[] schedule = PrepareExportPairs(fixture, includeDatatypes: true);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        ConfigXVer config = ExportConfiguration(fixture);
+        XVerExporter exporter = new(connection, config);
+        IgExporter ig = new(connection, NullLoggerFactory.Instance, config.OutputDirectory, null, exporter, config);
+        IgExporter.XVerExportTrackingRecord tr = ig.PrepareXVerIgs(
+            ig.BuildExportSchedule(specificPairs: [.. schedule.Select(pair => pair.SequencePair)]));
+        using (XVerPreparedOperation operation = XVerPreparedOperation.Prepare(connection,
+            new(XVerPreparationKind.Export, XVerProcessor._exclusionSet, processVocabulary: false)))
+        {
+            UnsafeCodeInputStore.RequireExportReady(connection, schedule, operation);
+            StructureFhirExporter builder = new(exporter, connection, NullLoggerFactory.Instance);
+            List<StructureFhirExporter.BuiltDefinitions> plans = [.. tr.XVerIgs.Select(tracking => builder.BuildDefinitions(tracking, operation))];
+            StructurePageExporter pages = new(exporter, connection, NullLoggerFactory.Instance, operation);
+            UnsafeCodeInputStore.AuditExportReady(connection, schedule, operation);
+            ig.MaterializeXVerIgs(tr, false);
+            for (int index = 0; index < plans.Count; index++)
+            {
+                builder.Emit(tr.XVerIgs[index], plans[index], operation);
+            }
+            pages.Export(tr, operation);
+        }
+        Dictionary<string, byte[]> expected = PageBytes();
+        string tracking = Tracking();
+        expected.Count.ShouldBeGreaterThan(4);
+        foreach (IgExporter.XVerIgExportTrackingRecord pair in tr.XVerIgs)
+        {
+            pair.ResourceLookupFiles[0].FileName.ShouldBe("index-resources.md");
+            pair.TypeLookupFiles[0].FileName.ShouldBe("index-types.md");
+            pair.ResourceLookupFiles.ShouldContain(file => file.FileName.StartsWith("lookup-sd-", StringComparison.Ordinal));
+            pair.TypeLookupFiles.ShouldContain(file => file.FileName.StartsWith("lookup-sd-", StringComparison.Ordinal));
+        }
+        int legacyCatalogReads = 0;
+        int pageReads = 0;
+        connection.BeforeExecute = sql =>
+        {
+            if (!sql.StartsWith("SELECT", StringComparison.Ordinal))
+            {
+                return;
+            }
+            System.Reflection.MethodBase[] callers = [.. new StackTrace().GetFrames().Select(frame => frame.GetMethod()!)];
+            if (callers.Any(method => method.DeclaringType == typeof(XVerStructureCatalog) && method.IsConstructor))
+            {
+                legacyCatalogReads++;
+            }
+            if (callers.Any(method => method.DeclaringType == typeof(StructurePageExporter)))
+            {
+                pageReads++;
+                connection.Subscriptions.ShouldBe(1);
+                foreach (IgExporter.XVerIgExportTrackingRecord pair in tr.XVerIgs)
+                {
+                    Directory.GetFiles(pair.ProfileDir!, "StructureDefinition-*.json").ShouldNotBeEmpty();
+                }
+            }
+        };
+        exporter.Export(includeIgScripts: false, processVocabulary: false, specificPairs: [.. schedule.Select(pair => pair.SequencePair)]);
+        connection.BeforeExecute = null;
+        pageReads.ShouldBeGreaterThan(0);
+        legacyCatalogReads.ShouldBe(0);
+        AssertPages();
+        Dictionary<string, byte[]> resources = Directory.GetFiles(config.OutputDirectory, "*.json", SearchOption.AllDirectories)
+            .ToDictionary(path => path, File.ReadAllBytes);
+        foreach (IgExporter.XVerIgExportTrackingRecord pair in tr.XVerIgs)
+        {
+            pair.ResourceLookupFiles.Clear();
+            pair.TypeLookupFiles.Clear();
+        }
+        new StructurePageExporter(exporter, connection, NullLoggerFactory.Instance).Export(tr);
+        Tracking().ShouldBe(tracking);
+        AssertPages();
+        foreach ((string path, byte[] bytes) in resources)
+        {
+            File.ReadAllBytes(path).ShouldBe(bytes);
+        }
+        connection.Subscriptions.ShouldBe(0);
+        retained.Completed = true;
+
+        Dictionary<string, byte[]> PageBytes() => tr.XVerIgs.SelectMany(pair => Directory.GetFiles(pair.PageContentDir!, "*.md"))
+            .Where(path => Path.GetFileName(path).StartsWith("lookup-sd-", StringComparison.Ordinal) ||
+                Path.GetFileName(path) is "index-resources.md" or "index-types.md")
+            .ToDictionary(path => Path.GetRelativePath(config.OutputDirectory, path), File.ReadAllBytes, StringComparer.Ordinal);
+
+        string Tracking() => JsonSerializer.Serialize(tr.XVerIgs.Select(pair => new
+        {
+            pair.PackageId, Resources = pair.ResourceLookupFiles.Select(PageRecord), Types = pair.TypeLookupFiles.Select(PageRecord),
+        }));
+
+        static object PageRecord(IgExporter.XVerIgFileRecord file) => new
+        {
+            file.FileName, file.FileNameWithoutExtension, file.IsPageContentFile, file.Name, file.Id, file.Url,
+            file.ResourceType, file.Version, file.Description, file.GroupingId, file.IsExample, file.Profiles,
+            file.KindValue, file.TypeValue,
+        };
+
+        void AssertPages()
+        {
+            Dictionary<string, byte[]> actual = PageBytes();
+            actual.Keys.Order(StringComparer.Ordinal).ShouldBe(expected.Keys.Order(StringComparer.Ordinal));
+            foreach ((string path, byte[] bytes) in expected)
+            {
+                actual[path].ShouldBe(bytes, path);
+            }
+        }
+    }
+
+    [Fact]
+    public void StandaloneStructurePagesOwnFreshCatalogsOnSuccessFailureAndReuse()
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair pair = PrepareExportPairs(fixture)[0];
+        DbDefinitionInventoryState.DropTable(fixture.Connection);
+        DbUnsafeCodeInputState.DropTable(fixture.Connection);
+        DbUnsafeCodePairState.DropTable(fixture.Connection);
+        DbUnsafeCodeMapEvidence.DropTable(fixture.Connection);
+        DbValueSetOutcome.DropTable(fixture.Connection);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        ConfigXVer config = ExportConfiguration(fixture);
+        XVerExporter exporter = new(connection, config);
+        IgExporter ig = new(connection, NullLoggerFactory.Instance, config.OutputDirectory, null, exporter, config);
+        IgExporter.XVerExportTrackingRecord tr = ig.PrepareXVerIgs(ig.BuildExportSchedule(specificPairs: [pair.SequencePair]));
+        StructurePageExporter pages = new(exporter, connection, NullLoggerFactory.Instance);
+        HashSet<XVerStructureCatalog> catalogs = [];
+        DbStructureDefinition owner = fixture.Structure(pair.SourcePackage);
+        bool fail = false;
+        connection.BeforeExecute = sql =>
+        {
+            XVerStructureCatalog? catalog = PrivateField<XVerStructureCatalog?>(pages, "_catalog");
+            if (catalog is not null && sql.StartsWith("SELECT", StringComparison.Ordinal))
+            {
+                catalogs.Add(catalog);
+                catalog.ReadPayload(catalog.GetStructure(owner.Key));
+                if (fail)
+                {
+                    throw new InvalidOperationException("Injected standalone page failure.");
+                }
+            }
+        };
+        Run();
+        tr.XVerIgs[0].ResourceLookupFiles.Count.ShouldBeGreaterThan(1);
+        fail = true;
+        Should.Throw<InvalidOperationException>(Run).Message.ShouldContain("standalone page failure");
+        AssertReleased();
+        fail = false;
+        owner.Message = "Manually excluded";
+        DbStructureDefinition.Update(fixture.Connection, [owner]);
+        Run();
+        tr.XVerIgs[0].ResourceLookupFiles.ShouldHaveSingleItem().FileName.ShouldBe("index-resources.md");
+        owner.Message = null;
+        DbStructureDefinition.Update(fixture.Connection, [owner]);
+        Run();
+        tr.XVerIgs[0].ResourceLookupFiles.Count.ShouldBeGreaterThan(1);
+        catalogs.Count.ShouldBe(4);
+        connection.Subscriptions.ShouldBe(0);
+        retained.Completed = true;
+
+        void Run()
+        {
+            tr.XVerIgs[0].ResourceLookupFiles.Clear();
+            tr.XVerIgs[0].TypeLookupFiles.Clear();
+            try { pages.Export(tr); }
+            finally { AssertReleased(); }
+        }
+
+        void AssertReleased()
+        {
+            PrivateField<XVerStructureCatalog?>(pages, "_catalog").ShouldBeNull();
+            foreach (XVerStructureCatalog catalog in catalogs)
+            {
+                AssertNoPayloads(catalog);
+                Should.Throw<ObjectDisposedException>(() => catalog.GetStructure(owner.Key));
+            }
+        }
+    }
+
+    [Fact]
+    public void ReusedExporterAndStandaloneBuildsEnterFresh()
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair[] schedule = PrepareExportPairs(fixture);
+        ConfigXVer config = ExportConfiguration(fixture);
+        config.OutputDirectory = Path.Combine(fixture.SourceRoot, "constructor-must-not-be-authority");
+        config.CrossVersionMapSourcePath = Path.Combine(fixture.SourceRoot, "constructor-source");
+        XVerExporter exporter = new(fixture.Connection, config);
+        config.OutputDirectory = Path.Combine(fixture.SourceRoot, "current-export");
+        config.CrossVersionMapSourcePath = fixture.SourceRoot;
+        config.XverArtifactVersion = "1.2.3-current";
+        config.ExportR4B = false;
+        exporter.Export(includeIgScripts: false, processVocabulary: false, specificPairs: [.. schedule.Select(pair => pair.SequencePair)]);
+        Directory.Exists(Path.Combine(fixture.SourceRoot, "constructor-must-not-be-authority")).ShouldBeFalse();
+        Directory.GetFiles(config.OutputDirectory, "StructureDefinition-*.json", SearchOption.AllDirectories).ShouldNotBeEmpty();
+        exporter._crossDefinitionVersion.ShouldBe("1.2.3-current");
+        Directory.GetDirectories(config.OutputDirectory).ShouldNotContain(path => path.EndsWith("r4b", StringComparison.Ordinal));
+
+        config.OutputDirectory = Path.Combine(fixture.SourceRoot, "next-export");
+        config.ExportR4 = false;
+        config.ExportR4B = true;
+        config.XverArtifactVersion = "2.3.4-next";
+        exporter.Export(includeIgScripts: false, processVocabulary: false, specificPairs: [.. schedule.Select(pair => pair.SequencePair)]);
+        exporter._crossDefinitionVersion.ShouldBe("2.3.4-next");
+        Directory.GetFiles(config.OutputDirectory, "StructureDefinition-*.json", SearchOption.AllDirectories).ShouldNotBeEmpty();
+        DbUnsafeCodePairState state = fixture.PairState(schedule[1]);
+        state.OutcomeFormatVersion = null;
+        DbUnsafeCodePairState.Update(fixture.Connection, [state]);
+        config.OutputDirectory = Path.Combine(fixture.SourceRoot, "failed-reuse");
+        Should.Throw<InvalidOperationException>(() => exporter.Export(includeIgScripts: false, processVocabulary: false,
+            specificPairs: [schedule[1].SequencePair]));
+        Directory.Exists(config.OutputDirectory).ShouldBeFalse();
+        fixture.GenerateSafety(schedule[1]);
+        exporter.Export(includeIgScripts: false, processVocabulary: false, specificPairs: [schedule[1].SequencePair]);
+
+        StructureFhirExporter builder = new(exporter, fixture.Connection, NullLoggerFactory.Instance);
+        builder.BuildDefinitions(ExportTracking(schedule[0]));
+        DbStructureDefinitionFacts facts = DbStructureDefinitionFacts.SelectSingle(fixture.Connection,
+            StructureKey: fixture.Structure(schedule[0].SourcePackage).Key)!;
+        string original = facts.StructureDefinitionJson;
+        facts.StructureDefinitionJson = "{}";
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        foreach (int seam in Enumerable.Range(0, 3))
+        {
+            Should.Throw<InvalidOperationException>(() => Build(seam));
+            AssertReleasedBuilder(builder);
+        }
+        facts.StructureDefinitionJson = original;
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        foreach (int seam in Enumerable.Range(0, 3))
+        {
+            Build(seam);
+            AssertReleasedBuilder(builder);
+        }
+        retained.Completed = true;
+
+        void Build(int seam)
+        {
+            if (seam == 0) { builder.BuildDefinitions(ExportTracking(schedule[0])); }
+            else if (seam == 1) { builder.BuildProfiles(ExportTracking(schedule[0])); }
+            else { builder.BuildExtensions(ExportTracking(schedule[0])); }
+        }
+    }
+
+    [Theory]
+    [InlineData("stable", false, false, false)]
+    [InlineData("stable", true, true, false)]
+    [InlineData("comparison", false, true, false)]
+    [InlineData("comparison", true, false, false)]
+    [InlineData("negative", false, false, false)]
+    [InlineData("negative", true, true, false)]
+    [InlineData("configuration", false, true, false)]
+    [InlineData("stable", false, true, true)]
+    [InlineData("negative", true, false, true)]
+    [InlineData("configuration", false, true, true)]
+    public void FinalAuditRejectsMutationAfterLastBuild(string mutation, bool otherConnection, bool populated, bool direct)
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair[] schedule = PrepareExportPairs(fixture, negative: mutation == "negative");
+        ConfigXVer config = ExportConfiguration(fixture);
+        string root = config.OutputDirectory;
+        string sentinel = Path.Combine(root, "hl7.fhir.uv.xver-r5.r4", "sentinel.bin");
+        byte[] bytes = [0, 255, 17, 13, 10];
+        if (populated)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(sentinel)!);
+            File.WriteAllBytes(sentinel, bytes);
+        }
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        using SqliteConnection? other = otherConnection ? new(new SqliteConnectionStringBuilder
+        {
+            DataSource = fixture.Connection.DataSource, Pooling = false,
+        }.ToString()) : null;
+        other?.Open();
+        bool built = false;
+        bool mutated = false;
+        connection.BeforeExecute = sql =>
+        {
+            if (sql != "PRAGMA data_version")
+            {
+                return;
+            }
+            System.Reflection.MethodBase[] methods = [.. new StackTrace().GetFrames().Select(frame => frame.GetMethod()!)];
+            built |= methods.Any(method => method.DeclaringType == typeof(StructureFhirExporter) && method.Name == "InConstructionScope");
+            bool final = methods.Any(method => method.DeclaringType == typeof(UnsafeCodeInputStore) && method.Name == "AuditExportReady") ||
+                direct && methods.Any(method => method.DeclaringType == typeof(StructureFhirExporter) && method.Name == "Export") &&
+                !methods.Any(method => method.DeclaringType == typeof(StructureFhirExporter) && method.Name == "InConstructionScope");
+            if (!built || mutated || !final)
+            {
+                return;
+            }
+            mutated = true;
+            if (mutation == "configuration")
+            {
+                config.OutputDirectory = Path.Combine(fixture.SourceRoot, "changed-after-build");
+                return;
+            }
+            string statement = mutation switch
+            {
+                "stable" => "UPDATE StructureDefinitionFacts SET StructureDefinitionJson = StructureDefinitionJson || ' ' WHERE Key = (SELECT MIN(Key) FROM StructureDefinitionFacts)",
+                "comparison" => "UPDATE ElementComparisons SET IsIdentical = CASE WHEN IsIdentical = 1 THEN 0 ELSE 1 END WHERE Key = (SELECT MIN(Key) FROM ElementComparisons)",
+                _ => "UPDATE ElementOutcomes SET ExtensionProhibitionReason = ExtensionProhibitionReason || ' ' WHERE ExtensionProhibitionReason IS NOT NULL",
+            };
+            ExecuteOperandSql(other ?? fixture.Connection, statement);
+        };
+        Should.Throw<InvalidOperationException>(() =>
+        {
+            XVerExporter exporter = new(connection, config);
+            if (direct)
+            {
+                IgExporter ig = new(connection, NullLoggerFactory.Instance, config.OutputDirectory, fixture.SourceRoot, exporter, config);
+                IgExporter.XVerExportTrackingRecord tr = ig.PrepareXVerIgs(ig.BuildExportSchedule(specificPairs: [.. schedule.Select(pair => pair.SequencePair)]));
+                new StructureFhirExporter(exporter, connection, NullLoggerFactory.Instance).Export(tr);
+            }
+            else
+            {
+                exporter.Export(includeIgScripts: false, specificPairs: [.. schedule.Select(pair => pair.SequencePair)]);
+            }
+        });
+        mutated.ShouldBeTrue();
+        if (populated)
+        {
+            File.ReadAllBytes(sentinel).ShouldBe(bytes);
+            Directory.GetFiles(root, "*", SearchOption.AllDirectories).ShouldBe([sentinel]);
+        }
+        else
+        {
+            Directory.Exists(root).ShouldBeFalse();
+        }
+        Directory.Exists(Path.Combine(fixture.SourceRoot, "changed-after-build")).ShouldBeFalse();
+        connection.Statements.ShouldAllBe(sql => !sql.StartsWith("INSERT", StringComparison.OrdinalIgnoreCase) &&
+            !sql.StartsWith("UPDATE", StringComparison.OrdinalIgnoreCase) && !sql.StartsWith("CREATE", StringComparison.OrdinalIgnoreCase) &&
+            !sql.StartsWith("DROP", StringComparison.OrdinalIgnoreCase) && !sql.StartsWith("DELETE", StringComparison.OrdinalIgnoreCase));
+        connection.Subscriptions.ShouldBe(0);
+        retained.Completed = true;
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void LateScheduledFailurePreservesAllOutputSentinels(bool direct, bool populated)
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair[] schedule = PrepareExportPairs(fixture);
+        ConfigXVer config = ExportConfiguration(fixture);
+        string sentinel = Path.Combine(config.OutputDirectory, "hl7.fhir.uv.xver-r5.r4", "sentinel.txt");
+        if (populated)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(sentinel)!);
+            File.WriteAllText(sentinel, "byte-exact sentinel\r\n");
+        }
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        int builds = 0;
+        connection.BeforeExecute = sql =>
+        {
+            if (sql.StartsWith("SELECT", StringComparison.Ordinal) && sql.Contains("FROM Structures", StringComparison.Ordinal) &&
+                new StackTrace().GetFrames().Any(frame => frame.GetMethod()?.Name == "prepareDefinitions"))
+            {
+                if (++builds == 3)
+                {
+                    throw new InvalidOperationException("Injected later scheduled construction failure.");
+                }
+            }
+        };
+        XVerExporter exporter = new(connection, config);
+        Should.Throw<InvalidOperationException>(() =>
+        {
+            if (direct)
+            {
+                IgExporter ig = new(connection, NullLoggerFactory.Instance, config.OutputDirectory, fixture.SourceRoot, exporter, config);
+                IgExporter.XVerExportTrackingRecord tr = ig.PrepareXVerIgs(ig.BuildExportSchedule(specificPairs: [.. schedule.Select(pair => pair.SequencePair)]));
+                new StructureFhirExporter(exporter, connection, NullLoggerFactory.Instance).Export(tr);
+            }
+            else
+            {
+                exporter.Export(includeIgScripts: false, specificPairs: [.. schedule.Select(pair => pair.SequencePair)]);
+            }
+        }).Message.ShouldContain("later scheduled construction");
+        builds.ShouldBe(3);
+        if (populated)
+        {
+            File.ReadAllText(sentinel).ShouldBe("byte-exact sentinel\r\n");
+            Directory.GetFiles(config.OutputDirectory, "*", SearchOption.AllDirectories).ShouldBe([sentinel]);
+        }
+        else
+        {
+            Directory.Exists(config.OutputDirectory).ShouldBeFalse();
+        }
+        connection.Subscriptions.ShouldBe(0);
+        retained.Completed = true;
+    }
+
+    [Theory]
+    [InlineData("output", false)]
+    [InlineData("source", false)]
+    [InlineData("version", false)]
+    [InlineData("flags", false)]
+    [InlineData("packages", false)]
+    [InlineData("output", true)]
+    [InlineData("source", true)]
+    [InlineData("version", true)]
+    [InlineData("flags", true)]
+    public void InvocationAndBuildConfigurationChangesCannotCertifyAStaleSchedule(string mutation, bool duringBuild)
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair[] schedule = PrepareExportPairs(fixture);
+        ConfigXVer config = ExportConfiguration(fixture);
+        string originalOutput = config.OutputDirectory;
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        bool mutated = false;
+        connection.BeforeExecute = sql =>
+        {
+            if (mutated || !sql.StartsWith("SELECT", StringComparison.Ordinal))
+            {
+                return;
+            }
+            if (!new StackTrace().GetFrames().Any(frame => frame.GetMethod()?.Name ==
+                (duringBuild ? "prepareDefinitions" : "BuildExportSchedule")))
+            {
+                return;
+            }
+            mutated = true;
+            switch (mutation)
+            {
+                case "output": config.OutputDirectory = Path.Combine(fixture.SourceRoot, "changed-output"); break;
+                case "source": config.CrossVersionMapSourcePath = Path.Combine(fixture.SourceRoot, "changed-source"); break;
+                case "version": config.XverArtifactVersion = "changed-version"; break;
+                case "flags": config.ExportR4B = false; break;
+                default: ExecuteOperandSql(fixture.Connection, "UPDATE FhirPackages SET ShortName = ShortName || '-changed'"); break;
+            }
+        };
+        Should.Throw<InvalidOperationException>(() => new XVerExporter(connection, config).Export(includeIgScripts: false,
+            processVocabulary: false, specificPairs: [.. schedule.Select(pair => pair.SequencePair)]));
+        mutated.ShouldBeTrue();
+        Directory.Exists(originalOutput).ShouldBeFalse();
+        Directory.Exists(config.OutputDirectory).ShouldBeFalse();
+        connection.Subscriptions.ShouldBe(0);
+        retained.Completed = true;
+    }
+
+    [Fact]
+    public void FreshFinalVerificationDoesNotTrustAcceptedRawOutcomeImages()
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair[] schedule = PrepareExportPairs(fixture, negative: true);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection,
+            new(XVerPreparationKind.Export, processVocabulary: false));
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, schedule, operation);
+        DbElementOutcome negative = DbElementOutcome.SelectList(fixture.Connection,
+            SourceFhirPackageKey: schedule[0].SourcePackageKey, TargetFhirPackageKey: schedule[0].TargetPackageKey)
+            .First(row => row.ExtensionProhibitionReason is not null);
+        negative.ExtensionProhibitionReason = negative.ExtensionProhibitionReason!.Replace("source-only", "invented-proof", StringComparison.Ordinal);
+        operation.Evidence.ApplyOutcomeWrites(new(XVerOperandFamily.StructureOutcomes, XVerOutputTransitionKind.PairFlush,
+            schedule[0].SourcePackageKey, schedule[0].TargetPackageKey), [], [negative],
+            () => DbElementOutcome.Update(fixture.Connection, [negative]));
+        operation.Audit();
+        Should.Throw<InvalidOperationException>(() => UnsafeCodeInputStore.AuditExportReady(fixture.Connection, schedule, operation))
+            .Message.ShouldContain("decision");
+        retained.Completed = true;
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void EmptyAndVocabularyOnlyExportsDoNotAcquireStructureReadiness(bool vocabularyOnly, bool noFamilies)
+    {
+        using RetainedExportFixture retained = new(UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), output);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        DbComparisonClasses.CreateTables(fixture.Connection, forStructures: false);
+        DbOutcomeClasses.CreateTables(fixture.Connection, forStructures: false);
+        DbDefinitionInventoryState.DropTable(fixture.Connection);
+        if (vocabularyOnly || noFamilies)
+        {
+            DbStructureDefinitionFacts.DropTable(fixture.Connection);
+        }
+        DbUnsafeCodeInputState.DropTable(fixture.Connection);
+        DbUnsafeCodePairState.DropTable(fixture.Connection);
+        ConfigXVer config = ExportConfiguration(fixture);
+        using ObservedOperandConnection connection = new(fixture.Connection);
+        long changes = ReadOperandInteger(connection, "SELECT total_changes()");
+        long schema = ReadOperandInteger(connection, "PRAGMA schema_version");
+        new XVerExporter(connection, config).Export(includeIgScripts: false,
+            processVocabulary: vocabularyOnly || !noFamilies, processStructures: !vocabularyOnly && !noFamilies,
+            maxStepSize: vocabularyOnly ? 1 : 0);
+        ReadOperandInteger(connection, "SELECT total_changes()").ShouldBe(changes);
+        ReadOperandInteger(connection, "PRAGMA schema_version").ShouldBe(schema);
+        connection.Statements.ShouldAllBe(sql =>
+            (!(vocabularyOnly || noFamilies) || !sql.Contains("FROM StructureDefinitionFacts", StringComparison.Ordinal)) &&
+            !sql.Contains("FROM DefinitionInventoryState", StringComparison.Ordinal) && !sql.Contains("FROM UnsafeCode", StringComparison.Ordinal));
+        connection.Subscriptions.ShouldBe(0);
+        retained.Completed = true;
+    }
+
+    internal sealed class RetainedExportFixture(UnsafeCodeTestFixture fixture, ITestOutputHelper output) : IDisposable
+    {
+        internal UnsafeCodeTestFixture Fixture => fixture;
+        internal bool Completed { get; set; }
+
+        public void Dispose()
+        {
+            if (Completed)
+            {
+                fixture.Dispose();
+            }
+            else
+            {
+                output.WriteLine("Preserved failed export fixture: " + fixture.SourceRoot);
+                fixture.Connection.Dispose();
+            }
+        }
+    }
+
+    private static FhirPackageComparisonPair[] PrepareExportPairs(UnsafeCodeTestFixture fixture, bool negative = false, bool includeDatatypes = false)
+    {
+        List<FhirPackageComparisonPair> pairs = [];
+        if (negative)
+        {
+            fixture.ConfigureDefinition(fixture.Structure(fixture.Packages[2], "Quantity"), definition =>
+                definition.Snapshot.Element[0].Constraint.Add(new()
+                {
+                    Key = "source-only", Severity = ConstraintSeverity.Error,
+                    Expression = "code.empty() or code = 'source-only'", Human = "An exact source-only restriction.",
+                }));
+        }
+        for (int targetIndex = 0; targetIndex < 2; targetIndex++)
+        {
+            FhirPackageComparisonPair pair = fixture.PreparePair(2, targetIndex);
+            DbStructureOutcome outcome = fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+            DbElement source = DbElement.SelectSingle(fixture.Connection, StructureKey: outcome.SourceStructureKey, Id: "ValueSet.status")
+                ?? fixture.AddTypedElement(fixture.Structure(pair.SourcePackage), "ValueSet.status", "code");
+            DbElement target = fixture.AddTypedElement(fixture.Structure(pair.TargetPackage), "ValueSet.status", "code");
+            fixture.Connect(pair, outcome, source, target);
+            if (includeDatatypes)
+            {
+                fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage, "Quantity"), fixture.Structure(pair.TargetPackage, "Quantity"));
+            }
+            pairs.Add(pair);
+        }
+        fixture.CompleteAuthoredArrangement(pairs[^1]);
+        DbOutcomeClasses.CreateTables(fixture.Connection, forStructures: false);
+        DbOutcomeClasses.LoadIndices(fixture.Connection);
+        foreach (FhirPackageComparisonPair pair in pairs)
+        {
+            fixture.StampComparison(pair);
+            fixture.GenerateSafety(pair);
+        }
+        return [.. pairs];
+    }
+
+    private static ConfigXVer ExportConfiguration(UnsafeCodeTestFixture fixture) => new()
+    {
+        OutputDirectory = Path.Combine(fixture.SourceRoot, "export"), CrossVersionMapSourcePath = fixture.SourceRoot,
+        XverArtifactVersion = "0.1.0-test", ExportR2 = false, ExportR3 = false, ExportR4 = true, ExportR4B = true, ExportR5 = false, ExportR6 = false,
+    };
+
+    private static IgExporter.XVerIgExportTrackingRecord ExportTracking(FhirPackageComparisonPair pair) => new()
+    {
+        PackagePair = pair, PackageId = "hl7.fhir.uv.xver-r5." + pair.TargetFhirSequence.ToRLiteral().ToLowerInvariant(),
+    };
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
@@ -610,7 +1306,9 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         // The sole prepared entry validates the captured image once. No consumer
         // may call that validator again or acquire a live catalog.
         CountCalls(typeof(XVerPreparedOperation).GetMethod("Prepare", System.Reflection.BindingFlags.NonPublic |
-            System.Reflection.BindingFlags.Static)!, typeof(DefinitionInventoryStore), "RequireReady").ShouldBe(1);
+            System.Reflection.BindingFlags.Static)!, typeof(XVerPreparedOperation), "InitializeCatalog").ShouldBe(1);
+        CountCalls(typeof(XVerPreparedOperation).GetMethod("InitializeCatalog", System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Instance)!, typeof(DefinitionInventoryStore), "RequireReady").ShouldBe(1);
         DbUnsafeCodePairState.SelectList(fixture.Connection).Count(pair => pair.ComparisonRevision != null).ShouldBe(4);
         connection.Subscriptions.ShouldBe(0);
     }
@@ -1067,7 +1765,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         int count = 0;
         for (int index = 0; index < code.Length - 4; index++)
         {
-            if (code[index] != 0x28)
+            if (code[index] is not (0x28 or 0x6f))
             {
                 continue;
             }
@@ -1359,43 +2057,59 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
             PackagePair = pair, PackageId = "hl7.fhir.uv.xver-r5.r4",
         };
         StructureFhirExporter.BuiltDefinitions built = builder.BuildDefinitions(Tracking());
-        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
-        XVerStructureCatalog representationCatalog = PrivateField<XVerStructureCatalog>(built.Representations, "_catalog");
-        AssertNoPayloads(representationCatalog);
+        AssertReleasedBuilder(builder);
+        AssertReleasedIndex(built.Representations);
         UnsafeCodePathStep[] path = [new("ValueSet", null, false), new(source.Id, null, false)];
         built.Representations.Resolve(owner.Key, path).ShouldNotBeEmpty();
-        AssertNoPayloads(representationCatalog);
+        AssertReleasedIndex(built.Representations);
         built.Representations.ResolveSafety(owner.Key, [.. path]);
-        AssertNoPayloads(representationCatalog);
+        AssertReleasedIndex(built.Representations);
         built.Representations.Occurrences(owner.Key).Take(1).ToArray().ShouldNotBeEmpty();
-        AssertNoPayloads(representationCatalog);
+        AssertReleasedIndex(built.Representations);
         StructureFhirExporter.BuiltDefinitions next = builder.BuildDefinitions(Tracking());
         next.Representations.ShouldNotBeSameAs(built.Representations);
-        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
+        AssertReleasedBuilder(builder);
         built.Representations.Resolve(owner.Key, path).ShouldNotBeEmpty();
-        AssertNoPayloads(representationCatalog);
+        AssertReleasedIndex(built.Representations);
 
         DbStructureDefinitionFacts facts = DbStructureDefinitionFacts.SelectSingle(fixture.Connection, StructureKey: owner.SourceStructureKey)!;
         string original = facts.StructureDefinitionJson;
         facts.StructureDefinitionJson = "{}";
         DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
         Should.Throw<InvalidOperationException>(() => builder.BuildDefinitions(Tracking()));
-        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
+        AssertReleasedBuilder(builder);
+        built.Representations.Occurrences(owner.Key).ToArray().ShouldNotBeEmpty();
+        AssertReleasedIndex(built.Representations);
         facts.StructureDefinitionJson = original;
         DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
         builder.BuildExtensions(Tracking());
-        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
+        AssertReleasedBuilder(builder);
         builder.BuildProfiles(Tracking());
-        AssertNoPayloads(PrivateField<XVerStructureCatalog>(builder, "_catalog"));
-
-        DbStructureDefinitionFacts captured = PrivateField<Dictionary<int, DbStructureDefinitionFacts>>(representationCatalog, "_facts")[owner.SourceStructureKey];
-        string capturedJson = captured.StructureDefinitionJson;
-        captured.StructureDefinitionJson = "{}";
-        Should.Throw<InvalidOperationException>(() => built.Representations.Occurrences(owner.Key).ToArray());
-        AssertNoPayloads(representationCatalog);
-        captured.StructureDefinitionJson = capturedJson;
+        AssertReleasedBuilder(builder);
+        XVerOperandEvidence.ConstructionRows rows = PrivateField<XVerOperandEvidence.ConstructionRows>(built.Representations, "_rows");
+        using XVerOperandEvidence reader = rows.OpenReader();
+        Should.Throw<InvalidOperationException>(reader.Audit).Message.ShouldContain("not a live readiness capability");
         built.Representations.Resolve(owner.Key, path).ShouldNotBeEmpty();
-        AssertNoPayloads(representationCatalog);
+        AssertReleasedIndex(built.Representations);
+    }
+
+    private static void AssertReleasedBuilder(StructureFhirExporter builder)
+    {
+        PrivateField<XVerStructureCatalog?>(builder, "_catalog").ShouldBeNull();
+        PrivateField<XVerPreparedOperation?>(builder, "_operation").ShouldBeNull();
+        PrivateField<ProfileRepresentationIndex?>(builder, "_representations").ShouldBeNull();
+        foreach (string field in new[] { "_profileDecisions", "_extensionValueTypes", "_extensionValueTypeNames",
+            "_canonicalTargetElements", "_canonicalTargetResourceNames", "_resourceReferenceLookup" })
+        {
+            PrivateField<System.Collections.IDictionary>(builder, field).Count.ShouldBe(0);
+        }
+    }
+
+    private static void AssertReleasedIndex(ProfileRepresentationIndex index)
+    {
+        PrivateField<XVerStructureCatalog?>(index, "_catalog").ShouldBeNull();
+        PrivateField<ProfileUseFacts?>(index, "_profileFacts").ShouldBeNull();
+        PrivateField<XVerOperandEvidence?>(index, "_queryReader").ShouldBeNull();
     }
 
     [Fact]

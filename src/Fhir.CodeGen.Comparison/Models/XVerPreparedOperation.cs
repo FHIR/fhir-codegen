@@ -12,6 +12,7 @@ namespace Fhir.CodeGen.Comparison.Models;
 
 internal sealed record XVerOperationOptions
 {
+    private readonly ConfigXVer? _configuration;
     internal XVerOperationOptions(
         XVerPreparationKind kind,
         IEnumerable<string>? exclusions = null,
@@ -20,9 +21,11 @@ internal sealed record XVerOperationOptions
         IEnumerable<(FhirReleases.FhirSequenceCodes Source, FhirReleases.FhirSequenceCodes Target)>? specificPairs = null,
         bool processVocabulary = true,
         bool includeIgScripts = true,
-        ConfigXVer? configuration = null)
+        ConfigXVer? configuration = null,
+        bool includeStructurePages = false)
     {
         Kind = kind;
+        _configuration = kind is XVerPreparationKind.Export or XVerPreparationKind.ExportContent or XVerPreparationKind.Construction ? configuration : null;
         Exclusions = (exclusions ?? []).ToImmutableHashSet(StringComparer.Ordinal);
         EscapeValveCodes = XVer.XVerProcessor._escapeValveCodes.ToImmutableHashSet(StringComparer.Ordinal);
         ElementTableName = elementTableName ?? DbElement.DefaultTableName;
@@ -34,6 +37,7 @@ internal sealed record XVerOperationOptions
         SpecificPairs = specificPairs?.ToImmutableHashSet();
         ProcessVocabulary = processVocabulary;
         IncludeIgScripts = includeIgScripts;
+        IncludeStructurePages = includeStructurePages;
         Construction = configuration is null ? null : new(
             configuration.OutputDirectory, configuration.CrossVersionMapSourcePath, configuration.XverArtifactVersion,
             configuration.ExportR2, configuration.ExportR3, configuration.ExportR4, configuration.ExportR4B,
@@ -48,7 +52,16 @@ internal sealed record XVerOperationOptions
     internal ImmutableHashSet<(FhirReleases.FhirSequenceCodes Source, FhirReleases.FhirSequenceCodes Target)>? SpecificPairs { get; }
     internal bool ProcessVocabulary { get; }
     internal bool IncludeIgScripts { get; }
+    internal bool IncludeStructurePages { get; }
     internal XVerConstructionConfiguration? Construction { get; }
+
+    internal void AuditConfiguration()
+    {
+        if (_configuration is not null && Construction != XVerConstructionConfiguration.Capture(_configuration))
+        {
+            throw new InvalidOperationException("Export configuration changed during preparation; enter a fresh invocation.");
+        }
+    }
 }
 
 internal sealed record XVerConstructionConfiguration(
@@ -60,7 +73,13 @@ internal sealed record XVerConstructionConfiguration(
     bool ExportR4,
     bool ExportR4B,
     bool ExportR5,
-    bool ExportR6);
+    bool ExportR6)
+{
+    internal static XVerConstructionConfiguration Capture(ConfigXVer configuration) => new(
+        configuration.OutputDirectory, configuration.CrossVersionMapSourcePath, configuration.XverArtifactVersion,
+        configuration.ExportR2, configuration.ExportR3, configuration.ExportR4, configuration.ExportR4B,
+        configuration.ExportR5, configuration.ExportR6);
+}
 
 internal enum XVerProfileInterpretation
 {
@@ -300,15 +319,17 @@ internal sealed class XVerProfileWorkPacket : IDisposable
 
 internal sealed class XVerPreparedOperation : IDisposable
 {
-    private readonly XVerOperandEvidence _evidence;
+    private XVerOperandEvidence _evidence;
     private readonly IDbConnection _connection;
     private readonly Dictionary<(int Source, int Target, XVerProfileContext Context), XVerProfileWorkPacket> _packets = [];
     private readonly Dictionary<(int Source, int Target), XVerDirectionalOperands> _directionalOperands = [];
     private readonly Dictionary<(int Source, int Target), ImmutableArray<ProfileRepresentationProof>> _outcomeProducts = [];
+    private readonly Dictionary<(int Source, int Target), ImmutableArray<ProfileRepresentationProof>> _exportProducts = [];
     private ImmutableArray<FhirPackageComparisonPair> _outcomeSchedule;
     private XVerStructureCatalog? _catalog;
     private string? _inventoryRevision;
     private bool _disposed;
+    private bool _exportCaptured;
 
     private XVerPreparedOperation(XVerOperandEvidence evidence, IDbConnection connection)
     {
@@ -330,7 +351,7 @@ internal sealed class XVerPreparedOperation : IDisposable
         get
         {
             RequireActive();
-            return _catalog!;
+            return _catalog ?? throw new InvalidOperationException("This operation has no structure catalog operands.");
         }
     }
 
@@ -348,27 +369,67 @@ internal sealed class XVerPreparedOperation : IDisposable
         XVerPreparedOperation operation = new(XVerOperandEvidence.Capture(connection, options), connection);
         try
         {
-            operation._catalog = new(operation._evidence);
-            if (options.Kind is XVerPreparationKind.Comparison or XVerPreparationKind.Outcomes or XVerPreparationKind.Export)
-            {
-                DefinitionInventoryStore.ValidatedInventory state = DefinitionInventoryStore.RequireReady(operation._evidence, operation._catalog);
-                operation._inventoryRevision = state.Revision;
-                List<DbUnsafeCodeInputState> inputs = operation._evidence.Rows<DbUnsafeCodeInputState>(DbUnsafeCodeInputState.DefaultTableName);
-                if (inputs.Count != 1 || inputs[0].Key != 1 ||
-                    inputs[0].FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
-                    string.IsNullOrEmpty(inputs[0].CompletedInputRevision))
-                {
-                    throw new InvalidOperationException("Unsafe-code inputs are missing, incomplete, or incompatible. Reload cross-version maps, rerun structure comparisons, and regenerate outcomes.");
-                }
-                DefinitionInventoryStore.RequireMapBinding(state, inputs[0].SnapshotId);
-                operation._catalog.SelectCapturedElementView();
-            }
+            operation.InitializeCatalog();
             operation.Audit();
             return operation;
         }
         catch
         {
             operation.Dispose();
+            throw;
+        }
+    }
+
+    private void InitializeCatalog()
+    {
+        XVerOperationOptions options = _evidence.Options;
+        if (options.Kind != XVerPreparationKind.ExportContent || options.IncludeStructurePages)
+        {
+            _catalog = new(_evidence);
+        }
+        if (options.Kind is XVerPreparationKind.Comparison or XVerPreparationKind.Outcomes or XVerPreparationKind.Export)
+        {
+            DefinitionInventoryStore.ValidatedInventory state = DefinitionInventoryStore.RequireReady(_evidence, _catalog!);
+            _inventoryRevision = state.Revision;
+            List<DbUnsafeCodeInputState> inputs = _evidence.Rows<DbUnsafeCodeInputState>(DbUnsafeCodeInputState.DefaultTableName);
+            if (inputs.Count != 1 || inputs[0].Key != 1 ||
+                inputs[0].FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
+                string.IsNullOrEmpty(inputs[0].CompletedInputRevision))
+            {
+                throw new InvalidOperationException("Unsafe-code inputs are missing, incomplete, or incompatible. Reload cross-version maps, rerun structure comparisons, and regenerate outcomes.");
+            }
+            DefinitionInventoryStore.RequireMapBinding(state, inputs[0].SnapshotId);
+            _catalog!.SelectCapturedElementView();
+        }
+    }
+
+    internal void CaptureExportOperands(XVerOperationOptions options)
+    {
+        XVerOperandEvidence? expanded = null;
+        try
+        {
+            Audit();
+            if (_exportCaptured || _catalog is not null || _evidence.Options.Kind != XVerPreparationKind.ExportContent ||
+                _evidence.Options.ProcessVocabulary ||
+                options.Kind is not (XVerPreparationKind.Export or XVerPreparationKind.ExportContent))
+            {
+                throw new InvalidOperationException("Only a fresh write-free export schedule can acquire construction operands.");
+            }
+            _exportCaptured = true;
+            expanded = XVerOperandEvidence.Capture(_connection, options);
+            // The scheduler's original package image must still be exact. This
+            // acquires new dependencies, never refreshes its scheduling operands.
+            Audit();
+            _evidence.Dispose();
+            _evidence = expanded;
+            expanded = null;
+            InitializeCatalog();
+            Audit();
+        }
+        catch
+        {
+            expanded?.Dispose();
+            Dispose();
             throw;
         }
     }
@@ -444,6 +505,45 @@ internal sealed class XVerPreparedOperation : IDisposable
 
     internal XVerProfileWorkPacket GetComparisonPacket(int sourcePackageKey, int targetPackageKey) =>
         GetPacket(XVerDirectionalOperands.WithoutCorrespondence(_evidence, sourcePackageKey, targetPackageKey), XVerProfileContext.Comparison);
+
+    internal void PrepareExport(IEnumerable<FhirPackageComparisonPair> schedule)
+    {
+        try
+        {
+            foreach (FhirPackageComparisonPair pair in schedule)
+            {
+                (int, int) key = (pair.SourcePackageKey, pair.TargetPackageKey);
+                if (!_exportProducts.ContainsKey(key))
+                {
+                    XVerDirectionalProduct forward = Direction(key.Item1, key.Item2);
+                    XVerDirectionalProduct reverse = Direction(key.Item2, key.Item1);
+                    _exportProducts.Add(key, ComposePair(forward, reverse));
+                }
+            }
+            Audit();
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+
+        XVerDirectionalProduct Direction(int source, int target)
+        {
+            XVerProfileWorkPacket packet = GetPacket(CaptureDirection(source, target), XVerProfileContext.Classification);
+            XVerDirectionalProduct product = packet.Classify();
+            packet.ReleaseWorkingFacts();
+            Catalog.ReleasePayloads();
+            return product;
+        }
+    }
+
+    internal ImmutableArray<ProfileRepresentationProof> ExportDecisions(int source, int target)
+    {
+        RequireActive();
+        return _exportProducts.TryGetValue((source, target), out ImmutableArray<ProfileRepresentationProof> decisions)
+            ? decisions : throw new InvalidOperationException("Construction requires its exact prepared export product.");
+    }
 
     internal ImmutableArray<FhirPackageComparisonPair> PrepareOutcomes(
         IEnumerable<FhirPackageComparisonPair>? schedule = null)
@@ -631,6 +731,7 @@ internal sealed class XVerPreparedOperation : IDisposable
         _packets.Clear();
         _directionalOperands.Clear();
         _outcomeProducts.Clear();
+        _exportProducts.Clear();
         _outcomeSchedule = default;
         _catalog?.Dispose();
         _catalog = null;

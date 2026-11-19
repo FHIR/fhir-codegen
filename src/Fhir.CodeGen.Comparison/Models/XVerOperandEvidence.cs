@@ -21,6 +21,7 @@ internal enum XVerPreparationKind
     Comparison,
     Outcomes,
     Export,
+    ExportContent,
 }
 
 internal enum XVerOperandFamily
@@ -76,6 +77,7 @@ internal sealed class XVerOperandEvidence : IDisposable
     private bool _invalidated;
     private bool _subscribed;
     private long _schemaVersion;
+    private readonly bool _detached;
 
     private XVerOperandEvidence(DbConnection connection, XVerOperationOptions options)
     {
@@ -84,6 +86,42 @@ internal sealed class XVerOperandEvidence : IDisposable
         _requirements = Requirements(options);
         _connection.StateChange += ConnectionStateChanged;
         _subscribed = true;
+    }
+
+    private XVerOperandEvidence(XVerOperationOptions options, IReadOnlyDictionary<string, IXVerTableImage> images)
+    {
+        _connection = null!;
+        _options = options;
+        _requirements = [];
+        _detached = true;
+        foreach ((string table, IXVerTableImage image) in images)
+        {
+            _images.Add(table, image);
+        }
+    }
+
+    // Returned representation information owns only immutable row values. A query
+    // reader cannot audit, certify readiness, or keep the live operation subscribed.
+    internal sealed class ConstructionRows
+    {
+        private readonly XVerOperationOptions _options;
+        private readonly IReadOnlyDictionary<string, IXVerTableImage> _images;
+
+        internal ConstructionRows(XVerOperationOptions options, IReadOnlyDictionary<string, IXVerTableImage> images)
+        {
+            _options = options;
+            _images = images;
+        }
+
+        internal XVerOperandEvidence OpenReader() => new(_options, _images);
+    }
+
+    internal ConstructionRows CopyConstructionRows()
+    {
+        RequireActive();
+        XVerOperationOptions options = new(XVerPreparationKind.Construction, _options.Exclusions, _options.ElementTableName);
+        return new(options, Requirements(options).ToDictionary(requirement => requirement.TableName,
+            requirement => _images.GetValueOrDefault(requirement.TableName) ?? new MissingTable(), StringComparer.Ordinal));
     }
 
     internal XVerOperationOptions Options
@@ -127,6 +165,11 @@ internal sealed class XVerOperandEvidence : IDisposable
         try
         {
             RequireActive();
+            if (_detached)
+            {
+                throw new InvalidOperationException("Returned construction rows are not a live readiness capability.");
+            }
+            _options.AuditConfiguration();
             Observation before = Observe();
             foreach (XVerTableRequirement requirement in _requirements)
             {
@@ -495,7 +538,7 @@ internal sealed class XVerOperandEvidence : IDisposable
     internal void RequireActive()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_invalidated || _connection.State != ConnectionState.Open)
+        if (_invalidated || !_detached && _connection.State != ConnectionState.Open)
         {
             throw new InvalidOperationException("Prepared operands were invalidated by a physical connection state change; enter a fresh operation.");
         }
@@ -626,6 +669,16 @@ internal sealed class XVerOperandEvidence : IDisposable
             bool core = table.RowType == typeof(DbFhirPackage) || table.RowType == typeof(DbStructureDefinition) ||
                 table.RowType == typeof(DbStructureDefinitionFacts) || table.RowType == typeof(DbElement) ||
                 table.RowType == typeof(DbElementType);
+            if (options.Kind == XVerPreparationKind.ExportContent)
+            {
+                if (table.RowType == typeof(DbFhirPackage) || options.IncludeStructurePages && core || options.ProcessVocabulary &&
+                    (table.Family is XVerOperandFamily.Vocabulary or XVerOperandFamily.VocabularyComparisons or XVerOperandFamily.VocabularyOutcomes ||
+                        table.RowType == typeof(DbElement) || table.RowType == typeof(DbExternalInclusion)))
+                {
+                    requirements.Add(new(table, table.TableName, table.RowType == typeof(DbFhirPackage) || options.IncludeStructurePages && core));
+                }
+                continue;
+            }
             bool include = pipeline || core || IsNarrowDependency(options.Kind, table.RowType);
             if (!include)
             {
@@ -678,6 +731,7 @@ internal sealed class XVerOperandEvidence : IDisposable
                 rowType == typeof(DbElementTypeComparison) || rowType == typeof(DbElementOutcome) ||
                 rowType == typeof(DbElementOutcomeTarget),
             XVerPreparationKind.Construction =>
+                rowType == typeof(DbUnsafeCodePairState) ||
                 rowType == typeof(DbElementComparison) || rowType == typeof(DbElementTypeComparison) ||
                 rowType == typeof(DbStructureComparison) || rowType == typeof(DbValueSetConcept) ||
                 rowType == typeof(DbStructureOutcome) || rowType == typeof(DbElementOutcome) ||

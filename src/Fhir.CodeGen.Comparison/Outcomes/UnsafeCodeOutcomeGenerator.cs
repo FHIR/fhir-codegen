@@ -17,8 +17,14 @@ namespace Fhir.CodeGen.Comparison.Outcomes;
 internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
 {
     internal void ValidateAnnotationProvenance(FhirPackageComparisonPair pair, IReadOnlyList<DbUnsafeCodeTrigger> triggers)
+        => ValidateAnnotationProvenance(pair, triggers, null);
+
+    internal void ValidateAnnotationProvenance(FhirPackageComparisonPair pair, IReadOnlyList<DbUnsafeCodeTrigger> triggers,
+        XVerPreparedOperation? operation)
     {
-        using PairFacts facts = new(db, pair);
+        operation?.RequireConnection(db);
+        operation?.Audit();
+        using PairFacts facts = new(db, pair, operation);
         facts.ValidateAnnotationProvenance(triggers);
     }
 

@@ -48,8 +48,8 @@ public class StructureFhirExporter
     private readonly IDbConnection _db;
     private ProfileRepresentationIndex? _representations;
     private XVerIgExportTrackingRecord? _representationTracking;
-    private XVerStructureCatalog _catalog;
-    private int _constructionDepth;
+    private XVerStructureCatalog _catalog = null!;
+    private XVerPreparedOperation? _operation;
     private readonly Dictionary<(int Source, int Target), IReadOnlyList<ProfileRepresentationProof>> _profileDecisions = [];
     private DbStructureOutcome? _profileOutcome;
     private DbElementOutcome? _profileElement;
@@ -171,23 +171,39 @@ public class StructureFhirExporter
         _db = db;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<StructureFhirExporter>();
-        _catalog = new(db, XVer.XVerProcessor._exclusionSet);
     }
 
     public void Export(XVerExportTrackingRecord tr)
     {
+        _exporter.RefreshConfiguration();
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
+            new(XVerPreparationKind.Construction, XVer.XVerProcessor._exclusionSet, configuration: _exporter.Configuration));
+        operation.PrepareExport(tr.XVerIgs.Select(tracking => tracking.PackagePair));
         List<(XVerIgExportTrackingRecord Tracking, BuiltDefinitions Definitions)> plans = [];
         foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
         {
-            plans.Add((igTr, BuildDefinitions(igTr)));
+            plans.Add((igTr, BuildDefinitions(igTr, operation)));
         }
+        operation.Audit();
+        foreach (XVerIgExportTrackingRecord tracking in tr.XVerIgs)
+        {
+            ProfileUseFacts.RequirePersistedDecisions(_db, tracking.PackagePair,
+                operation.ExportDecisions(tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey), operation.Catalog);
+        }
+        operation.Audit();
         foreach ((XVerIgExportTrackingRecord tracking, BuiltDefinitions definitions) in plans)
         {
-            Emit(tracking, definitions);
+            Emit(tracking, definitions, operation);
         }
     }
 
-    internal void Emit(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions)
+    internal void Emit(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions) =>
+        BuildIndependent(igTr, () => EmitCore(igTr, definitions));
+
+    internal void Emit(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions, XVerPreparedOperation operation) =>
+        InConstructionScope(operation, () => EmitCore(igTr, definitions));
+
+    private bool EmitCore(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions)
     {
         try
         {
@@ -197,67 +213,89 @@ public class StructureFhirExporter
             exportResourceMaps(igTr);
             exportTypeMaps(igTr);
             exportElementMaps(igTr);
+            return true;
         }
         finally
         {
-            _catalog.ReleasePayloads();
             definitions.Representations.ReleasePayloads();
             _profileDecisions.Clear();
         }
     }
 
-    private T InConstructionScope<T>(Func<T> build)
+    private T BuildIndependent<T>(XVerIgExportTrackingRecord tracking, Func<T> build)
     {
-        bool ownsScope = _constructionDepth++ == 0;
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
+            new(XVerPreparationKind.Construction, XVer.XVerProcessor._exclusionSet, configuration: _exporter.Configuration));
+        operation.PrepareExport([tracking.PackagePair]);
+        return InConstructionScope(operation, build);
+    }
+
+    private T InConstructionScope<T>(XVerPreparedOperation operation, Func<T> build)
+    {
+        if (_operation is not null)
+        {
+            throw new InvalidOperationException("Construction nesting must use the current explicit scope.");
+        }
+        operation.RequireConnection(_db);
+        operation.Audit();
+        _operation = operation;
         try
         {
-            if (ownsScope)
+            _catalog = operation.Catalog;
+            _representations = null;
+            _representationTracking = null;
+            _profileDecisions.Clear();
+            _extensionValueTypes.Clear();
+            _extensionValueTypeNames.Clear();
+            _canonicalTargetElements.Clear();
+            _canonicalTargetResourceNames.Clear();
+            _resourceReferenceLookup.Clear();
+            T result = build();
+            operation.Audit();
+            return result;
+        }
+        finally
+        {
+            try
             {
-                _catalog.Dispose();
-                _catalog = new(_db, XVer.XVerProcessor._exclusionSet);
+                _representations?.ReleasePayloads();
+            }
+            finally
+            {
+                if (_representationTracking is XVerIgExportTrackingRecord tracking)
+                {
+                    operation.ReleasePairWorkingFacts(tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey);
+                }
+                _catalog = null!;
+                _operation = null;
                 _representations = null;
-                _representationTracking = null;
                 _profileDecisions.Clear();
+                _representationTracking = null;
+                _profileOutcome = null;
+                _profileElement = null;
                 _extensionValueTypes.Clear();
                 _extensionValueTypeNames.Clear();
                 _canonicalTargetElements.Clear();
                 _canonicalTargetResourceNames.Clear();
                 _resourceReferenceLookup.Clear();
             }
-            return build();
-        }
-        finally
-        {
-            _constructionDepth--;
-            if (ownsScope)
-            {
-                try
-                {
-                    _representations?.ReleasePayloads();
-                }
-                finally
-                {
-                    _catalog.ReleasePayloads();
-                    _profileDecisions.Clear();
-                    _representationTracking = null;
-                    _profileOutcome = null;
-                    _profileElement = null;
-                }
-            }
         }
     }
 
     internal BuiltDefinitions BuildDefinitions(XVerIgExportTrackingRecord igTr) =>
-        InConstructionScope(() => BuildDefinitionsCore(igTr));
+        BuildIndependent(igTr, () => BuildDefinitionsCore(igTr));
+
+    internal BuiltDefinitions BuildDefinitions(XVerIgExportTrackingRecord igTr, XVerPreparedOperation operation) =>
+        InConstructionScope(operation, () => BuildDefinitionsCore(igTr));
 
     private BuiltDefinitions BuildDefinitionsCore(XVerIgExportTrackingRecord igTr)
     {
         prepareDefinitions(igTr);
-        BuiltDefinitionSet extensions = BuildExtensions(igTr);
-        BuiltDefinitionSet profiles = BuildProfiles(igTr);
+        BuiltDefinitionSet extensions = BuildExtensionsCore(igTr);
+        BuiltDefinitionSet profiles = BuildProfilesCore(igTr);
         return new(extensions.Definitions, profiles.Definitions, profiles.Representations)
         {
-            ProfileDecisions = [.. _profileDecisions[(igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey)]],
+            ProfileDecisions = _operation!.ExportDecisions(igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey),
         };
     }
 
@@ -266,7 +304,7 @@ public class StructureFhirExporter
         (int, int) pairKey = (igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey);
         if (!_profileDecisions.ContainsKey(pairKey))
         {
-            _profileDecisions.Add(pairKey, ProfileUseFacts.ClassifyPair(_db, igTr.PackagePair));
+            _profileDecisions.Add(pairKey, _operation!.ExportDecisions(pairKey.Item1, pairKey.Item2));
         }
         if (!_extensionValueTypes.ContainsKey(igTr.PackagePair.TargetFhirSequence))
         {
@@ -1403,14 +1441,17 @@ public class StructureFhirExporter
     }
 
     internal BuiltDefinitionSet BuildProfiles(XVerIgExportTrackingRecord igTr) =>
-        InConstructionScope(() => BuildProfilesCore(igTr));
+        BuildIndependent(igTr, () => BuildProfilesCore(igTr));
+
+    internal BuiltDefinitionSet BuildProfiles(XVerIgExportTrackingRecord igTr, XVerPreparedOperation operation) =>
+        InConstructionScope(operation, () => BuildProfilesCore(igTr));
 
     private BuiltDefinitionSet BuildProfilesCore(XVerIgExportTrackingRecord igTr)
     {
         prepareDefinitions(igTr);
         if (_representationTracking != igTr)
         {
-            BuildExtensions(igTr);
+            BuildExtensionsCore(igTr);
         }
 
         List<BuiltDefinition> definitions = [];
@@ -1486,7 +1527,7 @@ public class StructureFhirExporter
 
         UnsafeCodeConstraintEmitter.Attach(
             definitions, Representations,
-            UnsafeCodeInputStore.ReadConstraintPlans(_db, igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey),
+            UnsafeCodeInputStore.ReadConstraintPlans(_db, igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey, _operation),
             $"{igTr.PackagePair.SourceFhirSequence.ToRLiteral()}->{igTr.PackagePair.TargetFhirSequence.ToRLiteral()}");
         return new(definitions.AsReadOnly(), Representations);
     }
@@ -1506,9 +1547,9 @@ public class StructureFhirExporter
         {
             return projected;
         }
-        using ProfileUseFacts facts = new(_catalog, tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey,
-            DbElementComparison.SelectList(_db, SourceFhirPackageKey: tracking.PackagePair.SourcePackageKey,
-                TargetFhirPackageKey: tracking.PackagePair.TargetPackageKey));
+        ProfileUseFacts facts = _operation!.GetPacket(
+            _operation.CaptureDirection(tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey),
+            XVerProfileContext.ForOwner(targetOwner.Key, outcome.Key, [targetOwner.Key])).Facts;
         List<ProfileRepresentationProof> contexts = [];
         foreach (ProfileRepresentationProof decision in decisions)
         {
@@ -2651,14 +2692,17 @@ public class StructureFhirExporter
     }
 
     internal BuiltDefinitionSet BuildExtensions(XVerIgExportTrackingRecord igTr) =>
-        InConstructionScope(() => BuildExtensionsCore(igTr));
+        BuildIndependent(igTr, () => BuildExtensionsCore(igTr));
+
+    internal BuiltDefinitionSet BuildExtensions(XVerIgExportTrackingRecord igTr, XVerPreparedOperation operation) =>
+        InConstructionScope(operation, () => BuildExtensionsCore(igTr));
 
     private BuiltDefinitionSet BuildExtensionsCore(XVerIgExportTrackingRecord igTr)
     {
         prepareDefinitions(igTr);
         _representations?.ReleasePayloads();
-        _representations = new(_db, igTr.PackagePair);
-        _representations.BeginConstruction();
+        _representations = new(_db, igTr.PackagePair, _operation);
+        _representations.BeginConstruction(_operation!);
         _representationTracking = igTr;
         List<BuiltDefinition> definitions = [];
 
@@ -3842,7 +3886,7 @@ public class StructureFhirExporter
                 bool constrained = et.TypeProfile is not null || et.TargetProfile is not null || _catalog.IsQuantityFamily(sourceType);
                 if (constrained)
                 {
-                    using ProfileUseFacts facts = new(_catalog, igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey);
+                    ProfileUseFacts facts = _operation!.GetComparisonPacket(igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey).Facts;
                     DbElement input = sourceElements[et.ElementKey];
                     EffectiveProfileUse use = facts.AtUse(input, et);
                     foreach (EffectiveProfileBranch branch in use.Branches.Where(branch =>
@@ -4011,7 +4055,7 @@ public class StructureFhirExporter
                 {
                     throw new InvalidOperationException($"Missing exact target profile for required reference {v}; no base fallback is permitted.");
                 }
-                using ProfileUseFacts facts = new(_catalog, tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey);
+                ProfileUseFacts facts = _operation!.GetComparisonPacket(tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey).Facts;
                 ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), counterpart);
                 if (!proof.PreservesRestrictions)
                 {

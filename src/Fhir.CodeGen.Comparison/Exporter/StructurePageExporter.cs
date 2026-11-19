@@ -31,7 +31,7 @@ public class StructurePageExporter
 {
     private readonly XVerExporter _exporter;
     private readonly IDbConnection _db;
-    private readonly XVerStructureCatalog _catalog;
+    private XVerStructureCatalog? _catalog;
 
     private ILoggerFactory _loggerFactory;
     private ILogger _logger;
@@ -94,12 +94,51 @@ public class StructurePageExporter
     {
         _exporter = exporter;
         _db = db;
-        _catalog = new(db, XVer.XVerProcessor._exclusionSet);
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<StructurePageExporter>();
     }
 
+    internal StructurePageExporter(
+        XVerExporter exporter,
+        IDbConnection db,
+        ILoggerFactory loggerFactory,
+        XVerPreparedOperation operation)
+        : this(exporter, db, loggerFactory)
+    {
+        operation.RequireConnection(db);
+        _ = operation.Catalog;
+    }
+
     public void Export(XVerExportTrackingRecord tr)
+    {
+        using XVerStructureCatalog catalog = new(_db, XVer.XVerProcessor._exclusionSet);
+        Export(tr, catalog);
+    }
+
+    internal void Export(XVerExportTrackingRecord tr, XVerPreparedOperation operation)
+    {
+        operation.RequireConnection(_db);
+        Export(tr, operation.Catalog);
+    }
+
+    private void Export(XVerExportTrackingRecord tr, XVerStructureCatalog catalog)
+    {
+        if (_catalog is not null)
+        {
+            throw new InvalidOperationException("Structure pages already have an active catalog borrower.");
+        }
+        _catalog = catalog;
+        try
+        {
+            ExportCore(tr);
+        }
+        finally
+        {
+            _catalog = null;
+        }
+    }
+
+    private void ExportCore(XVerExportTrackingRecord tr)
     {
         // iterate over the XVer IGs
         foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
@@ -147,11 +186,11 @@ public class StructurePageExporter
     }
 
     private bool IsDatatype(int key) =>
-        _catalog.GetStructure(key).ArtifactClass == FhirArtifactClassEnum.ComplexType ||
+        _catalog!.GetStructure(key).ArtifactClass == FhirArtifactClassEnum.ComplexType ||
         _catalog.GetStructure(key).ArtifactClass == FhirArtifactClassEnum.Profile && _catalog.IsProcessed(key);
 
     private bool MatchesArtifactClass(DbStructureOutcome outcome, FhirArtifactClassEnum artifactClass) =>
-        _catalog.IsProcessed(outcome.SourceStructureKey) &&
+        _catalog!.IsProcessed(outcome.SourceStructureKey) &&
         (outcome.SourceArtifactClass == artifactClass ||
             artifactClass == FhirArtifactClassEnum.ComplexType && IsDatatype(outcome.SourceStructureKey));
 

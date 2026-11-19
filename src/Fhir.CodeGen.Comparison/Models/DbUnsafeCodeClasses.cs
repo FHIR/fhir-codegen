@@ -121,11 +121,72 @@ public partial class DbUnsafeCodePairState : DbRecordBase
 
 internal static class UnsafeCodeInputStore
 {
-    internal static void RequireExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule)
+    internal static void RequireExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule,
+        XVerPreparedOperation operation)
     {
+        operation.RequireConnection(db);
+        operation.Audit();
         if (schedule.Count == 0)
         {
             return;
+        }
+        operation.PrepareExport(schedule);
+        AuditExportReady(db, schedule, operation);
+    }
+
+    internal static void AuditExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule,
+        XVerPreparedOperation operation)
+    {
+        try
+        {
+            operation.RequireConnection(db);
+            operation.Audit();
+            RequireExportState(db, schedule);
+            foreach (FhirPackageComparisonPair scheduled in schedule)
+            {
+                ProfileUseFacts.RequirePersistedDecisions(db, scheduled,
+                    operation.ExportDecisions(scheduled.SourcePackageKey, scheduled.TargetPackageKey), operation.Catalog);
+            }
+            operation.Audit();
+        }
+        catch
+        {
+            operation.Dispose();
+            throw;
+        }
+    }
+
+    internal static void RequireExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule)
+    {
+        DbUnsafeCodeInputState? input = RequireExportState(db, schedule);
+        if (input is null)
+        {
+            return;
+        }
+        try
+        {
+            DefinitionInventoryStore.RequireMapBinding(db, input.SnapshotId);
+            foreach (FhirPackageComparisonPair scheduled in schedule)
+            {
+                ProfileUseFacts.RequirePersistedDecisions(db, scheduled);
+            }
+        }
+        catch (DbException error) when (error is SqliteException { SqliteErrorCode: 1 } &&
+            (error.Message.Contains("no such table:", StringComparison.Ordinal) ||
+                error.Message.Contains("no such column:", StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException("Unsafe-code export schema could not be read or is incompatible. " +
+                "Regenerate the database with the existing load stages, then compare, outcomes, and export.", error);
+        }
+    }
+
+    // Preserve the original schema/stamp diagnostics before acquiring the wider
+    // construction closure. This is not inventory validation or a readiness proof.
+    internal static DbUnsafeCodeInputState? RequireExportState(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule)
+    {
+        if (schedule.Count == 0)
+        {
+            return null;
         }
 
         const string recovery = "Regenerate the database with the existing load stages, then compare, outcomes, and export.";
@@ -147,7 +208,6 @@ internal static class UnsafeCodeInputStore
             }
 
             string revision = inputs[0].CompletedInputRevision!;
-            DefinitionInventoryStore.RequireMapBinding(db, inputs[0].SnapshotId);
             foreach (FhirPackageComparisonPair scheduled in schedule)
             {
                 DbUnsafeCodePairState[] matches = [.. pairs.Where(pair =>
@@ -162,8 +222,8 @@ internal static class UnsafeCodeInputStore
                         $"Unsafe-code structure export {scheduled.SourcePackage.PackageId}|{scheduled.SourcePackage.PackageVersion}" +
                         $" -> {scheduled.TargetPackage.PackageId}|{scheduled.TargetPackage.PackageVersion} is missing, incomplete, incompatible, or stale. {recovery}");
                 }
-                ProfileUseFacts.RequirePersistedDecisions(db, scheduled);
             }
+            return inputs[0];
         }
         catch (DbException error) when (error is SqliteException { SqliteErrorCode: 1 } &&
             (error.Message.Contains("no such table:", StringComparison.Ordinal) ||
@@ -173,27 +233,40 @@ internal static class UnsafeCodeInputStore
         }
     }
 
-    internal static IReadOnlyList<UnsafeCodeConstraintPlan> ReadConstraintPlans(IDbConnection db, int sourceKey, int targetKey)
+    internal static IReadOnlyList<UnsafeCodeConstraintPlan> ReadConstraintPlans(IDbConnection db, int sourceKey, int targetKey) =>
+        ReadConstraintPlans(db, sourceKey, targetKey, null);
+
+    internal static IReadOnlyList<UnsafeCodeConstraintPlan> ReadConstraintPlans(IDbConnection db, int sourceKey, int targetKey,
+        XVerPreparedOperation? operation)
     {
-        List<DbUnsafeCodeTrigger> triggers = DbUnsafeCodeTrigger.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        operation?.RequireConnection(db);
+        operation?.Audit();
+        List<DbUnsafeCodeTrigger> triggers = operation is null
+            ? DbUnsafeCodeTrigger.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey)
+            : [.. operation.Evidence.Rows<DbUnsafeCodeTrigger>(DbUnsafeCodeTrigger.DefaultTableName)
+                .Where(row => row.SourceFhirPackageKey == sourceKey && row.TargetFhirPackageKey == targetKey)];
         if (triggers.Count == 0)
         {
             return [];
         }
 
-        Dictionary<int, string> evidence = DbUnsafeCodeMapEvidence.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey)
+        Dictionary<int, string> evidence = (operation?.Evidence.Rows<DbUnsafeCodeMapEvidence>(DbUnsafeCodeMapEvidence.DefaultTableName) ??
+            DbUnsafeCodeMapEvidence.SelectList(db)).Where(row => row.SourceFhirPackageKey == sourceKey && row.TargetFhirPackageKey == targetKey)
             .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} ({row.ConceptMapUrl ?? row.ConceptMapId}, group {row.GroupIndex}, source {row.SourceIndex}, target {row.TargetIndex})");
         HashSet<int> annotationKeys = [.. triggers.SelectMany(row => JsonSerializer.Deserialize<int[]>(row.AnnotationKeysJson)!)];
         if (annotationKeys.Count > 0)
         {
-            Dictionary<int, DbFhirPackage> packages = DbFhirPackage.SelectDict(db);
-            new UnsafeCodeOutcomeGenerator(db).ValidateAnnotationProvenance(new(packages[sourceKey], packages[targetKey]), triggers);
+            Dictionary<int, DbFhirPackage> packages = (operation?.Evidence.Rows<DbFhirPackage>(DbFhirPackage.DefaultTableName) ??
+                DbFhirPackage.SelectList(db)).ToDictionary(row => row.Key);
+            new UnsafeCodeOutcomeGenerator(db).ValidateAnnotationProvenance(new(packages[sourceKey], packages[targetKey]), triggers, operation);
         }
-        Dictionary<int, string> annotations = DbUnsafeCodeElementAnnotation.SelectList(db).Where(row => annotationKeys.Contains(row.Key))
+        Dictionary<int, string> annotations = (operation?.Evidence.Rows<DbUnsafeCodeElementAnnotation>(DbUnsafeCodeElementAnnotation.DefaultTableName) ??
+            DbUnsafeCodeElementAnnotation.SelectList(db)).Where(row => annotationKeys.Contains(row.Key))
             .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} ({row.ConceptMapUrl ?? row.ConceptMapId}, group {row.GroupIndex}, source {row.SourceIndex}, target {row.TargetIndex})");
-        Dictionary<int, string> rules = DbUnsafeCodeRule.SelectList(db)
+        Dictionary<int, string> rules = (operation?.Evidence.Rows<DbUnsafeCodeRule>(DbUnsafeCodeRule.DefaultTableName) ?? DbUnsafeCodeRule.SelectList(db))
             .ToDictionary(row => row.Key, row => $"{row.SourceRelativeFilename} entry {row.EntryIndex}");
-        Dictionary<int, string?> profiles = DbStructureOutcome.SelectList(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey)
+        Dictionary<int, string?> profiles = (operation?.Evidence.Rows<DbStructureOutcome>(DbStructureOutcome.DefaultTableName) ??
+            DbStructureOutcome.SelectList(db)).Where(row => row.SourceFhirPackageKey == sourceKey && row.TargetFhirPackageKey == targetKey)
             .ToDictionary(row => row.Key, row => row.GenUrl);
         return triggers.Select(row => new UnsafeCodeConstraintPlan(
             row,

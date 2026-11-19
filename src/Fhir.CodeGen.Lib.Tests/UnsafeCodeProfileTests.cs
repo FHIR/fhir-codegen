@@ -25,6 +25,7 @@ using Hl7.FhirPath;
 using Hl7.FhirPath.Expressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
+using Xunit.Abstractions;
 
 namespace Fhir.CodeGen.Lib.Tests;
 
@@ -36,7 +37,7 @@ public sealed class UnsafeCodeProfileCollection
 }
 
 [Collection(UnsafeCodeProfileCollection.Name)]
-public class UnsafeCodeProfileTests
+public class UnsafeCodeProfileTests(ITestOutputHelper testOutput)
 {
     [Theory]
     [InlineData(0)]
@@ -3675,7 +3676,9 @@ public class UnsafeCodeProfileTests
     [InlineData(1)]
     public void SchedulingAndConstructionDoNotCreateOrDeleteOutputRoots(int targetIndex)
     {
-        using UnsafeCodeTestFixture fixture = new();
+        using XVerPreparedOperationTests.RetainedExportFixture retained = new(
+            UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), testOutput);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
         string output = Path.Combine(fixture.SourceRoot, "must-not-exist");
         ConfigXVer config = new() { OutputDirectory = output, ExportR4 = targetIndex == 0, ExportR4B = targetIndex == 1, ExportR5 = false };
         IgExporter exporter = new(fixture.Connection, NullLoggerFactory.Instance, output, null, new XVerExporter(fixture.Connection, config), config);
@@ -3694,6 +3697,167 @@ public class UnsafeCodeProfileTests
         File.WriteAllText(sentinel, "unchanged");
         exporter.BuildExportSchedule(maxStepSize: 1, specificPairs: [selected.SequencePair]);
         File.ReadAllText(sentinel).ShouldBe("unchanged");
+        IgExporter.XVerExportTrackingRecord prepared = exporter.PrepareXVerIgs(
+            exporter.BuildExportSchedule(specificPairs: [selected.SequencePair]));
+        File.ReadAllText(sentinel).ShouldBe("unchanged");
+        Directory.GetFiles(output, "*", SearchOption.AllDirectories).ShouldBe([sentinel]);
+        Directory.Delete(output, recursive: true);
+        fixture.PreparePair(2, targetIndex);
+        fixture.AddOutcome(selected, fixture.Structure(selected.SourcePackage), fixture.Structure(selected.TargetPackage));
+        fixture.CompleteAuthoredArrangement(selected);
+        StructureFhirExporter builder = Exporter(fixture);
+        builder.BuildDefinitions(prepared.XVerIgs.ShouldHaveSingleItem());
+        Directory.Exists(output).ShouldBeFalse();
+        retained.Completed = true;
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void StandaloneBuildersKeepNarrowPrerequisites(int seam)
+    {
+        using XVerPreparedOperationTests.RetainedExportFixture retained = new(
+            UnsafeCodeTestFixture.CreateRepresentationInputs(persistDatabase: true), testOutput);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        fixture.CompleteAuthoredArrangement(pair);
+        DbDefinitionInventoryState.DropTable(fixture.Connection);
+        DbUnsafeCodeInputState.DropTable(fixture.Connection);
+        DbUnsafeCodePairState.DropTable(fixture.Connection);
+        DbUnsafeCodeMapEvidence.DropTable(fixture.Connection);
+        StructureFhirExporter builder = Exporter(fixture);
+        long before = Scalar("SELECT total_changes()");
+        long schema = Scalar("PRAGMA schema_version");
+        Build();
+        Scalar("SELECT total_changes()").ShouldBe(before);
+        Scalar("PRAGMA schema_version").ShouldBe(schema);
+        DefinitionInventoryStore.TableExists(fixture.Connection, DbUnsafeCodeMapEvidence.DefaultTableName).ShouldBeFalse();
+        DefinitionInventoryStore.TableExists(fixture.Connection, DbDefinitionInventoryState.DefaultTableName).ShouldBeFalse();
+        DbStructureDefinitionFacts facts = DbStructureDefinitionFacts.SelectSingle(fixture.Connection,
+            StructureKey: fixture.Structure(pair.SourcePackage, "Quantity").Key)!;
+        string original = facts.StructureDefinitionJson;
+        facts.StructureDefinitionJson = "{}";
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        Should.Throw<InvalidOperationException>(Build);
+        facts.StructureDefinitionJson = original;
+        DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
+        Build();
+        retained.Completed = true;
+
+        void Build()
+        {
+            StructureFhirExporter.BuiltDefinitionSet built = seam switch
+            {
+                1 => builder.BuildProfiles(Tracking(pair)),
+                2 => builder.BuildExtensions(Tracking(pair)),
+                _ => Definitions(),
+            };
+            if (seam != 2)
+            {
+                built.Definitions.ShouldHaveSingleItem();
+            }
+        }
+
+        StructureFhirExporter.BuiltDefinitionSet Definitions()
+        {
+            StructureFhirExporter.BuiltDefinitions definitions = builder.BuildDefinitions(Tracking(pair));
+            return new(definitions.Profiles, definitions.Representations);
+        }
+
+        long Scalar(string sql)
+        {
+            using System.Data.IDbCommand command = fixture.Connection.CreateCommand();
+            command.CommandText = sql;
+            return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void PreparedPagesRetainQuantityEligibilityLinksAndNegativeTargets(int targetIndex)
+    {
+        using XVerPreparedOperationTests.RetainedExportFixture retained = new(
+            UnsafeCodeTestFixture.CreateProcessingEligibilityInputs(), testOutput);
+        UnsafeCodeTestFixture fixture = retained.Fixture;
+        FhirPackageComparisonPair pair = new(fixture.Packages[targetIndex + 1], fixture.Packages[targetIndex]);
+        foreach (DbFhirPackage package in fixture.Packages)
+        {
+            DbStructureDefinition negative = fixture.AddStructure(package, "NegativeQuantity", FhirArtifactClassEnum.Profile);
+            fixture.DeclareProfile(negative, fixture.Structure(package, "Quantity"));
+            fixture.AddElement(negative, "Quantity");
+            fixture.AddTypedElement(negative, "Quantity.code", "code");
+            fixture.ConfigureDefinition(negative, definition =>
+                definition.Snapshot.Element[0].Constraint.Add(new()
+                {
+                    Key = "negative-witness", Severity = ConstraintSeverity.Error, Human = "An exact owner restriction.",
+                    Expression = package.Key == pair.SourcePackageKey ? "code.empty() or code = 'source'" : "code.empty() or code = 'target'",
+                }));
+        }
+        fixture.PublishAuthoredDefinitions();
+        fixture.WriteProcessingTypeMaps();
+        fixture.LoadProfileMaps();
+        fixture.CompareProfilePairs(pair);
+        fixture.GenerateProfileOutcomes(pair);
+        ConfigXVer config = new()
+        {
+            OutputDirectory = Path.Combine(fixture.SourceRoot, "prepared-pages"),
+            XverArtifactVersion = "0.1.0-test", ExportR2 = false, ExportR3 = false,
+            ExportR4 = targetIndex == 0, ExportR4B = targetIndex == 1, ExportR5 = false, ExportR6 = false,
+        };
+        new XVerExporter(fixture.Connection, config).Export(includeIgScripts: false, processVocabulary: false,
+            specificPairs: [pair.SequencePair]);
+        string packageRoot = Path.Combine(config.OutputDirectory,
+            $"hl7.fhir.uv.xver-{pair.SourcePackageShortName.ToLowerInvariant()}.{pair.TargetPackageShortName.ToLowerInvariant()}");
+        string pages = Path.Combine(packageRoot, "input", "pagecontent");
+        string resources = Path.Combine(packageRoot, "input", "resources");
+        string typeIndex = File.ReadAllText(Path.Combine(pages, "index-types.md"));
+        string resourceIndex = File.ReadAllText(Path.Combine(pages, "index-resources.md"));
+        string simple = typeIndex.Split('\n').Single(line =>
+            line.StartsWith($"| [{pair.SourceFhirSequence} SimpleQuantity](", StringComparison.Ordinal));
+        simple.TrimEnd('\r').ShouldBe(
+            $"| [{pair.SourceFhirSequence} SimpleQuantity](https://hl7.org/fhir/{pair.SourcePackageShortName}/datatypes.html#SimpleQuantity)" +
+            $" | [{pair.TargetFhirSequence} SimpleQuantity](https://hl7.org/fhir/{pair.TargetPackageShortName}/datatypes.html#SimpleQuantity)" +
+            " | [XVer Lookup: SimpleQuantity](lookup-sd-SimpleQuantity.html) |");
+        resourceIndex.ShouldNotContain("SimpleQuantity");
+        resourceIndex.ShouldNotContain("NegativeQuantity");
+        string negativeRow = typeIndex.Split('\n').Single(line =>
+            line.StartsWith($"| [{pair.SourceFhirSequence} NegativeQuantity](", StringComparison.Ordinal));
+        negativeRow.ShouldContain("Unrepresentable (no usable target)");
+        negativeRow.ShouldNotContain("Basic");
+        DbStructureOutcome negativeOutcome = DbStructureOutcome.SelectList(fixture.Connection,
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
+            .Single(row => row.SourceName == "NegativeQuantity");
+        DbElementOutcome.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey,
+            TargetFhirPackageKey: pair.TargetPackageKey, SourceStructureKey: negativeOutcome.SourceStructureKey)
+            .ShouldContain(row => row.SourceResourceOrder == 0 && row.ExtensionDefinitionIsProhibited &&
+                row.ExtensionProhibitionReason != null);
+        File.ReadAllText(Path.Combine(pages, "lookup-sd-SimpleQuantity.md")).ShouldContain("complex type");
+        File.ReadAllText(Path.Combine(pages, "lookup-sd-SimpleQuantity.md")).ShouldNotContain("Basic");
+        HashSet<string> linkTargets = [.. Directory.GetFiles(pages, "*.md").Select(path => Path.GetFileNameWithoutExtension(path)),
+            .. Directory.GetFiles(resources, "*.json").Select(path => Path.GetFileNameWithoutExtension(path))];
+        foreach (string file in Directory.GetFiles(resources, "*.json"))
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(file));
+            linkTargets.Add(document.RootElement.GetProperty("resourceType").GetString() + "-" + document.RootElement.GetProperty("id").GetString());
+        }
+        foreach (string content in Directory.GetFiles(pages, "*.md").Where(path =>
+            Path.GetFileName(path).StartsWith("lookup-sd-", StringComparison.Ordinal) ||
+            Path.GetFileName(path) is "index-types.md" or "index-resources.md").Select(File.ReadAllText))
+        {
+            content.ShouldNotContain("PassiveAge");
+            content.ShouldNotContain("PassiveCoding");
+            content.ShouldNotContain("PassiveValueSet");
+            content.ShouldNotContain("MoneyQuantity");
+            foreach (System.Text.RegularExpressions.Match link in System.Text.RegularExpressions.Regex.Matches(content,
+                @"\]\((?<file>[^:/#)]+)\.html(?:#[^)]*)?\)"))
+            {
+                linkTargets.ShouldContain(link.Groups["file"].Value);
+            }
+        }
+        retained.Completed = true;
     }
 
     private static ImmutableArray<UnsafeCodePathStep> SourcePath(params string[] elements) =>
