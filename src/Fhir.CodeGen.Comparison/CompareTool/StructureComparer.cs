@@ -68,6 +68,7 @@ public class StructureComparer
 
     private ElementComparer? _elementComparer = null;
     private XVerStructureCatalog _catalog = null!;
+    private XVerPreparedOperation? _operation;
 
     public StructureComparer(
         IDbConnection db,
@@ -87,8 +88,39 @@ public class StructureComparer
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
-        UnsafeCodeInputStore.RequireInputs(_db);
-        _catalog = new(_db, XVerProcessor._exclusionSet);
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
+            new(XVerPreparationKind.Comparison, XVerProcessor._exclusionSet, maxStepSize: maxStepSize,
+                specificPairs: specificPairs, processVocabulary: false));
+        CompareStructures(operation, maxStepSize, specificPairs);
+    }
+
+    internal void CompareStructures(XVerPreparedOperation operation,
+        int? maxStepSize = null,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
+    {
+        _operation = operation;
+        try
+        {
+            CompareStructuresCore(operation, maxStepSize, specificPairs);
+        }
+        finally
+        {
+            _sdComparisonCache.Clear();
+            _elementComparisonCache.Clear();
+            _elementTypeComparisonCache.Clear();
+            _elementComparer = null;
+            _catalog = null!;
+            _operation = null;
+        }
+    }
+
+    private void CompareStructuresCore(XVerPreparedOperation operation, int? maxStepSize,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs)
+    {
+        UnsafeCodeInputStore.RequireInputs(_db, operation);
+        _catalog = operation.Catalog;
+        maxStepSize = operation.Evidence.Options.MaxStepSize;
+        specificPairs = operation.Evidence.Options.SpecificPairs?.ToHashSet();
         // get the list of packages
         _packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
 
@@ -117,25 +149,37 @@ public class StructureComparer
             }
         }
 
-        _elementComparer = new(
-            _db,
-            _loggerFactory,
-            _elementComparisonCache,
-            _elementTypeComparisonCache,
-            _packages);
-
         // iterate over our pairs in the order we built them
         foreach (FhirPackageComparisonPair packagePair in packagePairs)
         {
             _logger.LogInformation($"Processing {packagePair.SourcePackageShortName} -> {packagePair.TargetPackageShortName}");
-            string? inputRevision = UnsafeCodeInputStore.BeginComparison(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey);
-            doComparison(packagePair);
-            applyCachedChanges(packagePair);
-            UnsafeCodeInputStore.CompleteComparison(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey, inputRevision);
+            string inputRevision = UnsafeCodeInputStore.BeginComparison(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey, operation);
+            _elementComparer = new(_db, _loggerFactory, _elementComparisonCache, _elementTypeComparisonCache, _packages,
+                operation, operation.GetComparisonPacket(packagePair.SourcePackageKey, packagePair.TargetPackageKey));
+            try
+            {
+                doComparison(packagePair);
+                applyCachedChanges(packagePair);
+                operation.ComparisonFlushed(packagePair.SourcePackageKey, packagePair.TargetPackageKey);
+                UnsafeCodeInputStore.CompleteComparison(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey, inputRevision, operation);
+            }
+            finally
+            {
+                operation.ReleasePairWorkingFacts(packagePair.SourcePackageKey, packagePair.TargetPackageKey);
+            }
         }
     }
 
     private void applyCachedChanges(FhirPackageComparisonPair packagePair)
+    {
+        _operation!.Evidence.ApplyComparisonWrites(
+            new(XVerOperandFamily.StructureComparisons, XVerOutputTransitionKind.PairFlush, packagePair.SourcePackageKey, packagePair.TargetPackageKey),
+            _sdComparisonCache.ToAdd.Cast<DbRecordBase>().Concat(_elementComparisonCache.ToAdd).Concat(_elementTypeComparisonCache.ToAdd),
+            _sdComparisonCache.ToUpdate.Cast<DbRecordBase>().Concat(_elementComparisonCache.ToUpdate).Concat(_elementTypeComparisonCache.ToUpdate),
+            () => flushCachedChanges(packagePair));
+    }
+
+    private void flushCachedChanges(FhirPackageComparisonPair packagePair)
     {
         DbFhirPackage sourcePackage = packagePair.SourcePackage;
         DbFhirPackage targetPackage = packagePair.TargetPackage;
@@ -202,7 +246,7 @@ public class StructureComparer
             foreach (DbStructureDefinition sourceSd in sourceStructures)
             {
                 // skip structures we know we will not process
-                if (XVerProcessor._exclusionSet.Contains(sourceSd.UnversionedUrl))
+                if (_operation!.Evidence.Options.Exclusions.Contains(sourceSd.UnversionedUrl))
                 {
                     continue;
                 }

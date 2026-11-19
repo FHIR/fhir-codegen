@@ -28,6 +28,7 @@ public class ElementTypeComparer
 
     private DbComparisonCache<DbElementTypeComparison> _elementTypeComparisonCache;
     private XVerStructureCatalog? _catalog;
+    private ProfileUseFacts? _facts;
 
     public class ElementTypeComparisonTrackingRecord
     {
@@ -67,14 +68,39 @@ public class ElementTypeComparer
         DbElement? targetElement,
         int elementComparisonKey)
     {
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db, new(XVerPreparationKind.TypeComparison));
+        ElementTypeComparisonTrackingRecord result = DoTypeComparisons(packagePair, sourceElement, targetElement,
+            elementComparisonKey, operation, operation.GetComparisonPacket(packagePair.SourcePackageKey, packagePair.TargetPackageKey));
+        operation.Audit();
+        return result;
+    }
+
+    internal ElementTypeComparisonTrackingRecord DoTypeComparisons(
+        FhirPackageComparisonPair packagePair,
+        DbElement sourceElement,
+        DbElement? targetElement,
+        int elementComparisonKey,
+        XVerPreparedOperation operation,
+        XVerProfileWorkPacket packet)
+    {
+        operation.RequireConnection(_db);
+        if (!packet.Context.Equals(XVerProfileContext.Comparison) ||
+            packet.Operands.SourcePackageKey != packagePair.SourcePackageKey ||
+            packet.Operands.TargetPackageKey != packagePair.TargetPackageKey ||
+            !ReferenceEquals(packet.Operands.Evidence, operation.Evidence))
+        {
+            throw new InvalidOperationException("Type work requires its exact comparison-time directed packet.");
+        }
+        _catalog = operation.Catalog;
+        _facts = packet.Facts;
         try
         {
             return DoTypeComparisonsCore(packagePair, sourceElement, targetElement, elementComparisonKey);
         }
         finally
         {
-            _catalog?.Dispose();
             _catalog = null;
+            _facts = null;
         }
     }
 
@@ -120,12 +146,11 @@ public class ElementTypeComparer
 
     private List<DbElementType> EffectiveTypes(DbElement element)
     {
-        _catalog ??= new(_db);
         HashSet<int> visited = [];
         DbElement? current = element;
         while (current is not null && visited.Add(current.Key))
         {
-            List<DbElementType> types = DbElementType.SelectList(_db, ElementKey: current.Key);
+            List<DbElementType> types = [.. _catalog!.GetTypeUses(current)];
             if (types.Count > 0)
             {
                 return types;
@@ -345,8 +370,7 @@ public class ElementTypeComparer
             return null;
         }
 
-        _catalog ??= new(_db);
-        DbStructureDefinition sourceDefinition = _catalog.ResolveTypeUse(sourceType);
+        DbStructureDefinition sourceDefinition = _catalog!.ResolveTypeUse(sourceType);
         DbStructureDefinition targetDefinition = _catalog.ResolveTypeUse(targetType);
         bool constrained = sourceType.TypeProfile is not null || targetType.TypeProfile is not null ||
             sourceType.TargetProfile is not null && _catalog.ResolveTypeUse(sourceType, targetProfile: true).ArtifactClass == FhirArtifactClassEnum.Profile ||
@@ -354,7 +378,7 @@ public class ElementTypeComparer
             _catalog.IsQuantityFamily(sourceDefinition) || _catalog.IsQuantityFamily(targetDefinition);
         if (constrained)
         {
-            using ProfileUseFacts facts = new(_catalog, packagePair.SourcePackageKey, packagePair.TargetPackageKey);
+            ProfileUseFacts facts = _facts!;
             EffectiveProfileUse sourceUse = facts.AtUse(sourceElement, sourceType);
             EffectiveProfileUse targetUse = facts.AtUse(targetElement, targetType);
             if (!sourceUse.Diagnostics.IsEmpty || !targetUse.Diagnostics.IsEmpty ||

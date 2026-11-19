@@ -97,6 +97,8 @@ public class ElementComparer
 
     private List<DbFhirPackage> _packages = [];
     private ElementTypeComparer _elementTypeComparer;
+    private XVerPreparedOperation? _operation;
+    private XVerProfileWorkPacket? _packet;
 
     public ElementComparer(
         IDbConnection db,
@@ -117,6 +119,56 @@ public class ElementComparer
             elementTypeComparisonCache);
     }
 
+    internal ElementComparer(
+        IDbConnection db,
+        ILoggerFactory loggerFactory,
+        DbComparisonCache<DbElementComparison> elementComparisonCache,
+        DbComparisonCache<DbElementTypeComparison> elementTypeComparisonCache,
+        List<DbFhirPackage> packages,
+        XVerPreparedOperation operation,
+        XVerProfileWorkPacket packet)
+        : this(db, loggerFactory, elementComparisonCache, elementTypeComparisonCache, packages)
+    {
+        operation.RequireConnection(db);
+        _operation = operation;
+        _packet = packet;
+    }
+
+    private List<DbElementComparison> WithinPair(StructureComparisonTrackingRecord trackingRecord, bool transitive)
+    {
+        XVerPreparedOperation? owned = null;
+        try
+        {
+            if (_operation is null)
+            {
+                owned = XVerPreparedOperation.Prepare(_db, new(XVerPreparationKind.TypeComparison));
+                _operation = owned;
+                _packet = owned.GetComparisonPacket(trackingRecord.PackagePair.SourcePackageKey, trackingRecord.PackagePair.TargetPackageKey);
+            }
+            List<DbElementComparison> result = transitive
+                ? DoTransitiveElementComparisonsCore(trackingRecord)
+                : DoElementComparisonsCore(trackingRecord);
+            if (owned is not null)
+            {
+                owned.Audit();
+            }
+            return result;
+        }
+        finally
+        {
+            if (owned is not null)
+            {
+                _packet = null;
+                _operation = null;
+                owned.Dispose();
+            }
+        }
+    }
+
+    private ElementTypeComparer.ElementTypeComparisonTrackingRecord DoTypeComparisons(
+        FhirPackageComparisonPair pair, DbElement source, DbElement? target, int comparisonKey) =>
+        _elementTypeComparer.DoTypeComparisons(pair, source, target, comparisonKey, _operation!, _packet!);
+
     private bool skipElement(
         DbElement ed,
         bool skipFirstElement = true,
@@ -131,6 +183,9 @@ public class ElementComparer
 
 
     internal List<DbElementComparison> DoTransitiveElementComparisons(StructureComparisonTrackingRecord sdTr)
+        => WithinPair(sdTr, transitive: true);
+
+    private List<DbElementComparison> DoTransitiveElementComparisonsCore(StructureComparisonTrackingRecord sdTr)
     {
         if (sdTr.ComparisonSteps.Count == 0)
         {
@@ -332,7 +387,7 @@ public class ElementComparer
 
                 int elementComparisonKey = DbElementComparison.GetIndex();
 
-                ElementTypeComparer.ElementTypeComparisonTrackingRecord etr =  _elementTypeComparer.DoTypeComparisons(
+                ElementTypeComparer.ElementTypeComparisonTrackingRecord etr = DoTypeComparisons(
                     sdTr.PackagePair,
                     sourceElement,
                     targetElement,
@@ -363,6 +418,9 @@ public class ElementComparer
 
     internal List<DbElementComparison> DoElementComparisons(
         StructureComparisonTrackingRecord trackingRecord)
+        => WithinPair(trackingRecord, transitive: false);
+
+    private List<DbElementComparison> DoElementComparisonsCore(StructureComparisonTrackingRecord trackingRecord)
     {
         List<DbElementComparison> elementComparisons = [];
 
@@ -541,7 +599,7 @@ public class ElementComparer
                 }
 
                 // still need to build the type comparisons, even if we are mapped
-                ElementTypeComparer.ElementTypeComparisonTrackingRecord mappedTypeComparison = _elementTypeComparer.DoTypeComparisons(
+                ElementTypeComparer.ElementTypeComparisonTrackingRecord mappedTypeComparison = DoTypeComparisons(
                     trackingRecord.PackagePair,
                     sourceElement,
                     targetElement,
@@ -578,8 +636,8 @@ public class ElementComparer
                 continue;
             }
 
-            sourceRoot ??= ResolveRoot(sourceSd, trackingRecord.SourcePackage.Key, sourceElement);
-            targetRoot ??= ResolveRoot(targetSd, trackingRecord.TargetPackage.Key, sourceElement);
+            sourceRoot ??= _operation!.Catalog.ResolveRoot(sourceSd);
+            targetRoot ??= _operation!.Catalog.ResolveRoot(targetSd);
             if (sourceElement.Id != sourceRoot.Id &&
                 !sourceElement.Id.StartsWith(sourceRoot.Id + ".", StringComparison.Ordinal) &&
                 !sourceElement.Id.StartsWith(sourceRoot.Id + ":", StringComparison.Ordinal))
@@ -648,7 +706,7 @@ public class ElementComparer
                 bool vsIsEquivalent = (boundVsComparison is null) || (boundVsComparison.Relationship == CMR.Equivalent);
 
                 // still need to build the type comparisons, even if we are mapped
-                ElementTypeComparer.ElementTypeComparisonTrackingRecord typeComparison = _elementTypeComparer.DoTypeComparisons(
+                ElementTypeComparer.ElementTypeComparisonTrackingRecord typeComparison = DoTypeComparisons(
                     trackingRecord.PackagePair,
                     sourceElement,
                     targetElement,
@@ -752,11 +810,6 @@ public class ElementComparer
 
         // return our list of element comparisons
         return elementComparisons;
-
-        DbElement ResolveRoot(DbStructureDefinition owner, int packageKey, DbElement sourceElement)
-        {
-            return new XVerStructureCatalog(_db).ResolveRoot(owner);
-        }
     }
 
     //private DbCollatedTypeComparison doCollatedTypeComparison(

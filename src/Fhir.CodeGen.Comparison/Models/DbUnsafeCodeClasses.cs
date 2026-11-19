@@ -264,6 +264,81 @@ internal static class UnsafeCodeInputStore
         return pair;
     }
 
+    internal static string RequireInputs(IDbConnection db, XVerPreparedOperation operation)
+    {
+        operation.RequireConnection(db);
+        operation.Audit();
+        DbUnsafeCodeInputState? input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1);
+        DbUnsafeCodeInputState captured = operation.Evidence.Rows<DbUnsafeCodeInputState>(DbUnsafeCodeInputState.DefaultTableName).Single();
+        if (input?.FormatVersion != UnsafeCodeConstants.InputFormatVersion ||
+            string.IsNullOrEmpty(input.CompletedInputRevision) || operation.InventoryRevision is null ||
+            input.CompletedInputRevision != captured.CompletedInputRevision || input.SnapshotId != captured.SnapshotId)
+        {
+            operation.Dispose();
+            throw new InvalidOperationException("Unsafe-code inputs are missing, incomplete, or incompatible. Reload maps and compare.");
+        }
+        // The exact inventory and its snapshot binding were validated at entry;
+        // the audit above checks their raw live values, not just this stamp.
+        return input.CompletedInputRevision;
+    }
+
+    internal static DbUnsafeCodePairState RequireComparison(IDbConnection db, int sourceKey, int targetKey,
+        XVerPreparedOperation operation)
+    {
+        string revision = RequireInputs(db, operation);
+        DbUnsafeCodePairState? pair = DbUnsafeCodePairState.SelectSingle(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        DbUnsafeCodePairState? captured = operation.Evidence.Rows<DbUnsafeCodePairState>(DbUnsafeCodePairState.DefaultTableName)
+            .SingleOrDefault(row => row.SourceFhirPackageKey == sourceKey && row.TargetFhirPackageKey == targetKey);
+        if (pair?.InputRevision != revision || string.IsNullOrEmpty(pair.ComparisonRevision) ||
+            pair.ComparisonRevision != captured?.ComparisonRevision)
+        {
+            operation.Dispose();
+            throw new InvalidOperationException($"Unsafe-code structure comparison {sourceKey}->{targetKey} is missing or stale. Rerun structure comparisons.");
+        }
+        return pair;
+    }
+
+    internal static string BeginComparison(IDbConnection db, int sourceKey, int targetKey, XVerPreparedOperation operation)
+    {
+        string revision = RequireInputs(db, operation);
+        DbUnsafeCodePairState? pair = DbUnsafeCodePairState.SelectSingle(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        if (pair is not null)
+        {
+            pair.ComparisonRevision = null;
+            ClearOutcome(pair);
+        }
+        operation.Evidence.ApplyComparisonWrites(new(XVerOperandFamily.PairControl, XVerOutputTransitionKind.PairBegin, sourceKey, targetKey),
+            [], pair is null ? [] : [pair], () =>
+            {
+                if (pair is not null)
+                {
+                    DbUnsafeCodePairState.Update(db, [pair]);
+                }
+            });
+        return revision;
+    }
+
+    internal static void CompleteComparison(IDbConnection db, int sourceKey, int targetKey, string? revision,
+        XVerPreparedOperation operation)
+    {
+        string currentRevision = RequireInputs(db, operation);
+        DbUnsafeCodeInputState? input = DbUnsafeCodeInputState.SelectSingle(db, Key: 1);
+        DbUnsafeCodePairState? pair = DbUnsafeCodePairState.SelectSingle(db, SourceFhirPackageKey: sourceKey, TargetFhirPackageKey: targetKey);
+        if (currentRevision != revision || input?.CompletedInputRevision != revision ||
+            input.FormatVersion != UnsafeCodeConstants.InputFormatVersion || pair?.InputRevision != revision ||
+            pair.ComparisonRevision is not null)
+        {
+            operation.Dispose();
+            throw new InvalidOperationException("Catalog, map inputs or pair control changed during comparison. Reload maps and compare.");
+        }
+        operation.ClassifyComparisonPair(sourceKey, targetKey);
+        operation.Audit();
+        pair.ComparisonRevision = Guid.NewGuid().ToString("N");
+        ClearOutcome(pair);
+        operation.Evidence.ApplyComparisonWrites(new(XVerOperandFamily.PairControl, XVerOutputTransitionKind.PairComplete, sourceKey, targetKey),
+            [], [pair], () => DbUnsafeCodePairState.Update(db, [pair]));
+    }
+
     internal static string? BeginComparison(IDbConnection db, int sourceKey, int targetKey)
     {
         string revision = RequireInputs(db);

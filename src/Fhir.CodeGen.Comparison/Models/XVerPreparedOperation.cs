@@ -24,6 +24,7 @@ internal sealed record XVerOperationOptions
     {
         Kind = kind;
         Exclusions = (exclusions ?? []).ToImmutableHashSet(StringComparer.Ordinal);
+        EscapeValveCodes = XVer.XVerProcessor._escapeValveCodes.ToImmutableHashSet(StringComparer.Ordinal);
         ElementTableName = elementTableName ?? DbElement.DefaultTableName;
         if (ElementTableName.Length == 0 || ElementTableName.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '_'))
         {
@@ -41,6 +42,7 @@ internal sealed record XVerOperationOptions
 
     internal XVerPreparationKind Kind { get; }
     internal ImmutableHashSet<string> Exclusions { get; }
+    internal ImmutableHashSet<string> EscapeValveCodes { get; }
     internal string ElementTableName { get; }
     internal int? MaxStepSize { get; }
     internal ImmutableHashSet<(FhirReleases.FhirSequenceCodes Source, FhirReleases.FhirSequenceCodes Target)>? SpecificPairs { get; }
@@ -369,6 +371,16 @@ internal sealed class XVerPreparedOperation : IDisposable
         }
     }
 
+    internal void RequireConnection(IDbConnection connection)
+    {
+        RequireActive();
+        if (!ReferenceEquals(connection, _connection))
+        {
+            Dispose();
+            throw new InvalidOperationException("Prepared work belongs to its exact connection and invocation.");
+        }
+    }
+
     internal void Audit()
     {
         try
@@ -431,6 +443,25 @@ internal sealed class XVerPreparedOperation : IDisposable
     internal XVerProfileWorkPacket GetComparisonPacket(int sourcePackageKey, int targetPackageKey) =>
         GetPacket(XVerDirectionalOperands.WithoutCorrespondence(_evidence, sourcePackageKey, targetPackageKey), XVerProfileContext.Comparison);
 
+    internal void ComparisonFlushed(int sourcePackageKey, int targetPackageKey)
+    {
+        Audit();
+        ReplaceScheduledDirection(CaptureDirection(sourcePackageKey, targetPackageKey),
+            new(XVerOperandFamily.StructureComparisons, XVerOutputTransitionKind.PairFlush, sourcePackageKey, targetPackageKey));
+    }
+
+    internal ImmutableArray<ProfileRepresentationProof> ClassifyComparisonPair(int sourcePackageKey, int targetPackageKey)
+    {
+        Audit();
+        XVerDirectionalProduct forward = GetPacket(CaptureDirection(sourcePackageKey, targetPackageKey),
+            XVerProfileContext.Classification).Classify();
+        XVerDirectionalProduct reverse = GetPacket(CaptureDirection(targetPackageKey, sourcePackageKey),
+            XVerProfileContext.Classification).Classify();
+        ImmutableArray<ProfileRepresentationProof> decisions = ComposePair(forward, reverse);
+        Audit();
+        return decisions;
+    }
+
     // This replaces semantic work only. It does not rebase operation evidence or
     // authorize writes; the comparison guard owns the audited flush transition.
     internal void ReplaceScheduledDirection(XVerDirectionalOperands operands, XVerOutputTransition transition)
@@ -473,14 +504,13 @@ internal sealed class XVerPreparedOperation : IDisposable
 
     internal void ReleasePairWorkingFacts(int sourcePackageKey, int targetPackageKey)
     {
-        RequireActive();
         foreach (XVerProfileWorkPacket packet in _packets.Values.Where(packet =>
             packet.Operands.SourcePackageKey == sourcePackageKey && packet.Operands.TargetPackageKey == targetPackageKey ||
             packet.Operands.SourcePackageKey == targetPackageKey && packet.Operands.TargetPackageKey == sourcePackageKey))
         {
             packet.ReleaseWorkingFacts();
         }
-        Catalog.ReleasePayloads();
+        _catalog?.ReleasePayloads();
     }
 
     private void RequireCurrent(XVerDirectionalProduct product)

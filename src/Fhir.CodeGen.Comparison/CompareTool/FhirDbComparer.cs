@@ -114,14 +114,19 @@ public partial class FhirDbComparer
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
-        // ensure out tables exist and are empty
-        if (processStructures)
+        using XVerPreparedOperation? operation = processStructures
+            ? XVerPreparedOperation.Prepare(_db, new(XVerPreparationKind.Comparison, XVerProcessor._exclusionSet,
+                maxStepSize: maxStepSize, specificPairs: specificPairs, processVocabulary: processValueSets))
+            : null;
+        if (operation is null)
         {
-            UnsafeCodeInputStore.RequireInputs(_db);
+            Reset();
         }
-
-        DbComparisonClasses.DropTables(_db, forValueSets: processValueSets, forStructures: processStructures);
-        DbComparisonClasses.CreateTables(_db, forValueSets: processValueSets, forStructures: processStructures);
+        else
+        {
+            UnsafeCodeInputStore.RequireInputs(_db, operation);
+            operation.Evidence.ResetComparisons(processValueSets, Reset);
+        }
 
         if (processValueSets)
         {
@@ -130,6 +135,7 @@ public partial class FhirDbComparer
 
             // run our value set comparisons
             vsComparer.CompareValueSets(
+                operation,
                 maxStepSize: maxStepSize,
                 specificPairs: specificPairs);
         }
@@ -141,8 +147,15 @@ public partial class FhirDbComparer
 
             // run our structure comparisons
             sdComparer.CompareStructures(
+                operation!,
                 maxStepSize: maxStepSize,
                 specificPairs: specificPairs);
+        }
+
+        void Reset()
+        {
+            DbComparisonClasses.DropTables(_db, forValueSets: processValueSets, forStructures: processStructures);
+            DbComparisonClasses.CreateTables(_db, forValueSets: processValueSets, forStructures: processStructures);
         }
     }
 

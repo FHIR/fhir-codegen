@@ -8,6 +8,7 @@ using System.Data;
 using System.Data.Common;
 using Fhir.CodeGen.SQLiteGenerator;
 using Microsoft.Data.Sqlite;
+using CMR = Hl7.Fhir.Model.ConceptMap.ConceptMapRelationship;
 
 namespace Fhir.CodeGen.Comparison.Models;
 
@@ -149,6 +150,205 @@ internal sealed class XVerOperandEvidence : IDisposable
         }
     }
 
+    internal void ApplyComparisonWrites(XVerOutputTransition transition, IEnumerable<DbRecordBase> inserts,
+        IEnumerable<DbRecordBase> updates, Action write)
+    {
+        try
+        {
+            Audit();
+            transition.RequireOutputFamily();
+            if (transition.Family is not (XVerOperandFamily.StructureComparisons or XVerOperandFamily.VocabularyComparisons or XVerOperandFamily.PairControl) ||
+                transition.SourcePackageKey is null || transition.TargetPackageKey is null)
+            {
+                throw new InvalidOperationException("Comparison writes require an exact directed comparison or pair-control transition.");
+            }
+            Dictionary<string, IXVerTableImage> expected = new(_images, StringComparer.Ordinal);
+            DbRecordBase[] added = [.. inserts];
+            DbRecordBase[] changed = [.. updates];
+            foreach (DbRecordBase row in added.Concat(changed))
+            {
+                XVerTableManifest manifest = Manifest.Single(table => table.RowType == row.GetType());
+                if (manifest.Family != transition.Family ||
+                    row is DbComparisonBase comparison &&
+                        (comparison.SourceFhirPackageKey != transition.SourcePackageKey || comparison.TargetFhirPackageKey != transition.TargetPackageKey) ||
+                    row is DbUnsafeCodePairState pair &&
+                        (pair.SourceFhirPackageKey != transition.SourcePackageKey || pair.TargetFhirPackageKey != transition.TargetPackageKey))
+                {
+                    throw new InvalidOperationException("An expected write must belong to its exact output family and directed pair.");
+                }
+            }
+            AddChanges<DbStructureComparison, DbStructureComparisonOperand>(DbStructureComparison.DefaultTableName,
+                row => DbStructureComparisonOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString(), row.Relationship?.ToString(),
+                        row.ConceptDomainRelationship?.ToString(), row.ValueDomainRelationship?.ToString()],
+                    [Integer(row.NotMapped), Integer(row.IsIdentical), Integer(row.ElementRelativePathsAreIdentical), Integer(row.IsBasedOnFallbackMapping)])), row => row.Key, row => row.ToRow());
+            AddChanges<DbElementComparison, DbElementComparisonOperand>(DbElementComparison.DefaultTableName,
+                row => DbElementComparisonOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString(), row.Relationship?.ToString(),
+                        row.ConceptDomainRelationship?.ToString(), row.ValueDomainRelationship?.ToString(), row.BoundValueSetRelationship?.ToString(),
+                        row.TypeRelationship?.ToString(), row.TargetProfileRelationship?.ToString(), row.TypeProfileRelationship?.ToString()],
+                    [Integer(row.NotMapped), Integer(row.IsIdentical), Integer(row.RelativePathsAreIdentical), Integer(row.SourceRequiresMoreValues),
+                        Integer(row.TargetRequiresMoreValues), Integer(row.SourceAllowsMoreValues), Integer(row.TargetAllowsMoreValues)])), row => row.Key, row => row.ToRow());
+            AddChanges<DbElementTypeComparison, DbElementTypeComparisonOperand>(DbElementTypeComparison.DefaultTableName,
+                row => DbElementTypeComparisonOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString(), row.Relationship?.ToString(),
+                        row.TargetProfileRelationship?.ToString(), row.TypeProfileRelationship?.ToString()],
+                    [Integer(row.NotMapped), Integer(row.IsIdentical)])), row => row.Key, row => row.ToRow());
+            AddChanges<DbValueSetComparison, DbValueSetComparisonOperand>(DbValueSetComparison.DefaultTableName,
+                row => DbValueSetComparisonOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString(), row.Relationship?.ToString()],
+                    [Integer(row.NotMapped), Integer(row.IsIdentical), Integer(row.CodeLiteralsAreIdentical)])), row => row.Key, row => row.ToRow());
+            AddChanges<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand>(DbValueSetConceptComparison.DefaultTableName,
+                row => DbValueSetConceptComparisonOperand.Copy(row, new(
+                    [row.SourceFhirSequence.ToString(), row.TargetFhirSequence.ToString(), row.Relationship?.ToString()],
+                    [Integer(row.NotMapped), Integer(row.IsIdentical), Integer(row.CodeLiteralsAreIdentical),
+                        Integer(row.SourceCodeTreatedAsEscapeValve), Integer(row.TargetCodeTreatedAsEscapeValve)])), row => row.Key, row => row.ToRow());
+            AddChanges<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand>(DbUnsafeCodePairState.DefaultTableName,
+                row => DbUnsafeCodePairStateOperand.Copy(row), row => row.Key, row => row.ToRow());
+            AcceptExpected(expected, _schemaVersion, write);
+
+            void AddChanges<T, TRow>(string table, Func<T, TRow> snapshot, Func<TRow, int> key, Func<TRow, T> copy)
+                where T : DbRecordBase where TRow : IEquatable<TRow>
+            {
+                T[] additions = [.. added.OfType<T>()];
+                T[] changes = [.. changed.OfType<T>()];
+                if (additions.Length == 0 && changes.Length == 0)
+                {
+                    return;
+                }
+                TableImage<T, TRow> image = (TableImage<T, TRow>)expected[table];
+                Dictionary<int, TRow> rows = image.StoredRows.ToDictionary(key);
+                foreach (T row in additions)
+                {
+                    // The existing producers use INSERT OR IGNORE, then UPDATE.
+                    TRow value = snapshot(row);
+                    rows.TryAdd(key(value), value);
+                }
+                foreach (T row in changes)
+                {
+                    TRow value = snapshot(row);
+                    if (rows.ContainsKey(key(value)))
+                    {
+                        rows[key(value)] = value;
+                    }
+                }
+                expected[table] = new TableImage<T, TRow>(rows.OrderBy(entry => entry.Key).Select(entry => entry.Value), copy);
+            }
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+    }
+
+    internal void ApplyConceptRelationships(int sourceKey, int targetKey, IReadOnlySet<int> keys, CMR relationship, Action write)
+    {
+        try
+        {
+            Audit();
+            string table = DbValueSetConceptComparison.DefaultTableName;
+            TableImage<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand> image =
+                (TableImage<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand>)_images[table];
+            if (image.StoredRows.Count(row => keys.Contains(row.Key) && row.SourceFhirPackageKey == sourceKey &&
+                row.TargetFhirPackageKey == targetKey && row.RelationshipStoredText == CMR.Equivalent.ToString()) != keys.Count)
+            {
+                throw new InvalidOperationException("Relationship deltas require exact equivalent rows in the scheduled directed pair.");
+            }
+            Dictionary<string, IXVerTableImage> expected = new(_images, StringComparer.Ordinal)
+            {
+                [table] = new TableImage<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand>(
+                    image.StoredRows.Select(row => keys.Contains(row.Key)
+                        ? row with { Relationship = relationship, RelationshipStoredText = relationship.ToString() } : row), row => row.ToRow()),
+            };
+            AcceptExpected(expected, _schemaVersion, write);
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+    }
+
+    internal void ResetComparisons(bool vocabulary, Action reset)
+    {
+        try
+        {
+            Audit();
+            Dictionary<string, IXVerTableImage> expected = new(_images, StringComparer.Ordinal);
+            long schema = _schemaVersion;
+            Reset<DbStructureComparison, DbStructureComparisonOperand>(DbStructureComparison.DefaultTableName, 2, row => row.ToRow());
+            Reset<DbElementComparison, DbElementComparisonOperand>(DbElementComparison.DefaultTableName, 3, row => row.ToRow());
+            Reset<DbElementTypeComparison, DbElementTypeComparisonOperand>(DbElementTypeComparison.DefaultTableName, 1, row => row.ToRow());
+            if (vocabulary)
+            {
+                Reset<DbValueSetComparison, DbValueSetComparisonOperand>(DbValueSetComparison.DefaultTableName, 2, row => row.ToRow());
+                Reset<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand>(DbValueSetConceptComparison.DefaultTableName, 4, row => row.ToRow());
+            }
+            string control = DbUnsafeCodePairState.DefaultTableName;
+            TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand> pairs =
+                (TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand>)_images[control];
+            expected[control] = new TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand>(
+                pairs.StoredRows.Select(row => row with
+                {
+                    ComparisonRevision = null, OutcomeInputRevision = null,
+                    OutcomeComparisonRevision = null, OutcomeFormatVersion = null,
+                }), row => row.ToRow());
+            AcceptExpected(expected, schema, reset);
+
+            void Reset<T, TRow>(string table, int indexes, Func<TRow, T> copy)
+                where T : DbRecordBase where TRow : IEquatable<TRow>
+            {
+                // DROP changes schema once (including its indexes); CREATE changes
+                // it once for the table and once per declared generated index.
+                schema += (_images[table] is MissingTable ? 0 : 1) + 1 + indexes;
+                expected[table] = new TableImage<T, TRow>([], copy);
+            }
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+    }
+
+    private void AcceptExpected(Dictionary<string, IXVerTableImage> expected, long schemaVersion, Action write)
+    {
+        write();
+        Observation before = Observe();
+        foreach (XVerTableRequirement requirement in _requirements)
+        {
+            if (!expected[requirement.TableName].ExactlyEquals(Read(requirement)))
+            {
+                throw new InvalidOperationException($"Prepared expected output or stable operands changed in '{requirement.TableName}'; no completion was certified.");
+            }
+        }
+        Observation after = Observe();
+        RequireCoherent(before, after);
+        if (after.SchemaVersion != schemaVersion)
+        {
+            throw new InvalidOperationException("Prepared output transition changed undeclared schema.");
+        }
+        // These are the original stable images and independently expected outputs,
+        // never the live rows just read for verification.
+        _images.Clear();
+        foreach ((string table, IXVerTableImage image) in expected)
+        {
+            _images.Add(table, image);
+        }
+        _schemaVersion = schemaVersion;
+    }
+
+    private static long? Integer(bool? value) => value is null ? null : value.Value ? 1L : 0L;
+
+    internal List<(DbValueSetConceptComparison Row, string? Relationship)> ConceptRelationshipRows()
+    {
+        RequireActive();
+        TableImage<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand> image =
+            (TableImage<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand>)_images[DbValueSetConceptComparison.DefaultTableName];
+        return [.. image.StoredRows.Select(row => (row.ToRow(), row.RelationshipStoredText))];
+    }
+
     internal List<T> Rows<T>(string tableName) where T : DbRecordBase
     {
         RequireActive();
@@ -272,6 +472,7 @@ internal sealed class XVerOperandEvidence : IDisposable
         where TRow : IEquatable<TRow>
     {
         private readonly ImmutableArray<TRow> _rows = [.. rows];
+        internal ImmutableArray<TRow> StoredRows => _rows;
 
         public bool ExactlyEquals(IXVerTableImage other) =>
             other is TableImage<T, TRow> image && _rows.SequenceEqual(image._rows);

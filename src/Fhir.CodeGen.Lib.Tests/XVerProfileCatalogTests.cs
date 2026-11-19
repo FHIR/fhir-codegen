@@ -49,6 +49,72 @@ public class XVerProfileCatalogTests
     }
 
     [Fact]
+    public void VocabularyOnlyComparisonKeepsMissingProfileSchemaIndependent()
+    {
+        using UnsafeCodeTestFixture fixture = new(persistDatabase: true);
+        using ComparisonDatabase database = new(fixture.SourceRoot, "snapshot.sqlite", NullLoggerFactory.Instance);
+        SqliteConnection.ClearPool((SqliteConnection)database.DbConnection);
+        DbStructureDefinitionFacts.DropTable(database.DbConnection);
+        DbDefinitionInventoryState.DropTable(database.DbConnection);
+        DbUnsafeCodeInputState.DropTable(database.DbConnection);
+        DbUnsafeCodePairState.DropTable(database.DbConnection);
+        new FhirDbComparer(database, NullLoggerFactory.Instance).Compare(processStructures: false, maxStepSize: 1);
+        DefinitionInventoryStore.TableExists(database.DbConnection, DbStructureDefinitionFacts.DefaultTableName).ShouldBeFalse();
+        DefinitionInventoryStore.TableExists(database.DbConnection, DbDefinitionInventoryState.DefaultTableName).ShouldBeFalse();
+        DefinitionInventoryStore.TableExists(database.DbConnection, DbUnsafeCodePairState.DefaultTableName).ShouldBeFalse();
+        DbValueSetComparison.SelectList(database.DbConnection).Count.ShouldBe(4);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PreparedElementFallbackKeepsExactSlicedRootAndNarrowPrerequisites(bool missingTarget)
+    {
+        DefinitionCollection definitions = Definitions(FhirReleases.FhirSequenceCodes.STU3);
+        AddNative(definitions, NativeQuantity());
+        StructureDefinition simple = new FhirJsonParser().Parse<StructureDefinition>(SimpleQuantityJson);
+        AddProfile(definitions, simple);
+        StructureDefinition passive = Profile("UnusedDifferential", null);
+        passive.Snapshot = null;
+        passive.Differential = new() { Element = [new() { ElementId = "Coding.code", Path = "Coding.code", Max = "0" }] };
+        AddProfile(definitions, passive);
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        DbMappingClasses.CreateTables(imported.Connection);
+        DbComparisonClasses.CreateTables(imported.Connection);
+        DbDefinitionInventoryState.DropTable(imported.Connection);
+        DbUnsafeCodeInputState.DropTable(imported.Connection);
+        DbUnsafeCodePairState.DropTable(imported.Connection);
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(imported.Connection);
+        DbFhirPackage package = packages.Single();
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(imported.Connection, new(XVerPreparationKind.TypeComparison));
+        DbStructureDefinition source = operation.Catalog.ResolveDefinition(package.Key, simple.Url)!;
+        DbStructureDefinition? target = missingTarget ? null : operation.Catalog.ResolveNativeType(package.Key, "Quantity")!;
+        FhirPackageComparisonPair pair = new(package, package);
+        DbComparisonCache<DbElementComparison> elements = new();
+        ElementComparer comparer = new(imported.Connection, NullLoggerFactory.Instance, elements, new(), packages,
+            operation, operation.GetComparisonPacket(package.Key, package.Key));
+        List<DbElementComparison> comparisons = comparer.DoElementComparisons(new()
+        {
+            PackagePair = pair, SourcePackage = package, SourceStructure = source,
+            TargetPackage = package, TargetStructure = target, TargetStructureKey = target?.Key,
+        });
+        comparisons.ShouldNotBeEmpty();
+        comparisons.ShouldAllBe(row => row.SourceElementId.StartsWith("Quantity:simplequantity", StringComparison.Ordinal));
+        if (missingTarget)
+        {
+            comparisons.ShouldAllBe(row => row.NotMapped && row.TargetElementKey == null);
+        }
+        else
+        {
+            comparisons.ShouldContain(row => row.SourceElementId == "Quantity:simplequantity.code" && row.TargetElementId == "Quantity.code");
+        }
+        operation.Catalog.ReadPayload(source).Snapshot.Element[0].Type.ShouldBeEmpty();
+        DefinitionInventoryStore.TableExists(imported.Connection, DbDefinitionInventoryState.DefaultTableName).ShouldBeFalse();
+        operation.Audit();
+    }
+
+    [Fact]
     public void CapturedInventoryRetainsPassivePayloadsWithoutAcquiringUnusedRoots()
     {
         DefinitionCollection definitions = UseDefinitions(ConstraintProfile("CapturedQuantity", slicedRoot: true));
@@ -2683,6 +2749,15 @@ public class XVerProfileCatalogTests
         branch.Elements[".code"].Minimum.ShouldBe(0);
         ProfileRepresentationProof proof = facts.Prove(branch, quantity);
         proof.Kind.ShouldBe(ProfileProofKind.NativeReuse, string.Join("; ", proof.Diagnostics));
+
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(imported.Connection, new(XVerPreparationKind.TypeComparison));
+        ProfileUseFacts prepared = operation.GetComparisonPacket(imported.PackageKey, imported.PackageKey).Facts;
+        EffectiveProfileBranch captured = prepared.ForDefinition(operation.Catalog.GetStructure(quantity.Key));
+        captured.Elements[".code"].Types.ShouldHaveSingleItem().Code.ShouldBe("uri");
+        captured.Elements[".code"].Minimum.ShouldBe(0);
+        captured.Elements[".code"].Origins.ShouldBe(branch.Elements[".code"].Origins);
+        prepared.Prove(captured, operation.Catalog.GetStructure(quantity.Key)).Kind.ShouldBe(ProfileProofKind.NativeReuse);
+        operation.Audit();
     }
 
     [Fact]
