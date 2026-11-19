@@ -577,9 +577,9 @@ public class ConceptMapLoader
         DbUnsafeCodeInputState input = DbUnsafeCodeInputState.SelectSingle(_db, Key: 1)
             ?? throw new InvalidOperationException("Element annotation association requires a started map-input snapshot.");
         List<DbProfileMapOwnerFacts> annotationOwners = DbProfileMapOwnerFacts.SelectList(_db,
-            SourceFhirPackageKey: sourcePackage.Key, TargetFhirPackageKey: targetPackage.Key)
-            .Where(row => row.InputSnapshotId == input.SnapshotId && row.SourceRelativeFilename == sourceRelativeFilename &&
-                row.ConceptMapUrl == cm.Url && row.ConceptMapId == cm.Id).ToList();
+            SourceFhirPackageKey: sourcePackage.Key, TargetFhirPackageKey: targetPackage.Key,
+            InputSnapshotId: input.SnapshotId, SourceRelativeFilename: sourceRelativeFilename)
+            .Where(row => row.ConceptMapUrl == cm.Url && row.ConceptMapId == cm.Id).ToList();
         if (annotationOwners.Any(row => row.MappingSourceFileKey != sourceFileKey || row.ElementMappingKey is not null) ||
             annotationOwners.GroupBy(row => (row.GroupIndex, row.SourceIndex, row.TargetIndex)).Any(group => group.Count() > 1))
         {

@@ -62,6 +62,7 @@ internal enum ProfileMapOwnerResolution
 [CgSQLiteIndex(nameof(AnnotationKey), nameof(ElementMappingKey))]
 [CgSQLiteIndex(nameof(InputSnapshotId))]
 [CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(SourceStructureKey), nameof(TargetFhirPackageKey), nameof(TargetStructureKey))]
+[CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(TargetFhirPackageKey), nameof(InputSnapshotId), nameof(SourceRelativeFilename))]
 internal partial class DbProfileMapOwnerFacts : DbRecordBase
 {
     [CgSQLiteForeignKey(ReferenceTable = "UnsafeCodeElementAnnotations", ReferenceColumn = "Key")]

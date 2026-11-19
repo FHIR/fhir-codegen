@@ -341,14 +341,14 @@ internal sealed class XVerOperandEvidence : IDisposable
             Audit();
             Dictionary<string, IXVerTableImage> expected = new(_images, StringComparer.Ordinal);
             long schema = _schemaVersion;
-            Reset<DbStructureOutcome, DbStructureOutcomeOperand>(DbStructureOutcome.DefaultTableName, 3, row => row.ToRow());
-            Reset<DbElementOutcome, DbElementOutcomeOperand>(DbElementOutcome.DefaultTableName, 7, row => row.ToRow());
-            Reset<DbElementOutcomeTarget, DbElementOutcomeTargetOperand>(DbElementOutcomeTarget.DefaultTableName, 3, row => row.ToRow());
-            Reset<DbUnsafeCodeTrigger, DbUnsafeCodeTriggerOperand>(DbUnsafeCodeTrigger.DefaultTableName, 2, row => row.ToRow());
+            Reset<DbStructureOutcome, DbStructureOutcomeOperand>(DbStructureOutcome.DefaultTableName, row => row.ToRow());
+            Reset<DbElementOutcome, DbElementOutcomeOperand>(DbElementOutcome.DefaultTableName, row => row.ToRow());
+            Reset<DbElementOutcomeTarget, DbElementOutcomeTargetOperand>(DbElementOutcomeTarget.DefaultTableName, row => row.ToRow());
+            Reset<DbUnsafeCodeTrigger, DbUnsafeCodeTriggerOperand>(DbUnsafeCodeTrigger.DefaultTableName, row => row.ToRow());
             if (vocabulary)
             {
-                Reset<DbValueSetOutcome, DbValueSetOutcomeOperand>(DbValueSetOutcome.DefaultTableName, 2, row => row.ToRow());
-                Reset<DbValueSetConceptOutcome, DbValueSetConceptOutcomeOperand>(DbValueSetConceptOutcome.DefaultTableName, 3, row => row.ToRow());
+                Reset<DbValueSetOutcome, DbValueSetOutcomeOperand>(DbValueSetOutcome.DefaultTableName, row => row.ToRow());
+                Reset<DbValueSetConceptOutcome, DbValueSetConceptOutcomeOperand>(DbValueSetConceptOutcome.DefaultTableName, row => row.ToRow());
             }
             string control = DbUnsafeCodePairState.DefaultTableName;
             TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand> pairs =
@@ -360,10 +360,10 @@ internal sealed class XVerOperandEvidence : IDisposable
                 }), row => row.ToRow());
             AcceptExpected(expected, schema, reset);
 
-            void Reset<T, TRow>(string table, int indexes, Func<TRow, T> copy)
+            void Reset<T, TRow>(string table, Func<TRow, T> copy)
                 where T : DbRecordBase where TRow : IEquatable<TRow>
             {
-                schema += (_images[table] is MissingTable ? 0 : 1) + 1 + indexes;
+                schema += ResetSchemaDelta<T>(table);
                 expected[table] = new TableImage<T, TRow>([], copy);
             }
         }
@@ -443,13 +443,13 @@ internal sealed class XVerOperandEvidence : IDisposable
             Audit();
             Dictionary<string, IXVerTableImage> expected = new(_images, StringComparer.Ordinal);
             long schema = _schemaVersion;
-            Reset<DbStructureComparison, DbStructureComparisonOperand>(DbStructureComparison.DefaultTableName, 2, row => row.ToRow());
-            Reset<DbElementComparison, DbElementComparisonOperand>(DbElementComparison.DefaultTableName, 3, row => row.ToRow());
-            Reset<DbElementTypeComparison, DbElementTypeComparisonOperand>(DbElementTypeComparison.DefaultTableName, 1, row => row.ToRow());
+            Reset<DbStructureComparison, DbStructureComparisonOperand>(DbStructureComparison.DefaultTableName, row => row.ToRow());
+            Reset<DbElementComparison, DbElementComparisonOperand>(DbElementComparison.DefaultTableName, row => row.ToRow());
+            Reset<DbElementTypeComparison, DbElementTypeComparisonOperand>(DbElementTypeComparison.DefaultTableName, row => row.ToRow());
             if (vocabulary)
             {
-                Reset<DbValueSetComparison, DbValueSetComparisonOperand>(DbValueSetComparison.DefaultTableName, 2, row => row.ToRow());
-                Reset<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand>(DbValueSetConceptComparison.DefaultTableName, 4, row => row.ToRow());
+                Reset<DbValueSetComparison, DbValueSetComparisonOperand>(DbValueSetComparison.DefaultTableName, row => row.ToRow());
+                Reset<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand>(DbValueSetConceptComparison.DefaultTableName, row => row.ToRow());
             }
             string control = DbUnsafeCodePairState.DefaultTableName;
             TableImage<DbUnsafeCodePairState, DbUnsafeCodePairStateOperand> pairs =
@@ -462,12 +462,10 @@ internal sealed class XVerOperandEvidence : IDisposable
                 }), row => row.ToRow());
             AcceptExpected(expected, schema, reset);
 
-            void Reset<T, TRow>(string table, int indexes, Func<TRow, T> copy)
+            void Reset<T, TRow>(string table, Func<TRow, T> copy)
                 where T : DbRecordBase where TRow : IEquatable<TRow>
             {
-                // DROP changes schema once (including its indexes); CREATE changes
-                // it once for the table and once per declared generated index.
-                schema += (_images[table] is MissingTable ? 0 : 1) + 1 + indexes;
+                schema += ResetSchemaDelta<T>(table);
                 expected[table] = new TableImage<T, TRow>([], copy);
             }
         }
@@ -477,6 +475,11 @@ internal sealed class XVerOperandEvidence : IDisposable
             throw;
         }
     }
+
+    // DROP changes schema once for the table and all its indexes. CREATE changes
+    // it once for the table and once per declared index.
+    private int ResetSchemaDelta<T>(string table) =>
+        (_images[table] is MissingTable ? 0 : 1) + 1 + typeof(T).GetCustomAttributes(typeof(CgSQLiteIndex), inherit: false).Length;
 
     private void AcceptExpected(Dictionary<string, IXVerTableImage> expected, long schemaVersion, Action write)
     {

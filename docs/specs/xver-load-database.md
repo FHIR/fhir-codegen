@@ -55,11 +55,19 @@ Preconditions:
 ## Outputs
 
 - `_db` is set to a `ComparisonDatabase` instance backed by an on-disk SQLite file (`XVerProcessor.cs:514`, `XVerProcessor.cs:528`).
-- On existing-DB reuse, the method opens the existing file in read/write mode, verifies the `DbFhirPackage.DefaultTableName` table in `sqlite_master`, loads table indices through `DbContentClasses.LoadIndices`, and returns without re-seeding content (historical locations: `XVerProcessor.cs:510-519`, `ComparisonDatabase.cs:161-190`). This is a package-table guard, not a complete schema/version migration check.
+- On existing-DB reuse, the method opens the file in read/write mode, verifies the `DbFhirPackage.DefaultTableName` table, and restores content key counters through `DbContentClasses.LoadIndices`. It does not re-seed content or certify the catalog.
 - On fresh DB creation, the definitions-based constructor opens/creates the SQLite file, deletes existing content tables, recreates content/support tables, and inserts package metadata (`ComparisonDatabase.cs:80-158`, `ComparisonDatabase.cs:593-647`). The content/support schema includes `DbFhirPackage`, `DbCodeSystem`, `DbCodeSystemConcept`, `DbValueSet`, `DbValueSetConcept`, `DbStructureDefinition`, `DbElement`, `DbElementAdditionalBinding`, `DbElementType`, `DbExternalInclusion`, `DbExtensionSubstitution`, and `DbFhirTypeValueSet` (`DbContentClasses.cs:31-109`).
 - `_dbName` is updated from the database instance after fresh construction (`XVerProcessor.cs:528-529`).
 - Fresh creation is seeded by `_db.TryLoadFromDefinitionCollections(_exclusionSet, _escapeValveCodes)` (`XVerProcessor.cs:531-535`). That method loads code systems, value sets, and structures, then runs value-set, element, and code-system post-processing (`ComparisonDatabase.cs:652-696`).
 - Comparison pair / outcome / mapping tables are not created by `LoadDatabase` itself; they are created by later comparison, outcome, and map-loading steps. This is a source-level surprise because the method comment only says it "loads or creates the comparison database" (`XVerProcessor.cs:499-503`), while `initNewDb` delegates only to `DbContentClasses.CreateTables` (`ComparisonDatabase.cs:593-607`).
+
+### Query indexes
+
+Tables get their query indexes when created. Regenerate the database to apply
+updated index definitions; opening an existing file does not change its indexes.
+Prepared comparison and outcome resets use the model index declarations to
+predict the SQLite schema-version change. Full-table operand audits still read
+every row in scope.
 
 ### Normalized inventory and processing boundary
 

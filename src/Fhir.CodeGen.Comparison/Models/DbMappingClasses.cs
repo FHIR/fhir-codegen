@@ -104,7 +104,7 @@ public abstract class DbMappingArtifactBase : DbMappingBase
 
 [CgSQLiteTable(tableName: "ValueSetMappings")]
 [CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(SourceValueSetKey), nameof(TargetFhirPackageKey), nameof(TargetValueSetKey))]
-[CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(TargetValueSetKey), nameof(TargetValueSetKey), nameof(Key))]
+[CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(TargetValueSetKey), nameof(TargetFhirPackageKey), nameof(Key))]
 [CgSQLiteIndex(nameof(SourceValueSetKey), nameof(TargetValueSetKey))]
 public partial class DbValueSetMapping : DbMappingArtifactBase
 {

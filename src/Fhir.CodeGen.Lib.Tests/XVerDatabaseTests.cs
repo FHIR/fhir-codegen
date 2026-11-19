@@ -114,6 +114,46 @@ public class XVerDatabaseTests : IDisposable
         after.DefinitionFhirSequence.ShouldBe(before.DefinitionFhirSequence);
     }
 
+    [Fact]
+    public void FreshTablesIndexAllCrossVersionLookupPredicates()
+    {
+        using SqliteConnection connection = new("Data Source=:memory:;Pooling=False");
+        connection.Open();
+        DbContentClasses.CreateTables(connection);
+        DbMappingClasses.CreateTables(connection);
+        DbComparisonClasses.CreateTables(connection);
+        DbOutcomeClasses.CreateTables(connection);
+
+        string[] pair = ["SourceFhirPackageKey", "TargetFhirPackageKey"];
+        (string Table, string[] Predicates)[] lookups =
+        [
+            ("ElementOutcomeTargets", pair),
+            ("ProfileMapOwnerFacts", [.. pair, "InputSnapshotId", "SourceRelativeFilename"]),
+            ("ValueSetConceptComparisons", pair),
+            ("ValueSetMappings", [.. pair, "TargetValueSetKey"]),
+            ("ElementTypeComparisons", pair),
+            ("ElementTypeComparisons", ["ElementComparisonKey"]),
+            ("ElementTypes", ["FhirPackageKey"]),
+            ("ValueSetConcepts", ["FhirPackageKey"]),
+            ("ValueSetConcepts", ["ValueSetKey", "Code"]),
+            ("CodeSystemConcepts", ["CodeSystemKey", "Code"]),
+        ];
+        foreach ((string table, string[] predicates) in lookups)
+        {
+            using SqliteCommand command = connection.CreateCommand();
+            string where = string.Join(" AND ", predicates.Select(column => $"{column} = 1"));
+            command.CommandText = $"EXPLAIN QUERY PLAN SELECT * FROM {table} WHERE {where}";
+            using SqliteDataReader reader = command.ExecuteReader();
+            reader.Read().ShouldBeTrue();
+            string detail = reader.GetString(3);
+            detail.ShouldStartWith($"SEARCH {table} USING ");
+            foreach (string column in predicates)
+            {
+                detail.ShouldContain($"{column}=?");
+            }
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

@@ -786,6 +786,7 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
 [CgSQLiteIndex(nameof(ElementOutcomeKey), nameof(StructureOutcomeKey))]
 [CgSQLiteIndex(nameof(ElementOutcomeKey), nameof(TargetStructureKey), nameof(TargetElementId))]
 [CgSQLiteIndex(nameof(ElementOutcomeKey), nameof(TargetElementId), nameof(ContextElementId))]
+[CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(TargetFhirPackageKey))]
 public partial class DbElementOutcomeTarget : DbRecordBase
 {
     [CgSQLiteForeignKey(referenceTable: "ElementOutcomes", referenceColumn: nameof(DbElementOutcome.Key), modelTypeName: nameof(DbElementOutcome))]
