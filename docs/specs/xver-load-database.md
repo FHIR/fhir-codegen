@@ -1698,6 +1698,488 @@ verification in this dispatch is **attempt 5 run 1, instrumented**; restored
 source identity is not the parent's still-required uninstrumented full-class
 correctness gate.
 
+### Phase 7 candidate measurements (2026-11-19; net acceptance fails)
+
+This is **partial Phase 7 evidence in cumulative work dispatch 9/10**, not a
+new attempt, baseline reset, phase completion, or permission to waive a gate.
+Candidate production is the supplied clean Phase 6 commit
+`aa290477b09ac4bc48fc347993f295cea678012b`. Root `AGENTS.md` supplied commands,
+conventions and the uniform policy; no agents were invoked. The source report,
+selected approach, plan, exporter specification and preceding Phase 1 protocol
+were read without modification. The frozen Phase 1 baseline remains authoritative.
+
+#### Workload identity and command ledger
+
+The actual workload/clock/assertion bodies are unchanged from the saved Phase 1
+`XVerPreparedOperationTests.cs.original` under
+`temp/xver-attempt5-count-evidence-7f939c2180b945a693b85739a63a7497/`.
+Read-only member-text comparisons (line-ending normalized for this comparison
+only) found identical `IdenticalWorkloadsReportStageCosts`, `RunSyntheticPipeline`,
+`RunRealCorePipeline`, `SyntheticDefinitions`, `WriteSyntheticMaps`,
+`AssertEffectiveRootTypeUses`, `AssertGeneratedResource`, `AssertSyntheticSemantics`,
+`AssertNegativeDocuments`, `AssertCoreRows`, `AssertCoreNegativeWitnesses`,
+`RecordMeasurementIdentity`, `CompareRangeElements`, `GenerateRangeOutcomes`
+and `BuildRangeDefinitions`. The surrounding test file has accumulated Phase 2–6
+tests; its candidate SHA-256 is
+`6a067b36f19de26d148e4e8cda3f8fc1e4f8e9254a42e3ee92a3315ec3cc077c`.
+The original Phase 1 harness SHA-256 remains the one recorded above, not this hash.
+
+W1 still runs all 20 comparison/outcome directions and 12 scripts-off actual
+vocabulary/structure exports with three repeated groups, max step 4, five
+authored releases, empty normalized root types and independent comparator
+terminology `1.0.0`. The eight adjacent direct-map keys and twelve transitive
+null-key provenance assertions remain unchanged. W2 still imports the complete
+five pinned real cores plus two carriers (1,257 definitions/facts), performs
+bounded Range consumers with four reopens and both actual-core rejection
+witnesses. It is not whole-core actual CLI throughput.
+
+Every run 1–5 used exactly:
+
+```powershell
+dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName=Fhir.CodeGen.Lib.Tests.XVerPreparedOperationTests.IdenticalWorkloadsReportStageCosts"
+```
+
+Each command was synchronous and bounded, with a 600-second initial wait and
+the **same** shell subsequently read through completion; no command was
+restarted on reaching that wait. A PowerShell Stopwatch printed command wall
+time and returned the actual exit code. No output redirection, logger switches,
+installs, external DB/IG access, cleanup or parallel memory-heavy tests occurred.
+All runs used default Debug/net11.0, runtime `.NET 11.0.0`, X64, OS
+`Microsoft Windows 10.0.26300`. The shared host was not exclusively reserved;
+no affinity/cold-cache guarantee is made.
+
+| Run | Role | Exit / passed / failed / skipped | Command ms | Runner duration |
+|-|-|-|-:|-|
+| 1 | Discarded paired warm-up | 0 / 1 / 0 / 0 | 614019.5150 | 9m52s |
+| 2 | Accepted observation 1 | 0 / 1 / 0 / 0 | 660760.3633 | 10m40s |
+| 3 | Accepted observation 2 | 0 / 1 / 0 / 0 | 628490.8866 | 10m09s |
+| 4 | Accepted observation 3 | 0 / 1 / 0 / 0 | 612100.0827 | 9m53s |
+| 5 | Separate temporary actual-site counts/lifetime | 0 / 1 / 0 / 0 | 605495.0971 | 9m47s |
+
+Restore was up to date; these commands emitted the previously observed NU1510
+Logging.Abstractions warnings and documented CS3021, with no compiler or test
+failure. After exact hook restoration, run 6 uses the requested combined selector:
+
+```powershell
+dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName~XVerPreparedOperationTests|FullyQualifiedName~XVerProfileCatalogTests|FullyQualifiedName~XVerQuantityProfileTests|FullyQualifiedName~UnsafeCodeProfileTests"
+```
+
+Run 6 completed **exit 1, 548 passed, 1 failed, 0 skipped, 549 total**;
+command wall **3569018.4668 ms**, runner **59m08s**. This is a red restored
+correctness gate, not inferred success from run 5.
+At runner 00:38:20.55, the sole reported failure was
+`InvocationAndBuildConfigurationChangesCannotCertifyAStaleSchedule(mutation:
+"output", duringBuild: False)` (3 s), after the test reached `Completed=true`:
+
+```text
+System.IO.IOException : The process cannot access the file 'snapshot.sqlite' because it is being used by another process.
+   at System.IO.FileSystem.RemoveDirectoryRecursive(String fullPath, WIN32_FIND_DATA& findData, Boolean topLevel)
+   at System.IO.Directory.Delete(String path, Boolean recursive)
+   at Fhir.CodeGen.Lib.Tests.UnsafeCodeTestFixture.Dispose() in UnsafeCodeTestFixture.cs:line 2472
+   at Fhir.CodeGen.Lib.Tests.XVerPreparedOperationTests.RetainedExportFixture.Dispose() in XVerPreparedOperationTests.cs:line 694
+   at Fhir.CodeGen.Lib.Tests.XVerPreparedOperationTests.InvocationAndBuildConfigurationChangesCannotCertifyAStaleSchedule(String mutation, Boolean duringBuild) in XVerPreparedOperationTests.cs:line 628
+```
+
+Diagnosis read the actual shared fixture, without editing it: connections use
+`Pooling=false`; `Dispose` disposes the connection, then recursively deletes
+the fixture directory, logs an IOException and rethrows. The completed wrapper
+uses this shared cleanup. The failed command output did not include that
+fixture's absolute GUID directory or locking process identity; neither is
+invented here. The cause remains **undetermined**, not established as the
+same cause as Phase 6 run 10's earlier cleanup IOException.
+
+Run 7, the smallest unchanged diagnostic selector, was exactly:
+
+```powershell
+dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName=Fhir.CodeGen.Lib.Tests.XVerPreparedOperationTests.InvocationAndBuildConfigurationChangesCannotCertifyAStaleSchedule"
+```
+
+It completed **exit 0, 9 passed, 0 failed/skipped**, command
+**52489.1239 ms**, runner **38 s**. No code change, cleanup retry, sleep,
+pooling change or process termination preceded it. That passing theory does
+**not** overwrite the full run's failure or establish a green four-class gate.
+The full gate was not rerun repeatedly given the independent material
+performance blocker and temp-only production ownership.
+
+Run 6's completed isolated workload evidence remains in
+`temp/xver-prepared-b3259a8029654361ac1a97e0ddaed68f/` (W1 characterization),
+`xver-prepared-ac28d761aa934954873867afa40fa9c1/` (W1 measurement),
+`xver-prepared-08f08ceb471f4b0c93d57255664d5e6b/` (W2 measurement), and
+`xver-prepared-2246540d5c904e5b9a7b91776202c37c/` (W2 characterization).
+Those observations are correctness evidence, **not additional accepted fresh
+timing samples**. The characterization captures, DBs, maps and outputs are
+retained, not dumped wholesale. No separate console-output log file was
+created for runs 1–7; their actual command output is retained in the session
+and this chronological ledger, with raw workload files as identified above.
+
+No mandatory final solution Release build or full external-filtered suite is
+claimed here; those belong to the parent after Phase 7 acceptance/integration.
+
+Read/edit diagnostics, in chronological order: the first unbounded root-AGENTS
+view refused its size, so explicit ranges were read; two guessed view ranges
+were beyond EOF (`ProfileUseFacts.cs` 2250 and `XVerPreparedOperation.cs` 835);
+one search included nonexistent `Models/DbProfileMapOwnerFacts.cs` and reported
+that skipped path. The first instrumentation patch had an empty trailing hunk
+and was rejected without changing a file; the corrected patch applied before
+the first instrumented build. An initial count-summary script split slash-bearing
+stage names at their first slash; the corrected rightmost-slash grouping below
+uses the original unmodified reports. An initial frozen-body lookup assumed
+four-space member indentation, reported three missing nested methods, and was
+corrected to use the matched indentation; all three bodies were then identical.
+An initial sample comparison used Python newline-converting `read_text` on only
+the candidate, giving unequal text but equal parsed JSON; a subsequent
+raw-byte decode on both files confirmed exact equality after the sole date
+substitution. These were read/edit diagnostics, not failed tests or extra samples.
+
+#### Retained raw samples
+
+All directories below are under repository-local `temp/`. Each contains its
+unchanged DB, maps, W1 output where applicable, `stage-costs.json` and
+`measurement-identity.json`, with `Completed=true`. Do not delete the earlier
+52 MB W1 / 857 MB W2 semantic captures or any prior evidence.
+
+| Run | PID | W1 directory suffix after `xver-prepared-` | W2 suffix |
+|-|-:|-|-|
+| 1 | 21316 | `c4fb6045ff374108bf7915ad9e85ab12` | `4529f729e721433fb96b34d701bc7d4e` |
+| 2 | 42568 | `c54d874ac66b4045afdbb35e8a9d1432` | `82a31583bda54271ba0d474e87aa40b6` |
+| 3 | 54004 | `c038f77aa47c44e1bcc493700bdf4a07` | `e7e99e3fa2de46caa660334a8c12219f` |
+| 4 | 50604 | `572ff8d8e9ba466a9946abf801a7af22` | `6e260a31499f4efb9b1e115303bfacf2` |
+| 5 | Count run | `4a9b25edd9cd4faca3aecec3971560d4` | `6167fa880f454ebfb49d1e5bafb46639` |
+
+SHA-256 identities, `stage-costs.json` / `measurement-identity.json`:
+
+| Run/workload | Stage costs | Measurement identity |
+|-|-|-|
+| 1/W1 | `9f70b0801d2ef83696daac182f0553cb5951e9f6c9ce8e71f8334ffb722b1eec` | `17b7af038e6e75e6620d2c821154356917677ddf85bfab738f8c56fe0dedc924` |
+| 1/W2 | `7dd5649c2efd385652669f7590232df9b767f505f654a56e37768583acda05eb` | `9f9909e61b9b02e889a0ac9170c299631a2a26982168c3b61ef288329438b922` |
+| 2/W1 | `51d27cdf1f774b558b5125dd120dce092eaf2c332831839e5a1c53c6839f9427` | `4597464b7bcb24d46096e7650829e8f91c9b78750da26756b6abbce02d278599` |
+| 2/W2 | `de071c1cd519683d861d162a8a2f275cee4cc20f199e6547c158006399a12ce6` | `6faf8ceb6b9bdb33ed56774d50a6b4acf4c1e9d5f11f2a36b19e10467e26bc17` |
+| 3/W1 | `014af78691b9d8bdd81a2aba307fb0ea1f54cad2260375e9faab203f6a6087d9` | `3c53699c30e05ab266f0d14ef48e8013ebf064a9c4c002a722e5cd87d4601968` |
+| 3/W2 | `69950798e04a9318f638662e87627f2ef7a4a53e5bf17a7d4b27199581e61010` | `5f352acee591745666c6631eba8417daf5584a1ed13986a69ea0fbf1f837001b` |
+| 4/W1 | `449ac1d3a703f1fdee4b63073e9de12f7ab7253bb776f612cb653898a4a7c4e5` | `c8ffcef87286e29ef7e25e38c5cf8150c4a528669ffc58d25b3bffc00b769ecb` |
+| 4/W2 | `915accfae64de8ec77a5e8d33233f767240e82faf437209ecdc3d45bd5630a0a` | `03adb96db1dc3d99d02196a948452f9dd53070801f87fc08784d0485709b2f11` |
+| 5/W1 | `8fbe0e749ce15ec2cecf734d97721cb52ceb428fb90a3071d501ccb26bea4f97` | `99ffb780ff08c5e2ee72065c817f69c2315bbf06dc3291f8d1ab4a7919fa2c79` |
+| 5/W2 | `bc349f60ac913e15a91401ae6de0a7dc24eeb3407c9be6b932b016d6b2b0a67d` | `138f83197a69a29cb153c9290f3b93bccb59434007264b3877078790475d8f54` |
+
+For **all eight uninstrumented workload observations**, comparison with the
+corresponding first accepted Phase 1 identity found exact equality of package
+rows, repetition count, terminology version, max step, scripts flag, every
+table cardinality, retained row count, normalized JSON byte count/digest,
+persisted negative JSON size, and every map's path/byte count/SHA-256.
+W1 has 6,185 retained rows, 103,112 normalized JSON bytes, payload digest
+`7c67389b93345fdcf242d24a50edc332dba5295624e4ca1200249f16d5c300ff`,
+112,500 persisted negative bytes and 61 maps totaling 33,818 bytes. W2 has
+312,573 retained rows, 123,867,864 normalized JSON bytes, digest
+`b8d0d6a31ac493d0fc75cd63a37282a4edaf863eb51f2fd0b1fe43b63802cad6`,
+98,819,836 persisted negative bytes and three local maps totaling 3,138 bytes.
+W2's unchanged internal primitive maps are additional production inputs.
+The identity property named `ProductionBaseline` still intentionally names
+`d749a7b5e...`; the **candidate revision is aa290477...**, not that property.
+
+#### Net timing and resource result
+
+The required W1-then-W2 paired lifecycle is unchanged: W2 inherits W1's JIT/heap
+history, but each accepted pair uses a new process. Preparation/readiness,
+semantic checks, raw audits, independent persisted verification, negative
+witnesses, emission and final DB disposal/pool clearing remain inside net
+clocks. Identity/dump serialization remains outside. Runs 1 and 5 are excluded.
+No new baseline, clocks, assertions, maps or noise waiver were introduced.
+
+| Run | W1 net ms | W2 bounded net ms | W1 total incl. setup ms | W2 total incl. setup ms |
+|-|-:|-:|-:|-:|
+| 1 discarded | 33200.1889 | 486918.0114 | 35668.2047 | 556900.2300 |
+| 2 | 31766.0902 | 531874.4025 | 34282.0187 | 606410.6024 |
+| 3 | 31652.6649 | 503730.6185 | 34416.8500 | 574746.8391 |
+| 4 | 37733.4752 | 483605.7040 | 40340.0046 | 553310.0546 |
+
+| Workload | Frozen baseline net median / MAD ms | Candidate median / MAD ms | Verdict |
+|-|-:|-:|-|
+| W1 | 10952.4363 / 275.6870 | **31766.0902 / 113.4253** | 20813.6539 ms slower; 2.9004× baseline |
+| W2 bounded | 129123.2825 / 97.9593 | **503730.6185 / 20124.9145** | 374607.3360 ms slower; 3.9012× baseline |
+
+Both regressions exceed the larger MAD by a wide margin. They are **failed
+net acceptance**, not inconclusive savings or a reason to take four speculative
+extra samples. No candidate accepted observation is faster than its baseline.
+Candidate total-including-setup medians/MAD are W1 34416.8500/134.8313 ms and
+W2 574746.8391/21436.7845 ms. Frozen totals were 13852.5000/530.4598 and
+205595.9231/2987.0896 ms.
+
+Per-stage candidate median/MAD from the same three observations:
+
+| Workload/stage | ms median / MAD | Allocated B median / MAD | Sampled peak private B median / MAD |
+|-|-:|-:|-:|
+| W1 import/root assertions | 1048.8872 / 13.6171 | 132594984 / 3904 | 119476224 / 106496 |
+| W1 maps | 1428.2155 / 24.0545 | 89655296 / 7144 | 130654208 / 110592 |
+| W1 compare | 8424.7936 / 66.2048 | 3942790640 / 528400 | 176107520 / 155648 |
+| W1 outcomes | 18047.1788 / 31.5771 | 9419950128 / 31648 | 350515200 / 9527296 |
+| W1 export incl. readiness/build/audits/emission | 5103.7840 / 111.8526 | 2346056648 / 17456 | 359505920 / 14176256 |
+| W1 frozen verification | 115.7702 / 4.3214 | 63942776 / 4144 | 272809984 / 6680576 |
+| W1 disposal/pool clear | 5.9387 / 0.4228 | 4440 / 0 | 267382784 / 7512064 |
+| W2 full retained import | 32541.5588 / 605.1375 | 28583299496 / 117776 | 8604925952 / 24350720 |
+| W2 maps | 25466.2851 / 847.7518 | 38646119624 / 153576 | 10883915776 / 1847296 |
+| W2 Range comparison | 47628.0404 / 486.3305 | 63977397000 / 29256 | 11708993536 / 11296768 |
+| W2 Range outcomes | 242688.5595 / 5709.1715 | 328402696960 / 1226296 | 15604301824 / 36438016 |
+| W2 readiness/write-free build | 203738.4408 / 5782.7464 | 294283087600 / 1124400 | 15314194432 / 609906688 |
+| W2 frozen verification | 3270.9903 / 831.3658 | 3533344168 / 1101840 | 12859191296 / 320610304 |
+| W2 actual negative witnesses | 781.7383 / 29.5899 | 814611896 / 2896 | 12260532224 / 472223744 |
+| W2 disposal/pool clear | 1.3772 / 0.0510 | 4584 / 64 | 12091199488 / 351510528 |
+
+All three W1 operation stages regress against the baseline table above despite
+reduced comparison allocation. W2 comparison also regresses (baseline median
+41136.7935 ms); its outcomes/build regress drastically (baseline
+53878.2341/28708.5678 ms and 68974005416/32197289784 allocated bytes).
+The unchanged frozen harness measures W1 export as one stage; no invented
+uninstrumented inner readiness/emission timing is claimed.
+
+Peak sampled private/working bytes, taking each observation's maximum stage,
+have median/MAD W1 **359505920/14176256** and **456019968/15192064**;
+W2 **15604301824/319799296** and **15683383296/303501312**. Compare the
+baseline W1 export private 203128832 and W2 build private 13921918976:
+the candidate's larger peaks are an explicit adverse tradeoff, not a memory win.
+No OOM/resource failure occurred in these completed runs. Entry/exit managed
+and private readings, working-set samples, allocation deltas and sample counts
+remain in every stage file. These are sampled process observations, not unique
+managed graph sizes or a universal ceiling. Final DB sizes remain identical:
+W1 11603968 bytes, W2 390873088 bytes; all per-stage DB sizes also agree.
+
+#### Actual call-site counts and raw audits (separate run 5)
+
+Temporary instrumentation exists only in retained `.instrumented` images under
+`temp/xver-phase7-count-evidence-20261119/`; it has been removed from source.
+The common catalog constructor counts completed owners and constructor stacks
+for fallback attribution; `ResolveRoot` counts requests/hits; `ReadPayload`
+counts actual misses. `ValidateInventoryRows` counts full semantic passes and
+each transient inventory parse; `ReadDefinition` counts actual parses.
+`ProfileUseFacts` keeps its primary constructor and all captures, including
+`comparisons`; an identity wrapper at `_active` counts instances. Definition/
+use misses, `ClassifyRequiredUses`, `Prove`, `ProveInOwner`, graph construction
+and release sites count their actual executions. Operation/packet/product
+constructors and disposal sites count lifetime edges. No schedule arithmetic
+is presented as an execution counter.
+
+Raw-audit scope is the actual `XVerOperandEvidence.Audit` entry through its
+exit, with counters at `TableImage` materialization **only while that scope is
+active**. It records full row counts and UTF-8 bytes of stored text cells whose
+first non-whitespace character is `{` or `[`, without normalizing or parsing
+those cells. This JSON-text metric covers object/array JSON in these operands;
+it is not total SQL wire traffic, scalar JSON or unique retained bytes.
+Supplemental selector passes, capture, `AcceptExpected` post-write scans,
+directional capture and independent persisted-result reads are not extra
+`Audit` invocations/rows in this table. Their costs remain in net clocks.
+Audit elapsed times include probe overhead and are not accepted timing samples.
+
+| Stage | Catalogs | Semantic passes / inventory parses | Lazy parses | Facts instances | Effective definitions / uses created | Directional computations |
+|-|-:|-:|-:|-:|-:|-:|
+| W1 import/root checks | 3 | 1 / 100 | 100 | 5 | 100 / 10 | 0 |
+| W1 maps | 5 | 3 / 300 | 0 | 0 | 0 / 0 | 0 |
+| W1 compare | 1 | 1 / 100 | 700 | 50 | 1440 / 1560 | 30 |
+| W1 outcomes | 1 | 1 / 100 | 688 | 40 | 688 / 656 | 20 |
+| W1 export | 1 | 1 / 100 | 576 | 30 | 576 / 576 | 18 |
+| W1 verification | 2 | 0 / 0 | 15 | 0 | 0 / 0 | 0 |
+| **W1 all stages** | **13** | **7 / 700** | **2079** | **125** | **2804 / 2802** | **68** |
+| W2 import | 2 | 1 / 1257 | 582 | 0 | 0 / 0 | 0 |
+| W2 between-stage checks/reopens | 2 | 0 / 0 | 1 | 0 | 0 / 0 | 0 |
+| W2 maps | 6 | 3 / 3771 | 873 | 0 | 0 / 0 | 0 |
+| W2 comparison | 8 | 4 / 5028 | 1615 | 4 | 675 / 1876 | 2 |
+| W2 outcomes | 7 | 3 / 3771 | 1556 | 3 | 665 / 1872 | 2 |
+| W2 readiness/build | 4 | 1 / 1257 | 1415 | 5 | 1330 / 3744 | 4 |
+| W2 verification | 1 | 0 / 0 | 173 | 0 | 0 / 0 | 0 |
+| W2 negative witnesses | 1 | 0 / 0 | 15 | 2 | 18 / 0 | 0 |
+| **W2 all stages** | **31** | **12 / 15084** | **6230** | **14** | **2688 / 7492** | **8** |
+
+Against the actual Phase 1 counters: W1 catalogs 577→13, fallback-root catalogs
+208→**0**, semantic validations 171→7, lazy parses 7235→2079, effective
+definitions 9404→2804, facts instances 573→125, directional work 168→68.
+W2 catalogs 36→31, semantic validations 13→12, lazy parses 6488→6230,
+effective definitions 3363→2688, directional work 10→8. These are actual
+reductions, **not sufficient acceptance**. W2 comparison catalogs increase
+7→8, build lazy parses increase 1173→1415, and build directional computations
+stay 4: independent readiness/build seams remain independent by contract.
+Do not silently fuse those calls or change W2 to improve the measurement.
+W1's 30 comparison classifications include legitimate later-reverse operand
+epochs; 20 outcome and 18 export directions reflect their exact scheduled
+dependency contexts, not a promise that every command always computes 20.
+
+| Stage | Raw audits | Rows | Object/array JSON text bytes | Count-run audit ms |
+|-|-:|-:|-:|-:|
+| W1 compare | 284 | 636230 | 685602118 | 4985.5362 |
+| W1 outcomes | 243 | 1187925 | 1765347293 | 11473.1103 |
+| W1 export | 70 | 414410 | 492480217 | 4136.6359 |
+| **W1 total** | **597** | **2238565** | **2943429628** | **20595.2824** |
+| W2 comparison | 4 | 522036 | 717559588 | 4954.8297 |
+| W2 outcomes | 13 | 3334495 | 2716632545 | 20181.5792 |
+| W2 readiness/build | 5 | 1055980 | 1391870345 | 8308.1652 |
+| **W2 total** | **22** | **4912511** | **4826062478** | **33444.5741** |
+
+Baseline prepared raw audits were absent, as documented above. In W1 the large
+replayed decision fields dominate: outcome-stage `ElementComparisons` and
+`ElementTypeComparisons` each contribute approximately 864 MB. W2 outcome
+audits include 1610282232 facts-JSON bytes; build audits include 494099180
+negative-outcome JSON bytes. Exact per-table numbers and directional/context
+histograms are in `phase7-counts-lifetime.json`.
+
+The reports are 50089 bytes / SHA-256
+`be290b0aab4046274f1c521de3985e7d18549179db726c689e23a2802151eddb`
+(W1) and 41636 bytes /
+`701058ce8d3a40d680d41ce51c79beff791f1a1d05278fe24b14dd684d6b2d22`
+(W2). Timer frequency is 10000000 ticks/sec.
+
+#### Lifetime, graph sharing and retained-owner limitations
+
+The collector retains counters, scalar descriptions and first-128-distinct weak
+targets per stage/category, with a ConditionalWeakTable for de-duplication;
+it does not strongly root observed owners. Forced collections occur outside
+operation clocks in this separate run. W1 has a no-inline frame boundary;
+W2's final observation is after its completed await. Neither is a universal
+heap census. W2's first checkpoint deliberately keeps the returned build alive.
+
+| Checkpoint | Managed / private / working bytes | Important live weak targets |
+|-|-:|-|
+| W1 consumers done; ordinary locals live | 39335816 / 242208768 / 357175296 | Connection 3/3 slots; operation/catalog/facts/payload/proof/product slots zero |
+| W1 after returned frame | 25658360 / 213114880 / 330362880 | **0/2646** slots, including connections |
+| W2 consumers done; returned build live | 5201245400 / 12540301312 / 12607336448 | Build 1/1; connections 1/3; effective-definition graphs 4/402; operation/evidence/packet/facts/proof/product/payload slots zero |
+| W2 after completed await | 30468200 / 12389109760 / 12455575552 | **0/2414** slots, including returned build and connections |
+
+Slots can reference the same connection at multiple operation entries.
+The four W2 graph dictionaries surviving with ordinary locals alive are
+compatible with the still-live persisted negative witnesses; their unique
+retaining path was not heap-inspected. No unique graph-byte claim follows.
+W2's post-return private reservation is not assigned to a live managed graph.
+
+At actual release sites W1 disposes 3 operations, 125 facts and 3 prepared
+catalogs; W2 disposes 6 operations, 14 facts and 8 catalogs (including other
+explicitly owning paths). All counted post-disposal operation dictionary edges
+and catalog structure/element/facts row edges are zero. Payload release sites
+clear 2079 W1 and 2723 W2 entries; not all legacy W2 catalogs are explicitly
+disposed, so do not equate that with every parse having an explicit release.
+No owner-projection or proof-with-emitted-owner hook fired in either workload,
+as on the baseline. This is measured zero, not coverage of a nonzero projection
+workload or permission to remove projection obligations.
+
+Constructed graph **edges**, not unique objects/heap bytes: W1 has 10599
+effective-definition element edges, 15556 use-branch element edges and 2544
+proof objects with 13392/11080/628 required/native/reason edges. W2 has
+104172/54848 definition/use element edges and 19805 proof objects with
+158484/146752/30983 required/native/reason edges. Child edges are zero.
+Release observes 360 W1 outcome-product and 216 export-product decision edges;
+W2 observes 2413 each. These can share immutable elements/proofs.
+
+Scalar inspections of actual reused/returned objects qualify the weak results:
+
+- The bounded `ElementComparer` has `_operation == null` after return.
+  The top-level comparer/generator/exporter expose none of the inspected
+  catalog/operation/cache fields; that empty scalar result is not proof about
+  every hidden field.
+- The legacy bounded `ElementOutcomeGenerator` **still retains** its readonly
+  catalog with 1257 structures, 54266 elements and 1257 raw facts while the
+  generator is kept alive; payload/payload-element caches are empty, roots=2,
+  `_operation == null`. Its source/target element/type arrays also remain.
+  This is observable relational/raw-JSON retention, not universal release.
+  Fresh independent-call authority cannot be inferred merely from zero
+  payloads or from collection after the whole workload returns.
+- The bounded builder has null operation/catalog/representations/tracking and
+  zero decision/target-type/canonical/reference caches after return.
+  Returned `BuiltDefinitions.Representations` has null catalog/profile-facts,
+  but intentionally retains read-only construction rows and pair lookups:
+  25927 elements, 546 structures, 32805 types, 1572 value sets and its built
+  profile/native representation information. Those returned rows are not a
+  live readiness capability and can share captured immutable strings.
+- Only the managed objects/fields above were sampled. No full native provider,
+  event-list or CLR heap partition was taken; connection weak collection and
+  observed disposal do not prove a universal provider-lifetime ceiling.
+
+#### Sample semantic diff, diagnosis and ownership gate
+
+The retained baseline and run-2 candidate file
+`output/hl7.fhir.uv.xver-r2.r3/input/resources/StructureDefinition-profile-PreparedConsumer.json`
+were read as raw bytes. Their raw SHA-256 values are
+`f54df4fb5967cf7c7d44fe18aaf1b351456c69d6c40cc24220ca06a197e8596a`
+and `49561a37eae12cf0c31e56b23e5455aff3f8055bfc3812eccd62b535a392f4ef`.
+The **sole substitution** is the already-recorded resource `#date`:
+`2026-11-18T13:37:38.5676473-06:00` and
+`2026-11-19T10:23:44.8857978-06:00` each map consistently to the existing
+`<runtime-timestamp-16>` token. After that, decoded text is exactly identical
+(1929 characters) and the semantic diff is **empty**. No keys, versions,
+owners, constraints, alternatives, canonicals or map provenance were removed.
+This is one sample, not a full-output equivalence census; the unchanged frozen
+assertions additionally passed in all measured runs.
+
+Concrete diagnosis within the approved architecture:
+
+1. W1's newly required repeated all-field raw audits are a large observed
+   expense (20.60 seconds in the counted run). Raw `Audit` currently calls
+   `Read`, which uses generated typed selectors plus supplemental stored-column
+   SELECTs before exact comparison. Preserving every boundary and exact raw
+   field/member comparison is mandatory; reducing audits is not a proposed fix.
+2. W2's 33.44 seconds of raw-audit scopes **does not explain** its roughly
+   375-second net regression. Source inspection identifies a specific additional
+   repeated-work candidate: `XVerStructureCatalog.HasValueSet` calls
+   `_evidence.Rows<DbValueSet>` for every qualified existence query, copying
+   **the entire captured collection** before filtering. The baseline uses a
+   qualified `SelectList`. `DbValueSetOperand.ToRow` reparses Compose and other
+   FHIR components for every copied row. `ProfileUseFacts` invokes this in
+   required-binding proofs. This is a source-supported costly path, **not a
+   measured attribution of all remaining seconds**; no per-lookup timer was
+   installed. `GetElementMapping` likewise copies its entire captured table.
+3. The narrow suggested ownership adjustment is permanent internal work in
+   `XVerStructureCatalog.cs` and `XVerOperandEvidence.cs`: exact immutable
+   captured-row existence/key lookup without decoding unrelated rows, and
+   investigation of exact raw replay without unnecessary semantic decoding.
+   Keep independent expected-write transitions, all persisted fields/nulls,
+   membership, live stamps/coherence, all audit boundaries, optional contracts,
+   independent persisted verification and no cross-command reuse. This is a
+   request for parent disposition, not an implemented optimization or guaranteed
+   speedup. If additional owners are needed, stop for ownership again.
+
+No material production edit is permitted by Phase 7's current **temporary
+instrumentation only** ownership. Therefore net acceptance is genuinely blocked
+in this slice. No assertion, inventory, proof, audit or workload was weakened to
+turn the measurements green. The two requested named matrix expansions
+`EveryOperandCategoryIsAuditedAtOriginalBoundaries` and
+`WarmProductsCannotHidePersistedDecisionTampering` were **not implemented** in
+this dispatch. Existing extensive Phase 2–6 matrix/lifecycle tests remain, but
+are not relabeled as completion of the missing Phase 7 matrix. Additional
+emitted-owner/branch matrix closure and exhaustive reused-seam authority
+acceptance likewise remain unclaimed. The parent must retain these outstanding
+gates along with the measured performance blocker; a successful correctness
+rerun alone cannot close them.
+
+#### Exact temporary-source restoration
+
+Each of the six pre-hook and executed images is retained as `<filename>.original`
+and `<filename>.instrumented` under
+`temp/xver-phase7-count-evidence-20261119/`. After run 5, all six source files
+were restored and compared byte-for-byte both with their saved originals and
+`git cat-file --filters HEAD:<path>`, **before** the correctness rerun:
+
+| Restored file | Bytes | Restored SHA-256 |
+|-|-:|-|
+| `DbStructureDefinitionFacts.cs` | 29169 | `b2f62026e03db65544b20dadfbfdebfaf4903f3f6fdd9462647ee5add0b29a82` |
+| `XVerStructureCatalog.cs` | 36324 | `88f1ba394f048e7305db6b69eff2ba73944c87e7f579b7e231b937bb39d053dc` |
+| `ProfileUseFacts.cs` | 137910 | `a4f64cc78d4c34b8128ca0400c1a24dcff440fed3108d6eb8d33614a40cb1c7d` |
+| `XVerOperandEvidence.cs` | 253764 | `ccb553e5a262e728675644e9fa1dc076083866a438e534c297c17696b43126bb` |
+| `XVerPreparedOperation.cs` | 31061 | `4061d9ce377563d14e68a02627b01e7c23eaac9d448f497861ccacb3fd14215c` |
+| `XVerPreparedOperationTests.cs` | 248930 | `6a067b36f19de26d148e4e8cda3f8fc1e4f8e9254a42e3ee92a3315ec3cc077c` |
+
+Instrumented SHA-256 values in the same file order:
+`e0e96d35088f4e13b49ab2361b9ddb47ca072776cabfddc242121e491615aa1a`,
+`b3b1feba8ddd73bd188c89e63701a70da1663417f96ec4d40e4d72e6fae054cf`,
+`a18b3b6c8b6d04762fae420c93c193018b387d326dec5f410bfb125e00b0c75d`,
+`0759df2a5c4e2491d44fe8c86eaed9526e7ad9815f706021a0b83e955b5dea1e`,
+`8a8b5ab5dd6ffbea9ef43fe3613c3176529cb861e1ced4005274248f65a5fecc`,
+`531eb8e50ff4a20de411f0d1dbdce5526d87ec60f3daf783b455b7ab0cd9b21e`.
+
+No production telemetry, test observation hook, runtime switch, alternate
+engine or permanent benchmark was retained. No stage/commit/push/PR occurred.
+The only intended persistent edit from this slice is this evidence appendix.
+No new automatic design/contract assumption is proposed for the parent's
+ASSUMPTION ledger; the scope adjustment above remains unapproved.
+Post-run-7 source comparisons again found all six original/restored byte
+images identical to checkout-filtered HEAD. The spec retains CRLF and no bare
+LF; `git diff --check` passes, the index is empty, HEAD is unchanged, and the
+only tracked modification is this owned specification. All invoked commands
+completed; none was abandoned or left running.
+
 ## Algorithm
 
 1. If `forceCreate` is false and `_dbName` is not empty, open the named database with `_db = new(_dbPath, _dbName, _config.LogFactory)` and return (historical location: `XVerProcessor.cs:509-519`). The existing-database constructor rejects a missing file with `FileNotFoundException` and its path, without creating a parent directory. It opens with `SqliteOpenMode.ReadWrite`, checks `sqlite_master` for `DbFhirPackage.DefaultTableName` before loading indices, and throws `InvalidDataException` with the database path and rebuild guidance if the table is absent. Constructor initialization failures dispose the connection and rethrow the original exception; there is no fallback to fresh creation.
