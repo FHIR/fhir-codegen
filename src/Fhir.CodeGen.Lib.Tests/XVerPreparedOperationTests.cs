@@ -2454,7 +2454,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         return (string)command.ExecuteScalar()!;
     }
 
-    private sealed class ObservedOperandConnection(SqliteConnection connection) : DbConnection
+    internal sealed class ObservedOperandConnection(SqliteConnection connection) : DbConnection
     {
         internal List<string> Statements { get; } = [];
         internal Action<string>? BeforeExecute { get; set; }
