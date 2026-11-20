@@ -190,6 +190,16 @@ certify outcomes over old element-mapping provenance.
 12. For each parsed FML map, `FmlLoader` records a `MappingSourceFiles` row, resolves source/target structures and root group parameters against the database, walks simple-copy and complex mapping expressions to collect source-to-target element path relationships, and then reconciles those paths into `StructureMappings`/`ElementMappings` by adding missing rows or updating FML source metadata on existing rows (`FmlLoader.cs:189-403`, `FmlLoader.cs:575-895`, `FmlLoader.cs:1128-1408`).
 13. After all categories and FML, call `UnsafeCodeSourceReader.ResolveOwners`, publish completed inputs and their inventory binding last, and return `true`; `LoadFhirCrossVersionMaps` propagates failure instead of ignoring `false`.
 
+### FML catalog lifetime (steps 11–12)
+
+One synchronous `LoadSourceFml` call shares a lazy `XVerStructureCatalog` across files, package pairs, both directions, and recursive groups. It asks for the catalog only to resolve a `uses` declaration, an explicit native type not found among the symbols, or a candidate type during dotted-path fallback. A traversal that never reaches those lookups does not read the catalog tables. On return or failure the call disposes its catalog, not the borrowed connection; a later call starts without a catalog.
+
+Before each such lookup, the loader reads `PRAGMA main.data_version` on the same continuously open SQLite connection. Its own mapping writes do not invalidate the catalog. A commit to the main database from another connection, even to an unrelated table, causes the next lookup to discard the stale catalog and rebuild it. The loader keeps the **pre-construction** version only after construction succeeds: a commit during construction prompts another rebuild at the next lookup, and a failed construction leaves nothing cached, so a later file can retry.
+
+This is a freshness check at lookup time, not snapshot isolation. The traversal requires exclusive use of its physical connection; the check cannot detect same-connection definition edits by a callback. Per-file symbols remain local, and filtered element/type queries and mapping/provenance reads and writes still use the database. Catalog reuse neither replaces the preflight before map reset (step 4) nor certifies the inventory binding at publication (step 13).
+
+**Fixture only:** In three serial Release observations per revision, median FML traversal time fell from 183.498 to 140.191 ms and median whole-map load time from 871.397 to 801.379 ms. Within the FML traversal, the median gaps between successive successful file messages fell from 25.673 to 18.222 ms (Forward to Sliced) and from 34.568 to 23.267 ms (Sliced to Authored). The stable traversal performed one full scan of each of the five catalog tables, down from twelve per table; this count excludes filtered queries and other load stages.
+
 ## Decision Points
 
 - **Rule:** A database is loaded implicitly if this step is invoked before `_db` is initialized. **Source:** `XVerProcessor.cs:792-799`. **Rationale:** This lets `load-maps` work without the caller separately opening the comparison database, while still throwing if the database cannot be created or opened.
