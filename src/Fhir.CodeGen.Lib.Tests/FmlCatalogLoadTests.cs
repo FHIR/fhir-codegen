@@ -11,6 +11,7 @@ using System.Text.RegularExpressions;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Comparison.CrossVersionSource;
 using Fhir.CodeGen.Comparison.Models;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -42,6 +43,210 @@ public class FmlCatalogLoadTests(ITestOutputHelper output)
     [InlineData(true)]
     [InlineData(false)]
     public void CountFixedWorkload(bool wholeLoad) => Run(Corpus.Complete, wholeLoad, observe: true, persisted: true);
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("empty")]
+    [InlineData("primitives")]
+    [InlineData("malformed")]
+    public void NoDemandDoesNotReadCatalog(string input)
+    {
+        WithTraversal(false, (fixture, observer, log, traversal) =>
+        {
+            string root = fixture.SourceRoot;
+            string filename = WriteCarrierMap(fixture, 0, 1, input);
+            switch (input)
+            {
+                case "missing": root = Path.Combine(root, "absent"); break;
+                case "empty": File.Delete(filename); break;
+                case "malformed": File.WriteAllText(filename, "group Broken(source"); break;
+            }
+
+            traversal.LoadSourceFml(root);
+
+            foreach (string table in Tables)
+            {
+                observer.Statements.ShouldNotContain(sql => IsTableRead(sql, table));
+            }
+            log.Messages.ShouldNotContain(m => m.Message.StartsWith("Maps from FML for "));
+            if (input == "malformed")
+            {
+                log.Messages.ShouldContain(m => m.Message == $"Error loading {filename}: could not parse");
+            }
+            else if (input == "missing")
+            {
+                log.Messages.ShouldContain(m => m.Message == $"Path not found: {Path.Combine(root, "input")}");
+            }
+            else
+            {
+                log.Messages.ShouldNotContain(m => m.Level >= LogLevel.Warning);
+            }
+        });
+    }
+
+    [Fact]
+    public void SecondCallOnSameLoaderUsesCurrentDefinitions()
+    {
+        WithTraversal(false, (fixture, observer, log, traversal) =>
+        {
+            string first = WriteCarrierMap(fixture, 0, 1, "First");
+            traversal.LoadSourceFml(fixture.SourceRoot);
+            AssertCarrierEdge(fixture, first, 0, 1);
+            File.Delete(first);
+
+            DbStructureDefinition changed = fixture.Structure(fixture.Packages[2], "Carrier");
+            RenameDefinition(fixture.Connection, changed);
+            string second = WriteCarrierMap(fixture, 2, 0, "Second");
+            observer.Statements.Clear();
+            traversal.LoadSourceFml(fixture.SourceRoot);
+            AssertScanBudget(observer, 1);
+            AssertCarrierEdge(fixture, second, 2, 0);
+            log.Messages.ShouldNotContain(m => m.Level >= LogLevel.Warning);
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FailedCatalogAcquisitionIsLocalToOneFile(bool replacement)
+    {
+        WithTraversal(replacement, (fixture, observer, log, traversal) =>
+        {
+            DbStructureDefinition changed = fixture.Structure(fixture.Packages[2], "Carrier");
+            string? first = replacement ? WriteCarrierMap(fixture, 0, 1, "First") : null;
+            string failed = WriteCarrierMap(fixture, 1, 0, "Failed");
+            string retry = WriteCarrierMap(fixture, 2, 0, "Retry",
+                sourceUrl: replacement ? ChangedUrl + "|" + changed.Version : null);
+            using SqliteConnection? writer = replacement ? new(fixture.Connection.ConnectionString) : null;
+            writer?.Open();
+            bool committed = false, injected = false;
+            observer.BeforeExecute = sql =>
+            {
+                // The next direction logs its directory before executing any SQL for its file.
+                if (writer != null && !committed && log.Messages.Any(m =>
+                    m.Message == $"Loading FML maps from: {Path.GetDirectoryName(failed)}"))
+                {
+                    RenameDefinition(writer, changed);
+                    committed = true;
+                }
+                if (!injected && (!replacement || committed) && IsFullRead(sql, "Structures"))
+                {
+                    injected = true;
+                    throw new InvalidOperationException("injected catalog read failure");
+                }
+            };
+            traversal.LoadSourceFml(fixture.SourceRoot);
+
+            injected.ShouldBeTrue();
+            if (first != null)
+            {
+                committed.ShouldBeTrue();
+                AssertCarrierEdge(fixture, first, 0, 1);
+            }
+            log.Messages.Where(m => m.Level >= LogLevel.Error).Select(m => m.Message)
+                .ShouldBe(new[] { $"Error loading {failed}: injected catalog read failure" });
+            int failedKey = DbMappingSourceFile.SelectSingle(fixture.Connection, Filename: Path.GetFileName(failed))!.Key;
+            DbStructureMapping.SelectList(fixture.Connection, FmlSourceKey: failedKey).ShouldBeEmpty();
+            DbElementMapping.SelectList(fixture.Connection, FmlSourceKey: failedKey).ShouldBeEmpty();
+            AssertCarrierEdge(fixture, retry, 2, 0);
+        });
+    }
+
+    [Fact]
+    public void CommitBetweenConstructorReadersIsVisibleAtNextDeclaration()
+    {
+        WithTraversal(true, (fixture, observer, log, traversal) =>
+        {
+            DbStructureDefinition target = fixture.Structure(fixture.Packages[1], "Carrier");
+            string file = WriteCarrierMap(fixture, 0, 1, "DuringRead", targetUrl: ChangedUrl + "|" + target.Version);
+            using SqliteConnection writer = new(fixture.Connection.ConnectionString);
+            writer.Open();
+            bool committed = false;
+            observer.BeforeExecute = sql =>
+            {
+                // Structures has been materialized for the source declaration; no reader is open.
+                if (!committed && IsFullRead(sql, "FhirPackages"))
+                {
+                    observer.Statements.Count(s => IsFullRead(s, "Structures")).ShouldBe(1);
+                    RenameDefinition(writer, target);
+                    committed = true;
+                }
+            };
+            traversal.LoadSourceFml(fixture.SourceRoot);
+
+            committed.ShouldBeTrue();
+            AssertScanBudget(observer, 2);
+            log.Messages.ShouldNotContain(m => m.Level >= LogLevel.Warning);
+            AssertCarrierEdge(fixture, file, 0, 1);
+        });
+    }
+
+    private const string ChangedUrl = "http://example.org/StructureDefinition/ChangedCarrier";
+
+    private static void RenameDefinition(IDbConnection db, DbStructureDefinition owner)
+    {
+        owner.UnversionedUrl = ChangedUrl;
+        owner.VersionedUrl = ChangedUrl + "|" + owner.Version;
+        DbStructureDefinition.Update(db, [owner]);
+    }
+
+    private static void WithTraversal(bool persisted, Action<UnsafeCodeTestFixture, ObservedConnection, MessageLog, FmlLoader> test)
+    {
+        using UnsafeCodeTestFixture fixture = new(initializeIndices: true, persistDatabase: persisted);
+        ArrangeInventory(fixture, padded: false);
+        using ObservedConnection observer = new(fixture.Connection);
+        using MessageLog log = new();
+        using MappingLoader loader = new(observer, log);
+        loader.TryLoadCrossVersionSourceMaps(fixture.SourceRoot, true).ShouldBeTrue();
+        FmlLoader traversal = new(loader, observer, fixture.Packages, log);
+        observer.Statements.Clear();
+        log.Messages.Clear();
+        test(fixture, observer, log, traversal);
+    }
+
+    private static string WriteCarrierMap(UnsafeCodeTestFixture fixture, int s, int t, string name,
+        string? sourceUrl = null, string? targetUrl = null)
+    {
+        DbFhirPackage src = fixture.Packages[s], tgt = fixture.Packages[t];
+        sourceUrl ??= fixture.Structure(src, "Carrier").VersionedUrl;
+        targetUrl ??= fixture.Structure(tgt, "Carrier").VersionedUrl;
+        string directory = Directory.CreateDirectory(Path.Combine(fixture.SourceRoot, "input", $"{src.ShortName}to{tgt.ShortName}")).FullName;
+        string file = Path.Combine(directory, name + ".fml");
+        File.WriteAllText(file, $$"""
+            /// url = "http://example.org/StructureMap/{{name}}"
+            /// name = "{{name}}"
+            uses "{{sourceUrl}}" alias SourceOwner as source
+            uses "{{targetUrl}}" alias TargetOwner as target
+            group Main(source src : SourceOwner, target tgt : TargetOwner) {
+              src.value -> tgt.value;
+            }
+            """);
+        return file;
+    }
+
+    private static void AssertCarrierEdge(UnsafeCodeTestFixture fixture, string filename, int s, int t)
+    {
+        DbMappingSourceFile file = DbMappingSourceFile.SelectSingle(fixture.Connection, Filename: Path.GetFileName(filename))!;
+        DbElementMapping edge = DbElementMapping.SelectList(fixture.Connection, FmlSourceKey: file.Key).Single();
+        edge.SourceStructureKey.ShouldBe(fixture.Structure(fixture.Packages[s], "Carrier").Key);
+        edge.TargetStructureKey.ShouldBe(fixture.Structure(fixture.Packages[t], "Carrier").Key);
+        edge.SourceElementId.ShouldBe("Carrier.value[x]");
+        edge.TargetElementId.ShouldBe("Carrier.value[x]");
+    }
+
+    private static bool IsTableRead(string sql, string table) => Regex.IsMatch(sql,
+        $@"^\s*SELECT\b.*?\bFROM\s+{table}\b", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+    private static bool IsFullRead(string sql, string table) =>
+        IsTableRead(sql, table) && !Regex.IsMatch(sql, @"\bWHERE\b", RegexOptions.IgnoreCase);
+
+    private static void AssertScanBudget(ObservedConnection observer, int expected)
+    {
+        foreach (string table in Tables)
+        {
+            observer.Statements.Count(sql => IsFullRead(sql, table)).ShouldBe(expected, table);
+        }
+    }
 
     [Fact]
     public void MeasureFixedFmlTraversal() => Run(Corpus.Complete, wholeLoad: false, observe: false, persisted: true);
@@ -87,10 +292,13 @@ public class FmlCatalogLoadTests(ITestOutputHelper output)
         success.ShouldBeTrue();
         if (observer != null)
         {
+            if (!wholeLoad)
+            {
+                AssertScanBudget(observer, 1);
+            }
             foreach (string table in Tables)
             {
-                string[] reads = [.. observer.Statements.Where(sql => Regex.IsMatch(sql,
-                    $@"^\s*SELECT\b.*?\bFROM\s+{table}\b", RegexOptions.Singleline | RegexOptions.IgnoreCase))];
+                string[] reads = [.. observer.Statements.Where(sql => IsTableRead(sql, table))];
                 int filtered = reads.Count(sql => Regex.IsMatch(sql, @"\bWHERE\b", RegexOptions.IgnoreCase));
                 output.WriteLine($"SQL {table}: full={reads.Length - filtered} filtered={filtered}");
             }
