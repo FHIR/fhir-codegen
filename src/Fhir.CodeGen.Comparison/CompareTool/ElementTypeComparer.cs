@@ -163,6 +163,8 @@ public class ElementTypeComparer
     private bool NeedsProfileProof(IEnumerable<DbElementType> types) => types.Any(type =>
         type.TypeProfile is not null || type.TargetProfile is not null || _catalog!.IsQuantityFamily(_catalog.ResolveTypeUse(type)));
 
+    private int? GetTypeMappingKey(DbElementType type) =>
+        type.TypeStructureKey ?? _catalog!.ResolveQuantityProfileRootType(type)?.Key;
 
     private ElementTypeComparisonTrackingRecord doTypeComparison(
         FhirPackageComparisonPair packagePair,
@@ -174,9 +176,9 @@ public class ElementTypeComparer
         // get the target types
         List<DbElementType> targetTypes = EffectiveTypes(targetElement);
         ILookup<int, DbElementType> targetTypesByStructureKey = targetTypes.ToLookup(et => et.StructureKey);
-        ILookup<int?, DbElementType> targetTypesByTypeStructureKey = targetTypes.ToLookup(et => et.TypeStructureKey);
+        ILookup<int?, DbElementType> targetTypesByTypeStructureKey = targetTypes.ToLookup(GetTypeMappingKey);
 
-        if (targetTypes.Any(et => et.TypeStructureKey is null))
+        if (targetTypesByTypeStructureKey.Contains(null))
         {
             _logger.LogWarning($"Target element {targetElement.Id} ({targetElement.Key}) has no resolved type structure!");
             return new()
@@ -197,10 +199,7 @@ public class ElementTypeComparer
         }
 
         // get the list of all target structure keys for fast comparison matching
-        List<int> targetTypeStructureKeys = targetTypes
-            .Select(et => et.TypeStructureKey!.Value)
-            .Distinct()
-            .ToList();
+        List<int> targetTypeStructureKeys = [.. targetTypesByTypeStructureKey.Select(group => group.Key!.Value)];
 
         CMR? relationship = CMR.Equivalent;
         List<string?> technicalMessages = [];
@@ -212,12 +211,13 @@ public class ElementTypeComparer
         // iterate over the source types
         foreach (DbElementType sourceType in sourceTypes)
         {
+            int? sourceTypeStructureKey = GetTypeMappingKey(sourceType);
             // get the known mappings for this source and any possible targets
             List<DbStructureMapping> typeStructureMappings = DbStructureMapping.SelectList(
                 _db,
                 IsFallback: false,
                 SourceFhirPackageKey: sourceType.FhirPackageKey,
-                SourceStructureKey: sourceType.TypeStructureKey,
+                SourceStructureKey: sourceTypeStructureKey,
                 TargetFhirPackageKey: packagePair.TargetPackageKey,
                 TargetStructureKeyValues: targetTypeStructureKeys);
 
@@ -267,7 +267,7 @@ public class ElementTypeComparer
                 _db,
                 IsFallback: true,
                 SourceFhirPackageKey: sourceType.FhirPackageKey,
-                SourceStructureKey: sourceType.TypeStructureKey,
+                SourceStructureKey: sourceTypeStructureKey,
                 TargetFhirPackageKey: packagePair.TargetPackageKey,
                 TargetStructureKeyValues: targetTypeStructureKeys);
 

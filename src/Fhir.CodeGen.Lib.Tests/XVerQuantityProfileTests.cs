@@ -583,6 +583,12 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         DbStructureDefinition target = catalog.ResolveDefinition(targetPackage.Key, "http://hl7.org/fhir/StructureDefinition/Age|4.0.1")!;
         EffectiveProfileBranch sourceFacts = facts.ForDefinition(source);
         EffectiveProfileBranch targetFacts = facts.ForDefinition(target);
+        DbElementType sourceRootType = catalog.GetTypeUses(sourceFacts.Root).ShouldHaveSingleItem();
+        catalog.ResolveNativeType(sourcePackage.Key, "Age", required: false).ShouldBeNull();
+        catalog.ResolveTypeUse(sourceRootType).Key.ShouldBe(source.Key);
+        EffectiveProfileUse rootUse = facts.AtUse(sourceFacts.Root, sourceRootType);
+        rootUse.Diagnostics.ShouldBeEmpty();
+        rootUse.Branches.ShouldHaveSingleItem().Definition.Key.ShouldBe(source.Key);
         ProfileInvariant sourceInvariant = sourceFacts.Elements[""].Invariants.Single(invariant => invariant.Key == "age-1");
         ProfileInvariant targetInvariant = targetFacts.Elements[""].Invariants.First(invariant => invariant.Key == "age-1");
         AssertAgeZeroWitness(sourceInvariant, targetInvariant);
@@ -597,6 +603,29 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         native.Diagnostics.ShouldContain(message => message.Contains("target restriction not entailed") && message.Contains("age-1"));
         ProfileRepresentationProof quantity = facts.Prove(sourceFacts, catalog.ResolveNativeType(targetPackage.Key, "Quantity")!);
         quantity.PreservesRestrictions.ShouldBeFalse();
+
+        DbMappingClasses.CreateTables(imported.Connection);
+        FhirPackageComparisonPair pair = new(sourcePackage, targetPackage);
+        DbStructureMapping.Insert(imported.Connection, new DbStructureMapping
+        {
+            SourceFhirPackageKey = pair.SourcePackageKey, TargetFhirPackageKey = pair.TargetPackageKey,
+            SourceFhirSequence = pair.SourceFhirSequence, TargetFhirSequence = pair.TargetFhirSequence,
+            SourceStructureKey = source.Key, TargetStructureKey = target.Key,
+            SourceStructureId = source.Id, TargetStructureId = target.Id,
+            SourceStructureUrl = source.UnversionedUrl, TargetStructureUrl = target.UnversionedUrl,
+            ConceptMapSourceKey = null, ConceptMapFilename = null, FmlSourceKey = null, FmlFilename = null,
+            Relationship = ConceptMap.ConceptMapRelationship.Equivalent, ExplicitNoMap = false, IsFallback = false,
+            ConceptDomainRelationship = null, ValueDomainRelationship = null,
+        });
+        DbComparisonCache<DbElementTypeComparison> comparisons = new();
+        new ElementTypeComparer(imported.Connection, NullLoggerFactory.Instance, comparisons)
+            .DoTypeComparisons(pair, sourceFacts.Root, targetFacts.Root, 1);
+        DbElementTypeComparison comparison = comparisons.ToAdd.ShouldHaveSingleItem();
+        comparison.SourceElementTypeKey.ShouldBe(sourceRootType.Key);
+        comparison.NotMapped.ShouldBeTrue();
+        ProfileDecisionDocument decision = JsonSerializer.Deserialize<ProfileDecisionDocument>(comparison.TechnicalMessage!)!;
+        decision.Decisions.ShouldHaveSingleItem().Reasons.ShouldContain(reason =>
+            reason.Category == ProfileReasonCategory.InvariantTransformation);
         output.WriteLine($"Required unrepresentable native reuse: {source.VersionedUrl}#{sourceFacts.Root.Id} -> {target.VersionedUrl}#{targetFacts.Root.Id}; source permits value=0/code=a, target age-1 rejects it. A Quantity fallback also needs retained source restrictions and cannot produce a standalone datatype profile.");
     }
 

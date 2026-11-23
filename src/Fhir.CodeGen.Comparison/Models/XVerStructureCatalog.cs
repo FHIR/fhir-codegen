@@ -6,6 +6,7 @@
 using System.Data;
 using System.Text.RegularExpressions;
 using Fhir.CodeGen.Common.Models;
+using Fhir.CodeGen.Common.Packaging;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Utility;
 
@@ -524,12 +525,11 @@ internal sealed class XVerStructureCatalog : IDisposable
             ValidateTypeKeys(type);
             try
             {
-                ResolveNativeType(type.FhirPackageKey, type.TypeName, type.TypeStructureKey,
-                    context: $"element type {type.Key} owner {type.StructureKey}");
                 if (type.TypeProfile is not null || type.TypeProfileStructureKey is not null)
                 {
-                    ResolveTypeUse(type);
+                    ResolveNativeType(type.FhirPackageKey, type.TypeName, type.TypeStructureKey, context: TypeUseContext(type));
                 }
+                ResolveTypeUse(type);
 
                 if (type.TargetProfile is not null || type.TargetProfileStructureKey is not null)
                 {
@@ -579,8 +579,33 @@ internal sealed class XVerStructureCatalog : IDisposable
             return ResolveDefinition(type.FhirPackageKey, canonical, key, context: context)!;
         }
 
-        return ResolveNativeType(type.FhirPackageKey, type.TypeName, type.TypeStructureKey,
+        return ResolveQuantityProfileRootType(type) ?? ResolveNativeType(type.FhirPackageKey, type.TypeName, type.TypeStructureKey,
             context: context)!;
+    }
+
+    internal DbStructureDefinition? ResolveQuantityProfileRootType(DbElementType type) =>
+        type.TypeStructureKey is null && type.TypeProfile is null && type.TypeProfileStructureKey is null &&
+        type.TargetProfile is null && type.TargetProfileStructureKey is null &&
+        _elements.TryGetValue(type.ElementKey, out DbElement? element) &&
+        element.FhirPackageKey == type.FhirPackageKey && element.StructureKey == type.StructureKey
+            ? ResolveQuantityProfileRootType(element, type.TypeName)
+            : null;
+
+    internal DbStructureDefinition? ResolveQuantityProfileRootType(DbElement element, string? typeName)
+    {
+        if (element.ResourceFieldOrder != 0 ||
+            !_packages.TryGetValue(element.FhirPackageKey, out DbFhirPackage? package) ||
+            package.DefinitionFhirSequence != FhirReleases.FhirSequenceCodes.DSTU2)
+        {
+            return null;
+        }
+
+        DbStructureDefinition owner = RequireOwner(element);
+        // DSTU2 normalization writes the definition's own Id as its root type.
+        return owner.ArtifactClass == FhirArtifactClassEnum.Profile && owner.Id == typeName &&
+            GetDeclaredType(owner) == "Quantity" && IsQuantityFamily(owner) && ResolveRoot(owner).Key == element.Key
+            ? owner
+            : null;
     }
 
     internal DbElement ResolveContentReference(DbElement element)

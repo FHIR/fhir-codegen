@@ -106,8 +106,12 @@ definition version, and an element by package + structure key + exact ElementId.
 Canonical `|version` means definition version, never package release; unversioned
 references must resolve uniquely and stored foreign keys must agree. Native-name
 lookup excludes profiles. A missing declared profile cannot fall back to its base
-`TypeStructureKey`. Needed roots have one owner-scoped field-order-zero element,
-no parent and a valid top-level Path. Exact sliced IDs survive, notably R3
+`TypeStructureKey`. A normalized DSTU2 Quantity profile can name its own Id as
+the type of its exact root (for example, `Age` at `Age|1.0.2#Quantity`). XVer
+resolves that root type to the owning profile for comparisons and effective facts,
+not to a native datatype or to unconstrained Quantity. Other type uses still
+require native or explicit canonical profile resolution. Needed roots have one
+owner-scoped field-order-zero element, no parent and a valid top-level Path. Exact sliced IDs survive, notably R3
 `Quantity:simplequantity` / Path `Quantity`, with children and parents in that
 same owner graph.
 

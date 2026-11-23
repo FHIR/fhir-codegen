@@ -708,7 +708,8 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                     try
                     {
                         DbStructureDefinition datatype = profile is null
-                            ? catalog.ResolveNativeType(owner.FhirPackageKey, type.Code, context: element.Id)!
+                            ? (targetProfile is null ? catalog.ResolveQuantityProfileRootType(element, type.Code) : null)
+                                ?? catalog.ResolveNativeType(owner.FhirPackageKey, type.Code, context: element.Id)!
                             : catalog.ResolveDefinition(owner.FhirPackageKey, profile, context: element.Id)!;
                         if (profile is not null)
                         {
