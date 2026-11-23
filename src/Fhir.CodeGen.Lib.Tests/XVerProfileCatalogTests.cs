@@ -1948,14 +1948,15 @@ public class XVerProfileCatalogTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void ExplicitTypeNameIsIgnoredOnlyWhenWellFormed(bool wellFormed)
+    [InlineData(CommonDefinitions.ExtUrlExplicitTypeName, "Total", true)]
+    [InlineData(CommonDefinitions.ExtUrlExplicitTypeName, "Total", false)]
+    [InlineData("http://hl7.org/fhir/StructureDefinition/structuredefinition-display-hint", "'360;620", true)]
+    [InlineData("http://hl7.org/fhir/StructureDefinition/structuredefinition-display-hint", "'360;620", false)]
+    public void ElementMetadataExtensionsAreIgnoredOnlyWhenWellFormed(string url, string value, bool wellFormed)
     {
         StructureDefinition simple = ConstraintProfile("NamedQuantity");
         simple.Snapshot.Element.Single(element => element.Path == "Quantity.value").Extension.Add(new(
-            CommonDefinitions.ExtUrlExplicitTypeName,
-            wellFormed ? new Hl7.Fhir.Model.FhirString("Total") : new Hl7.Fhir.Model.FhirBoolean(true)));
+            url, wellFormed ? new Hl7.Fhir.Model.FhirString(value) : new Hl7.Fhir.Model.FhirBoolean(true)));
         using CatalogImport imported = ImportUses(simple);
         using ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
         EffectiveProfileBranch branch = QuantityUse(imported, facts, simple).Branches.ShouldHaveSingleItem();

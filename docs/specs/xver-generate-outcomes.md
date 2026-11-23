@@ -79,8 +79,9 @@ If a comparison cites a missing or contradictory normalized element mapping,
 `ProfileUseFacts` warns and excludes that comparison from the profile proof.
 The normal fallback rules still apply; the warning does not make the cited
 mapping valid or establish that any restrictions are preserved.
-A well-formed `structuredefinition-explicit-type-name` on an element also
-produces a warning and is ignored as naming metadata, not a restriction.
+Well-formed `structuredefinition-explicit-type-name` and
+`structuredefinition-display-hint` extensions on an element produce a warning
+and are ignored as naming or presentation metadata, not restrictions.
 Malformed instances and other unclassified restrictions still fail the gate.
 
 `PersistNegativeDecisions` uses existing

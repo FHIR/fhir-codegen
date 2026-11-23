@@ -173,7 +173,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     private readonly Dictionary<(int, int, int), EffectiveProfileUse> _uses = [];
     private readonly HashSet<int> _active = [];
     private readonly HashSet<int> _warnedMappingComparisons = [];
-    private readonly HashSet<ProfileFactOrigin> _warnedExplicitTypeNames = [];
+    private readonly HashSet<(ProfileFactOrigin Origin, string Url)> _warnedMetadata = [];
     private readonly ILookup<int, DbElementComparison> _correspondenceComparisons = (comparisons ?? [])
         .Where(comparison => comparison.SourceFhirPackageKey == sourcePackageKey && comparison.TargetFhirPackageKey == targetPackageKey)
         .ToLookup(comparison => comparison.SourceElementKey);
@@ -1414,13 +1414,15 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             {
                 foreach (JsonElement extension in property.Value.EnumerateArray())
                 {
-                    if (Text(extension, "url") == CommonDefinitions.ExtUrlExplicitTypeName &&
-                        Text(extension, "valueString") is string explicitName && !string.IsNullOrWhiteSpace(explicitName) &&
+                    string? url = Text(extension, "url");
+                    if (url is CommonDefinitions.ExtUrlExplicitTypeName or
+                        "http://hl7.org/fhir/StructureDefinition/structuredefinition-display-hint" &&
+                        Text(extension, "valueString") is string value && !string.IsNullOrWhiteSpace(value) &&
                         extension.EnumerateObject().All(field => field.Name is "url" or "valueString"))
                     {
-                        if (_warnedExplicitTypeNames.Add(origin))
+                        if (_warnedMetadata.Add((origin, url)))
                         {
-                            Console.Error.WriteLine($"Warning: ProfileUseFacts ignored explicit type name '{explicitName}' as naming metadata. " +
+                            Console.Error.WriteLine($"Warning: ProfileUseFacts ignored metadata extension '{url}' with value '{value}'. " +
                                 Context(owner, element.ElementId, "not a profile restriction"));
                         }
                         continue;
