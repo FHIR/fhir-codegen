@@ -173,6 +173,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     private readonly Dictionary<(int, int, int), EffectiveProfileUse> _uses = [];
     private readonly HashSet<int> _active = [];
     private readonly HashSet<int> _warnedMappingComparisons = [];
+    private readonly HashSet<ProfileFactOrigin> _warnedExplicitTypeNames = [];
     private readonly ILookup<int, DbElementComparison> _correspondenceComparisons = (comparisons ?? [])
         .Where(comparison => comparison.SourceFhirPackageKey == sourcePackageKey && comparison.TargetFhirPackageKey == targetPackageKey)
         .ToLookup(comparison => comparison.SourceElementKey);
@@ -1413,6 +1414,17 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             {
                 foreach (JsonElement extension in property.Value.EnumerateArray())
                 {
+                    if (Text(extension, "url") == CommonDefinitions.ExtUrlExplicitTypeName &&
+                        Text(extension, "valueString") is string explicitName && !string.IsNullOrWhiteSpace(explicitName) &&
+                        extension.EnumerateObject().All(field => field.Name is "url" or "valueString"))
+                    {
+                        if (_warnedExplicitTypeNames.Add(origin))
+                        {
+                            Console.Error.WriteLine($"Warning: ProfileUseFacts ignored explicit type name '{explicitName}' as naming metadata. " +
+                                Context(owner, element.ElementId, "not a profile restriction"));
+                        }
+                        continue;
+                    }
                     if (!DescriptiveExtension(extension) && !NoBindingAnnotation(extension))
                     {
                         restrictions.Add(new(ProfileRestrictionKind.Unsupported, "extension", extension.Clone(), origin));

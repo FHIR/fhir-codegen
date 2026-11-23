@@ -1947,6 +1947,25 @@ public class XVerProfileCatalogTests
         refusal.PreservesRestrictions.ShouldBeFalse();
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ExplicitTypeNameIsIgnoredOnlyWhenWellFormed(bool wellFormed)
+    {
+        StructureDefinition simple = ConstraintProfile("NamedQuantity");
+        simple.Snapshot.Element.Single(element => element.Path == "Quantity.value").Extension.Add(new(
+            CommonDefinitions.ExtUrlExplicitTypeName,
+            wellFormed ? new Hl7.Fhir.Model.FhirString("Total") : new Hl7.Fhir.Model.FhirBoolean(true)));
+        using CatalogImport imported = ImportUses(simple);
+        using ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
+        EffectiveProfileBranch branch = QuantityUse(imported, facts, simple).Branches.ShouldHaveSingleItem();
+        DbStructureDefinition native = imported.Catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
+        ProfileRepresentationProof proof = facts.Prove(branch, native);
+
+        proof.IsAcceptedDecision.ShouldBe(wellFormed);
+        proof.Reasons.Any(reason => reason.Category == ProfileReasonCategory.UnclassifiedRestriction).ShouldBe(!wellFormed);
+    }
+
     [Fact]
     public void XPathOnlyComparatorRuleHasBoundedProjectionWhenActuallyPresent()
     {
