@@ -270,10 +270,10 @@ public partial class XVerProcessor
 
                 //LoadDatabase(true);
 
-                LoadFhirCrossVersionMaps();
+                //LoadFhirCrossVersionMaps();
 
-                LoadExtensionSubstitutions();
-                LoadFhirTypeValueSets();
+                // LoadExtensionSubstitutions();
+                // LoadFhirTypeValueSets();
 
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.ValueSet, maxStepSize: 1);
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.ValueSet);
