@@ -199,6 +199,61 @@ public class UnsafeCodeComparisonTests
             outcome.TargetStructureKey == control.TargetStructureKey);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ElementConceptMapNormalizesOmittedChoiceMarkersButPrefersExactIds(bool hasExactTarget)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateProcessingEligibilityInputs();
+        FhirPackageComparisonPair pair = new(fixture.Packages[2], fixture.Packages[1]);
+        DbStructureDefinition source = fixture.Structure(pair.SourcePackage, "Quantity");
+        DbStructureDefinition target = fixture.Structure(pair.TargetPackage, "Quantity");
+        DbElement sourceChoice = fixture.AddTypedElement(source, "Quantity.example[x]", "code");
+        fixture.AddTypedElement(target, "Quantity.example", "Coding");
+        DbElement targetChoice = fixture.AddTypedElement(target, "Quantity.example.value[x]", "code");
+        DbElement expected = hasExactTarget
+            ? fixture.AddTypedElement(target, "Quantity.example.value", "code")
+            : targetChoice;
+        fixture.PublishAuthoredDefinitions();
+        fixture.WriteProcessingTypeMaps();
+        const string fallbackFilename = "ConceptMap-types-fallback.json";
+        const string primaryFilename = "ConceptMap-types-quantity-5to4B.json";
+        ConceptMap fallback = fixture.ReadMap("types", fallbackFilename);
+        ConceptMap primary = fixture.ReadMap("types", primaryFilename);
+        ConceptMap.SourceElementComponent quantity = fallback.Group[0].Element.Single(entry => entry.Code == "Quantity");
+        fallback.Group[0].Element.Remove(quantity);
+        primary.Group[0].Element.Add(quantity);
+        fixture.WriteInputMap(fallback, "types", fallbackFilename);
+        fixture.WriteInputMap(primary, "types", primaryFilename);
+        fixture.WriteOwnerElementMap(pair, source, target, "choice", annotate: true);
+        const string filename = "ConceptMap-elements-choice-5to4B.json";
+        ConceptMap map = fixture.ReadMap("elements", filename);
+        ConceptMap.SourceElementComponent entry = map.Group[0].Element[0];
+        entry.Code = "Quantity.example";
+        entry.Target[0].Code = "Quantity.example.value";
+        fixture.WriteInputMap(map, "elements", filename);
+
+        using MappingLoader loader = new(fixture.Connection, NullLoggerFactory.Instance);
+        loader.TryLoadCrossVersionSourceMaps(fixture.SourceRoot, false).ShouldBeTrue();
+
+        DbElementMapping mapping = DbElementMapping.SelectList(fixture.Connection,
+            SourceStructureKey: source.Key, TargetStructureKey: target.Key).ShouldHaveSingleItem();
+        mapping.SourceElementKey.ShouldBe(sourceChoice.Key);
+        mapping.SourceElementId.ShouldBe(sourceChoice.Id);
+        mapping.TargetElementKey.ShouldBe(expected.Key);
+        mapping.TargetElementId.ShouldBe(expected.Id);
+        DbProfileMapOwnerFacts owner = DbProfileMapOwnerFacts.SelectList(fixture.Connection).ShouldHaveSingleItem();
+        owner.ElementMappingKey.ShouldBe(mapping.Key);
+        owner.SourceElementId.ShouldBe(entry.Code);
+        owner.TargetElementId.ShouldBe(entry.Target[0].Code);
+
+        fixture.CompareProfilePairs(pair);
+        DbElementComparison comparison = DbElementComparison.SelectList(fixture.Connection,
+            SourceElementKey: sourceChoice.Key, TargetFhirPackageKey: pair.TargetPackageKey).ShouldHaveSingleItem();
+        comparison.TargetElementKey.ShouldBe(expected.Key);
+        comparison.ElementMappingKey.ShouldBe(mapping.Key);
+    }
+
     [Fact]
     public void AmbiguousCapturedFilePositionsFailBeforeAssociatingAnyElementEdge()
     {

@@ -270,7 +270,7 @@ public partial class XVerProcessor
 
                 //LoadDatabase(true);
 
-                //LoadFhirCrossVersionMaps();
+                LoadFhirCrossVersionMaps();
 
                 LoadExtensionSubstitutions();
                 LoadFhirTypeValueSets();

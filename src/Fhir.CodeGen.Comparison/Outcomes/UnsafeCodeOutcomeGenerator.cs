@@ -306,6 +306,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
         internal bool HasCandidates => Rules.Any(rule => !rule.NoMapOnly) ||
             (Evidence.Any(item => item.ExplicitNoMap) && (Annotations.Length > 0 || Rules.Length > 0));
         private readonly DbUnsafeCodeElementAnnotation[] _annotationRows;
+        private readonly ILookup<int?, int> _annotationKeysByMapping;
         private readonly DbProfileMapOwnerFacts[] _annotationOwners;
         private UnsafeCodeMapEvidence[] Evidence { get; }
 
@@ -364,6 +365,8 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                     .Where(row => row.RequiresOmittedMandatoryCode)];
                 _annotationRows = annotationRows;
                 _annotationOwners = [.. operation?.Evidence.Rows<DbProfileMapOwnerFacts>(DbProfileMapOwnerFacts.DefaultTableName) ?? DbProfileMapOwnerFacts.SelectList(db)];
+                _annotationKeysByMapping = _annotationOwners.Where(owner => owner.ResolutionState == ProfileMapOwnerResolution.Resolved &&
+                    owner.ElementMappingKey is not null).ToLookup(owner => owner.ElementMappingKey, owner => owner.AnnotationKey);
                 Annotations = [.. annotationRows
                     .Select(row => new UnsafeCodeElementAnnotation(
                         new(row.SourceFhirPackageKey, row.TargetFhirPackageKey, row.SourceElementId, row.TargetElementId),
@@ -423,10 +426,12 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             foreach (MappingUse authority in ContributingUses(use))
             {
                 List<DbUnsafeCodeElementAnnotation> unnormalized = [];
+                IEnumerable<int> linkedAnnotations = _annotationKeysByMapping[authority.ElementMappingKey];
                 foreach (DbUnsafeCodeElementAnnotation row in _annotationRows.Where(row =>
                     row.SourceFhirPackageKey == authority.Source.FhirPackageKey &&
                     row.TargetFhirPackageKey == authority.Target?.FhirPackageKey &&
-                    row.SourceElementId == authority.Source.Id && row.TargetElementId == authority.Target?.Id))
+                    ((row.SourceElementId == authority.Source.Id && row.TargetElementId == authority.Target?.Id) ||
+                        linkedAnnotations.Contains(row.Key))))
                 {
                     DbProfileMapOwnerFacts[] owners = [.. _annotationOwners.Where(owner => owner.AnnotationKey == row.Key &&
                         (owner.SourceStructureKey is null || owner.SourceStructureKey == authority.Source.StructureKey) &&

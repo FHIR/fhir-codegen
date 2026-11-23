@@ -68,6 +68,10 @@ release or basename. Native-name resolution excludes profiles. FML `uses` aliase
 root parameters and elements are bound to their declared owners, not a package-wide
 first matching Id. Element maps preserve exact roots/IDs, including R3
 `Quantity:simplequantity` with Path `Quantity`.
+For an authored element ConceptMap code, the loader first looks up the literal
+Id in the resolved owner. If absent, it tries that Id with `[x]` appended.
+When this resolves a choice field, the operational map stores the actual
+Id and key; the authored code remains unchanged in annotation provenance.
 
 Authored raw evidence survives passive or unresolved normalization. It is not
 thereby an operational mapping authority. `UnsafeCodeSourceReader` captures each

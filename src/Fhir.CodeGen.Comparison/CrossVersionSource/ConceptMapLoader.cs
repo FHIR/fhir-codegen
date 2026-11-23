@@ -565,6 +565,10 @@ public class ConceptMapLoader
     }
 
 
+    private DbElement? ResolveConceptMapElement(DbStructureDefinition owner, string elementId) =>
+        _catalog.ResolveOwnedElement(owner, elementId, required: false) ??
+        _catalog.ResolveOwnedElement(owner, elementId + "[x]", required: false);
+
     private int loadSourceElementMap(
         DbFhirPackage sourcePackage,
         DbFhirPackage targetPackage,
@@ -612,7 +616,7 @@ public class ConceptMapLoader
                 {
                     continue;
                 }
-                DbElement? sourceElement = _catalog.ResolveOwnedElement(sourceOwner, groupSourceElement.Code, required: false);
+                DbElement? sourceElement = ResolveConceptMapElement(sourceOwner, groupSourceElement.Code);
                 if (sourceElement is null)
                 {
                     _logger.LogWarning($"Invalid source element: `{groupSourceElement.Code}` in map: {cm.Url} ({cm.Id})!");
@@ -664,7 +668,7 @@ public class ConceptMapLoader
                             SourceFhirSequence = sourcePackage.DefinitionFhirSequence,
                             SourceStructureKey = relevantMap.SourceStructureKey,
                             SourceElementKey = sourceElement?.Key,
-                            SourceElementId = groupSourceElement.Code,
+                            SourceElementId = sourceElement?.Id ?? groupSourceElement.Code,
 
                             TargetFhirPackageKey = targetPackage.Key,
                             TargetFhirSequence = targetPackage.DefinitionFhirSequence,
@@ -696,7 +700,7 @@ public class ConceptMapLoader
                     {
                         continue;
                     }
-                    DbElement? targetElement = _catalog.ResolveOwnedElement(targetOwner, elementTarget.Code, required: false);
+                    DbElement? targetElement = ResolveConceptMapElement(targetOwner, elementTarget.Code);
 
                     // see if there are maps we can apply this to
                     DbStructureMapping? relevantMap;
@@ -789,13 +793,13 @@ public class ConceptMapLoader
                         SourceFhirSequence = sourcePackage.DefinitionFhirSequence,
                         SourceStructureKey = sourceStructureKey.Value,
                         SourceElementKey = sourceElement?.Key,
-                        SourceElementId = groupSourceElement.Code,
+                        SourceElementId = sourceElement?.Id ?? groupSourceElement.Code,
 
                         TargetFhirPackageKey = targetPackage.Key,
                         TargetFhirSequence = targetPackage.DefinitionFhirSequence,
                         TargetStructureKey = targetStructureKey.Value,
                         TargetElementKey = targetElement?.Key,
-                        TargetElementId = elementTarget.Code,
+                        TargetElementId = targetElement?.Id ?? elementTarget.Code,
 
                         FmlIsSimpleCopy = null,
 
