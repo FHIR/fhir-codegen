@@ -75,6 +75,10 @@ The last means no faithful representation supported by this bounded implementati
 not universal mathematical impossibility. Unknown/malformed/missing facts,
 conflicting ownership or unclassified required semantics still fail the gate;
 an arbitrary Unsupported result/diagnostic is not an accepted negative.
+If a comparison cites a missing or contradictory normalized element mapping,
+`ProfileUseFacts` warns and excludes that comparison from the profile proof.
+The normal fallback rules still apply; the warning does not make the cited
+mapping valid or establish that any restrictions are preserved.
 
 `PersistNegativeDecisions` uses existing
 `DbElementOutcome.ExtensionDefinitionIsProhibited` / `ExtensionProhibitionReason`

@@ -172,6 +172,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         ImmutableArray<string> Diagnostics)> _definitions = [];
     private readonly Dictionary<(int, int, int), EffectiveProfileUse> _uses = [];
     private readonly HashSet<int> _active = [];
+    private readonly HashSet<int> _warnedMappingComparisons = [];
     private readonly ILookup<int, DbElementComparison> _correspondenceComparisons = (comparisons ?? [])
         .Where(comparison => comparison.SourceFhirPackageKey == sourcePackageKey && comparison.TargetFhirPackageKey == targetPackageKey)
         .ToLookup(comparison => comparison.SourceElementKey);
@@ -337,9 +338,9 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                         {
                             throw new InvalidOperationException(Context(useOwner, occurrence.Id, "mapped occurrence contradicts its exact source owner/element"));
                         }
-                        if (comparison.ElementMappingKey is not null)
+                        if (comparison.ElementMappingKey is not null && !HasMappingAuthority(comparison))
                         {
-                            RequireMappingAuthority(comparison);
+                            continue;
                         }
                         DbStructureDefinition targetOwner = catalog.GetStructure(ownerKey);
                         if (targetOwner.FhirPackageKey != targetPackageKey || !catalog.IsProcessed(targetOwner))
@@ -1629,7 +1630,10 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             {
                 DbStructureDefinition owner = catalog.GetStructure(comparison.SourceStructureKey);
                 catalog.ResolveOwnedElement(owner, comparison.SourceElementId, comparison.SourceElementKey);
-                RequireMappingAuthority(comparison);
+                if (!HasMappingAuthority(comparison))
+                {
+                    continue;
+                }
                 foreach (string targetId in target.Elements.Keys.Where(targetId => targetId != "" &&
                     (!(id.Contains(':') || targetId.Contains(':')) || id == targetId) &&
                     comparison.TargetElementKey is int key && OriginElements(target, targetId).Contains(key)))
@@ -1680,18 +1684,28 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         }
     }
 
-    private void RequireMappingAuthority(DbElementComparison comparison)
+    private bool HasMappingAuthority(DbElementComparison comparison)
     {
-        DbElementMapping mapping = catalog.GetElementMapping(comparison.ElementMappingKey!.Value)
-            ?? throw new InvalidOperationException("Missing normalized element mapping authority.");
-        if (mapping.SourceFhirPackageKey != sourcePackageKey || mapping.TargetFhirPackageKey != targetPackageKey ||
+        int mappingKey = comparison.ElementMappingKey!.Value;
+        DbElementMapping? mapping = catalog.GetElementMapping(mappingKey);
+        if (mapping is null || mapping.SourceFhirPackageKey != sourcePackageKey || mapping.TargetFhirPackageKey != targetPackageKey ||
             mapping.SourceStructureKey != comparison.SourceStructureKey || mapping.SourceElementKey != comparison.SourceElementKey ||
             mapping.SourceElementId != comparison.SourceElementId || mapping.TargetStructureKey != comparison.TargetStructureKey ||
             mapping.TargetElementKey != comparison.TargetElementKey || mapping.TargetElementId != comparison.TargetElementId ||
             mapping.ExplicitNoMap)
         {
-            throw new InvalidOperationException($"Comparison {comparison.Key} contradicts its exact normalized mapping authority {mapping.Key}.");
+            if (_warnedMappingComparisons.Add(comparison.Key))
+            {
+                string problem = mapping is null
+                    ? $"is missing normalized mapping authority {mappingKey}"
+                    : $"contradicts normalized mapping authority {mappingKey} ('{mapping.SourceElementId}' -> '{mapping.TargetElementId}')";
+                Console.Error.WriteLine($"Warning: ProfileUseFacts skipped comparison {comparison.Key} " +
+                    $"for package pair {sourcePackageKey}->{targetPackageKey} " +
+                    $"('{comparison.SourceElementId}' -> '{comparison.TargetElementId}'): {problem}.");
+            }
+            return false;
         }
+        return true;
     }
 
     private bool SameTypes(EffectiveProfileBranch source, EffectiveProfileBranch target, string id, string targetId,

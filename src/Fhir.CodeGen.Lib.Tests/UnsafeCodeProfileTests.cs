@@ -3005,6 +3005,8 @@ public class UnsafeCodeProfileTests(ITestOutputHelper testOutput)
     [InlineData("other-target-owner")]
     [InlineData("other-slice")]
     [InlineData("missing-authority")]
+    [InlineData("missing-mapping-row")]
+    [InlineData("contradictory-authority")]
     [InlineData("opaque-invariant")]
     public void MappedProfileChildrenRequireAuthorityInTheirExactInheritedContext(string mapping)
     {
@@ -3052,6 +3054,20 @@ public class UnsafeCodeProfileTests(ITestOutputHelper testOutput)
                 DbElementComparison comparison = DbElementComparison.SelectSingle(fixture.Connection, SourceElementKey: field.Key)!;
                 comparison.ElementMappingKey = null;
                 DbElementComparison.Update(fixture.Connection, [comparison]);
+            }
+            if (mapping is "missing-mapping-row" or "contradictory-authority")
+            {
+                DbElementMapping authority = DbElementMapping.SelectList(fixture.Connection,
+                    SourceElementKey: field.Key).ShouldHaveSingleItem();
+                if (mapping == "missing-mapping-row")
+                {
+                    DbElementMapping.Delete(fixture.Connection, Key: authority.Key);
+                }
+                else
+                {
+                    authority.TargetElementId = "Inner.other";
+                    DbElementMapping.Update(fixture.Connection, [authority]);
+                }
             }
             if (mapping == "opaque-invariant")
             {
