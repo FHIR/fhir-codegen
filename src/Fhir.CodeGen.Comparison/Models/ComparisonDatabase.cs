@@ -157,6 +157,7 @@ public class ComparisonDatabase : IDisposable
 
         _db = new SqliteConnection(connectionString);
         _db.Open();
+        EnableMappedReads(_db);
 
         _logger.LogInformation($"Opened database: `{connectionString}`");
 
@@ -193,6 +194,7 @@ public class ComparisonDatabase : IDisposable
         try
         {
             _db.Open();
+            EnableMappedReads(_db);
             _logger.LogInformation($"Opened database: `{connectionString}`");
 
             using IDbCommand command = _db.CreateCommand();
@@ -213,6 +215,18 @@ public class ComparisonDatabase : IDisposable
         {
             _db.Dispose();
             throw;
+        }
+    }
+
+    private static void EnableMappedReads(IDbConnection db)
+    {
+        if (Environment.Is64BitProcess)
+        {
+            // The verification passes revisit the same file pages. This is an
+            // address-space limit, not a heap allocation or a persistent DB setting.
+            using IDbCommand command = db.CreateCommand();
+            command.CommandText = "PRAGMA main.mmap_size = 2147483648";
+            command.ExecuteScalar();
         }
     }
 

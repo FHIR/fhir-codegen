@@ -2036,6 +2036,36 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         AssertNoPayloads(catalog);
     }
 
+    [Theory]
+    [InlineData(false, "url", "uri", "uri")]
+    [InlineData(true, "identifier", "string", "string")]
+    [InlineData(false, "url", "string", "uri")]
+    public void UnmappedStructureReusesCompatibleFallbackChildWithoutABasePath(bool resource, string child, string type, string fallbackType)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirArtifactClassEnum kind = resource ? FhirArtifactClassEnum.Resource : FhirArtifactClassEnum.ComplexType;
+        DbStructureDefinition source = fixture.AddStructure(fixture.Packages[2], "UnmappedOwner", kind);
+        fixture.AddElement(source, source.Id);
+        DbElement sourceChild = fixture.AddTypedElement(source, $"{source.Id}.{child}", type);
+        DbStructureDefinition element = fixture.AddStructure(fixture.Packages[0], "Element");
+        fixture.AddElement(element, element.Id);
+        DbStructureDefinition fallback = fixture.AddStructure(fixture.Packages[0], resource ? "Basic" : "Extension", kind);
+        fixture.AddElement(fallback, fallback.Id);
+        DbElement candidate = fixture.AddTypedElement(fallback, $"{fallback.Id}.{child}", fallbackType);
+        candidate.BasePath = null;
+        DbElement.Update(fixture.Connection, [candidate]);
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        DbRecordCache<DbElementOutcome> elements = new();
+        ElementOutcomeGenerator generator = new(fixture.Connection, NullLoggerFactory.Instance, pair, elements, new());
+        generator.ProcessSourceStructure(source, []);
+
+        DbElementOutcome outcome = elements.ToAdd.Single(row => row.SourceElementKey == sourceChild.Key);
+        bool compatible = type == fallbackType;
+        (resource ? outcome.BasicElementId : outcome.ExtensionElementId).ShouldBe(compatible ? candidate.Id : null);
+        (resource ? outcome.BasicElementBaseId : outcome.ExtensionElementBaseId).ShouldBeNull();
+        outcome.RequiresXVerDefinition.ShouldBe(!compatible);
+    }
+
     [Fact]
     public void LegacyBuildersAndRepresentationQueriesReleasePayloadsOnSuccessWarningAndReuse()
     {
@@ -2226,7 +2256,13 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         evidence.Rows<DbValueSet>(DbValueSet.DefaultTableName)[0].Compose!.Include[0].System.ShouldBe("urn:original");
         List<DbFhirPackage> packages = evidence.Rows<DbFhirPackage>(DbFhirPackage.DefaultTableName);
         packages.Select(package => package.Key).ShouldBe(packages.Select(package => package.Key).Order());
+        connection.Statements.Clear();
         evidence.Audit();
+        foreach (XVerOperandEvidence.XVerTableManifest table in XVerOperandEvidence.Manifest)
+        {
+            connection.Statements.Where(sql => sql.Contains($" FROM {table.TableName} ORDER BY", StringComparison.Ordinal))
+                .ShouldHaveSingleItem().ShouldBe($"SELECT {string.Join(", ", table.PersistedFields)} FROM {table.TableName} ORDER BY Key ASC");
+        }
         output.WriteLine($"Operand manifest: {XVerOperandEvidence.Manifest.Length} tables, {XVerOperandEvidence.Manifest.Sum(table => table.PersistedFields.Length)} persisted fields; reflected properties and observed SELECTs are a coverage guardrail, not a proof of reader closure.");
     }
 
@@ -2245,6 +2281,8 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
     [InlineData("enum-text", true)]
     [InlineData("boolean-integer", false)]
     [InlineData("boolean-integer", true)]
+    [InlineData("unicode-text", false)]
+    [InlineData("wide-integer", false)]
     public void OperandAuditRejectsSameCountAndJsonOnlyChanges(string mutation, bool secondConnection)
     {
         using UnsafeCodeTestFixture fixture = new(persistDatabase: true);
@@ -2252,12 +2290,17 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         ExecuteOperandSql(fixture.Connection, """
             UPDATE Structures SET VersionAlgorithmCoding = '{"code":"same"}';
             UPDATE ValueSets SET CanExpand = 1;
+            UPDATE FhirPackages SET Name = 'test-' || char(233);
             INSERT INTO UnsafeCodeTriggers
                 (Key, StructureOutcomeKey, SourceFhirPackageKey, TargetFhirPackageKey, SourceElementId, TargetElementId,
                  SourcePathJson, System, Code, IsWildcardVersion, VersionsJson, EvidenceKeysJson, RuleKeysJson, AnnotationKeysJson)
                 VALUES (1, 1, 1, 2, 'sentinel', 'sentinel', '[]', 'urn:sentinel', 'sentinel', 0, '[]', '[]', '[]', '[]');
             """);
         using XVerOperandEvidence evidence = XVerOperandEvidence.Capture(fixture.Connection, new(XVerPreparationKind.Comparison));
+        if (mutation == "unicode-text")
+        {
+            evidence.Audit();
+        }
         using SqliteConnection writer = new(fixture.Connection.ConnectionString);
         writer.Open();
         IDbConnection target = secondConnection ? writer : fixture.Connection;
@@ -2274,6 +2317,8 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
             "version" => "UPDATE FhirPackages SET PackageVersion = PackageVersion || '-changed'",
             "enum-text" => $"UPDATE FhirPackages SET DefinitionFhirSequence = '{(int)fixture.Packages[0].DefinitionFhirSequence}' WHERE Key = {fixture.Packages[0].Key}",
             "boolean-integer" => "UPDATE ValueSets SET CanExpand = 2",
+            "unicode-text" => "UPDATE FhirPackages SET Name = 'test-' || char(232)",
+            "wide-integer" => "UPDATE Elements SET ChildElementCount = ChildElementCount + 4294967296",
             _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
         };
         ExecuteOperandSql(target, sql);

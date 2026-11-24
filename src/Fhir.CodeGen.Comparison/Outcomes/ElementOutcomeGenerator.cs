@@ -90,11 +90,9 @@ public class ElementOutcomeGenerator
     private ILogger _logger;
 
     private readonly FhirPackageComparisonPair _packagePair;
-    private readonly Dictionary<string, string?> _targetBasicElementPathLookup;
-    private readonly Dictionary<string, DbElement> _targetBasicElementsById;
+    private readonly Dictionary<string, DbElement> _targetBasicElementPathLookup;
 
-    private readonly Dictionary<string, string?> _targetExtensionElementPathLookup;
-    private readonly Dictionary<string, DbElement> _targetExtensionElementsById;
+    private readonly Dictionary<string, DbElement> _targetExtensionElementPathLookup;
 
 
     private readonly Dictionary<int, DbElement> _allSourceElements;
@@ -206,7 +204,6 @@ public class ElementOutcomeGenerator
             }
 
             _targetBasicElementPathLookup = [];
-            _targetBasicElementsById = [];
 
             // check for a basic structure
             DbStructureDefinition? targetBasicResource = DbStructureDefinition.SelectSingle(
@@ -235,17 +232,11 @@ public class ElementOutcomeGenerator
                     }
 
                     // add the path to the dictionary, but strip "Basic" from the front
-                    _targetBasicElementPathLookup.Add(element.Path.Substring(5), element.BasePath);
-                    _targetBasicElementsById.Add(element.Id, element);
-                    if (element.BasePath is not null)
-                    {
-                        _targetBasicElementsById[element.BasePath] = element;
-                    }
+                    _targetBasicElementPathLookup.Add(element.Path.Substring(5), element);
                 }
             }
 
             _targetExtensionElementPathLookup = [];
-            _targetExtensionElementsById = [];
 
             // check for a basic structure
             DbStructureDefinition? targetExtensionType = DbStructureDefinition.SelectSingle(
@@ -273,12 +264,7 @@ public class ElementOutcomeGenerator
                     }
 
                     // add the path to the dictionary, but strip "Extension" from the front
-                    _targetExtensionElementPathLookup.Add(element.Path.Substring(9), element.BasePath);
-                    _targetExtensionElementsById.Add(element.Id, element);
-                    if (element.BasePath is not null)
-                    {
-                        _targetExtensionElementsById[element.BasePath] = element;
-                    }
+                    _targetExtensionElementPathLookup.Add(element.Path.Substring(9), element);
                 }
             }
 
@@ -389,6 +375,9 @@ public class ElementOutcomeGenerator
                 ((ed.Name == "modifierExtension") || (ed.BasePath == "DomainResource.modifierExtension") || (ed.BasePath == "BackboneElement.modifierExtension")));
 
     private static readonly char[] _literalSplitChars = [',', '(', ')', '[', ']'];
+
+    private static string FallbackLabel(DbElement element) =>
+        element.BasePath is null ? $"`{element.Id}`" : $"`{element.Id}` (`{element.BasePath}`)";
 
     private bool canMapElementsByType(
         DbElement sourceEd,
@@ -549,11 +538,9 @@ public class ElementOutcomeGenerator
             HashSet<int> targetStructures = [];
             string? basicBasePath = null;
             string? basicPath = null;
-            DbElement? basicEd = null;
 
             string? extensionBasePath = null;
             string? extensionPath = null;
-            DbElement? extensionEd = null;
 
             DbExtensionSubstitution? extSubstitute = null;
             bool elementRequiresXVer = (sourceEd.ResourceFieldOrder != 0) &&
@@ -1075,11 +1062,9 @@ public class ElementOutcomeGenerator
             // check to see if we are trying to define an extension onto basic that has a matching basic path
             if (elementRequiresXVer &&
                 allowsBasicReplacement &&
-                _targetBasicElementPathLookup.TryGetValue(sourceEd.Path[_catalog.ResolveRoot(sourceSd).Path.Length..], out basicBasePath) &&
-                _targetBasicElementsById.TryGetValue(basicBasePath!, out basicEd))
+                _targetBasicElementPathLookup.TryGetValue(sourceEd.Path[_catalog.ResolveRoot(sourceSd).Path.Length..], out DbElement? basicEd))
             {
-                basicPath = basicEd.Id;
-
+                string label = FallbackLabel(basicEd);
                 if (canMapElementsByType(sourceEd, basicEd) &&
                     (sourceEd.MinCardinality >= basicEd.MinCardinality) &&
                     ((basicEd.MaxCardinality == -1) || (basicEd.MaxCardinality >= sourceEd.MaxCardinality)) &&
@@ -1087,20 +1072,19 @@ public class ElementOutcomeGenerator
                         ((sourceEd.ChildElementCount > 0) && (basicEd.ChildElementCount > 0))))
                 {
                     elementRequiresXVer = false;
+                    basicPath = basicEd.Id;
+                    basicBasePath = basicEd.BasePath;
                     outcomeComments.Add(
-                        $"Element matches Basic element path `{basicPath}` (`{basicBasePath}`)," +
+                        $"Element matches Basic element path {label}," +
                         $" use that element instead.");
-                    elementRequiresXVer = false;
                     allContextTargets.Clear();
                     cardinalityContextTargets.Clear();
                     parentOutcome = null;
                 }
                 else
                 {
-                    basicBasePath = null;
-                    basicPath = null;
                     outcomeNotes.Add(
-                        $"While the source element matches Basic element path `{basicPath}` (`{basicBasePath}`)," +
+                        $"While the source element matches Basic element path {label}," +
                         $" the definitions are not compatible" +
                         $" (source: `{sourceEd.FullCollatedTypeLiteral}`:{sourceEd.FhirCardinalityString}" +
                         $" -> basic: `{basicEd.FullCollatedTypeLiteral}`:{basicEd.FhirCardinalityString}).");
@@ -1110,11 +1094,9 @@ public class ElementOutcomeGenerator
             // check to see if we are trying to define an extension onto extension that has a matching path
             if (elementRequiresXVer &&
                 typeTargetsExtension &&
-                _targetExtensionElementPathLookup.TryGetValue(sourceEd.Path[_catalog.ResolveRoot(sourceSd).Path.Length..], out extensionBasePath) &&
-                _targetExtensionElementsById.TryGetValue(extensionBasePath!, out extensionEd))
+                _targetExtensionElementPathLookup.TryGetValue(sourceEd.Path[_catalog.ResolveRoot(sourceSd).Path.Length..], out DbElement? extensionEd))
             {
-                extensionPath = extensionEd.Id;
-
+                string label = FallbackLabel(extensionEd);
                 if (canMapElementsByType(sourceEd, extensionEd) &&
                     (sourceEd.MinCardinality >= extensionEd.MinCardinality) &&
                     ((extensionEd.MaxCardinality == -1) || (extensionEd.MaxCardinality >= sourceEd.MaxCardinality)) &&
@@ -1122,20 +1104,19 @@ public class ElementOutcomeGenerator
                         ((sourceEd.ChildElementCount > 0) && (extensionEd.ChildElementCount > 0))))
                 {
                     elementRequiresXVer = false;
+                    extensionPath = extensionEd.Id;
+                    extensionBasePath = extensionEd.BasePath;
                     outcomeComments.Add(
-                        $"Element matches Extension element path `{extensionPath}` (`{extensionBasePath}`)," +
+                        $"Element matches Extension element path {label}," +
                         $" use that element instead.");
-                    elementRequiresXVer = false;
                     allContextTargets.Clear();
                     cardinalityContextTargets.Clear();
                     parentOutcome = null;
                 }
                 else
                 {
-                    extensionBasePath = null;
-                    extensionPath = null;
                     outcomeNotes.Add(
-                        $"While the source element matches Extension element path `{extensionPath}` (`{extensionBasePath}`)," +
+                        $"While the source element matches Extension element path {label}," +
                         $" the definitions are not compatible" +
                         $" (source: `{sourceEd.FullCollatedTypeLiteral}`:{sourceEd.FhirCardinalityString}" +
                         $" -> extension: `{extensionEd.FullCollatedTypeLiteral}`:{extensionEd.FhirCardinalityString}).");
@@ -1435,7 +1416,7 @@ public class ElementOutcomeGenerator
             bool requiresSliceDefinition = elementRequiresXVer && (parentOutcome?.RequiresXVerDefinition ?? false);
             bool requiresExtensionDefinition = elementRequiresXVer &&
                 !requiresSliceDefinition &&
-                (basicBasePath is null) &&
+                (basicPath is null) &&
                 (extSubstitute is null) &&
                 (contentRefEdOutcome?.RequiresDefinitionAsContentReference != true);
 

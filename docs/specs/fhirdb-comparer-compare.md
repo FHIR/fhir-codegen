@@ -19,6 +19,15 @@ FhirDbComparer (public facade)
 
 `FhirDbComparer` owns the `ComparisonDatabase` connection and logger factory (`FhirDbComparer.cs:88-108`). Runtime comparison caches are owned by the delegated comparer classes, not by the `Compare` method body.
 
+Prepared operations capture typed operands once. At each verification boundary
+they stream the manifest columns in primary-key order and compare them directly
+with the captured or independently expected rows. This checks row membership,
+nulls, raw JSON and enum text, and stored integers without reconstructing FHIR
+objects. Database revision counters guard the read; they do not replace it.
+On 64-bit processes the comparison database allows SQLite to memory-map up to
+2 GiB of the file for repeated reads. This is a connection setting, not a
+schema change or a 2 GiB allocation.
+
 ## Detailed Algorithm
 
 ### Method Signature

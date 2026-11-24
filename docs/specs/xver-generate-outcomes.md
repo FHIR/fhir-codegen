@@ -47,6 +47,11 @@ Needed roots require an available snapshot and exact owner graph; differential-o
 projection is not an effective snapshot. R3 SimpleQuantity retains Id
 `Quantity:simplequantity` and Path `Quantity`, not a synthetic profile-name root.
 
+Basic and Extension fallback match the target child by its relative path, then
+check type, cardinality, and child shape. A DSTU2 child can have no `base.path`.
+On a compatible match the outcome records the child ID and leaves the base ID
+null; on an incompatible match it records neither ID.
+
 ## Profile Processing and Representation Decisions
 
 `StructureOutcomeGenerator.buildOutcomes` selects the catalog's processed owners

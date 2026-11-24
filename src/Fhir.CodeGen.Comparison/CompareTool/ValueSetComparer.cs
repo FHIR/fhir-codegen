@@ -228,8 +228,7 @@ public class ValueSetComparer
                 }
                 _operation.Audit();
                 List<(DbValueSetConceptComparison Row, string? Relationship)> rows =
-                    [.. _operation.Evidence.ConceptRelationshipRows().Where(entry =>
-                        entry.Row.SourceFhirPackageKey == sourcePackage.Key && entry.Row.TargetFhirPackageKey == targetPackage.Key)];
+                    _operation.Evidence.ConceptRelationshipRows(sourcePackage.Key, targetPackage.Key);
                 HashSet<int> keys;
                 if (relationship == CMR.SourceIsNarrowerThanTarget)
                 {

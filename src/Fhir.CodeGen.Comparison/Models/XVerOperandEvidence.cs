@@ -6,8 +6,12 @@
 using System.Collections.Immutable;
 using System.Data;
 using System.Data.Common;
+using System.Linq.Expressions;
+using System.Reflection;
+using System.Text;
 using Fhir.CodeGen.SQLiteGenerator;
 using Microsoft.Data.Sqlite;
+using SQLitePCL;
 using CMR = Hl7.Fhir.Model.ConceptMap.ConceptMapRelationship;
 
 namespace Fhir.CodeGen.Comparison.Models;
@@ -173,8 +177,7 @@ internal sealed class XVerOperandEvidence : IDisposable
             Observation before = Observe();
             foreach (XVerTableRequirement requirement in _requirements)
             {
-                IXVerTableImage current = Read(requirement);
-                if (!_images[requirement.TableName].ExactlyEquals(current))
+                if (!Matches(requirement, _images[requirement.TableName]))
                 {
                     throw new InvalidOperationException($"Prepared operands changed in '{requirement.TableName}'; enter a fresh operation.");
                 }
@@ -487,7 +490,7 @@ internal sealed class XVerOperandEvidence : IDisposable
         Observation before = Observe();
         foreach (XVerTableRequirement requirement in _requirements)
         {
-            if (!expected[requirement.TableName].ExactlyEquals(Read(requirement)))
+            if (!Matches(requirement, expected[requirement.TableName]))
             {
                 throw new InvalidOperationException($"Prepared expected output or stable operands changed in '{requirement.TableName}'; no completion was certified.");
             }
@@ -510,12 +513,13 @@ internal sealed class XVerOperandEvidence : IDisposable
 
     private static long? Integer(bool? value) => value is null ? null : value.Value ? 1L : 0L;
 
-    internal List<(DbValueSetConceptComparison Row, string? Relationship)> ConceptRelationshipRows()
+    internal List<(DbValueSetConceptComparison Row, string? Relationship)> ConceptRelationshipRows(int sourceKey, int targetKey)
     {
         RequireActive();
         TableImage<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand> image =
             (TableImage<DbValueSetConceptComparison, DbValueSetConceptComparisonOperand>)_images[DbValueSetConceptComparison.DefaultTableName];
-        return [.. image.StoredRows.Select(row => (row.ToRow(), row.RelationshipStoredText))];
+        return [.. image.StoredRows.Where(row => row.SourceFhirPackageKey == sourceKey && row.TargetFhirPackageKey == targetKey)
+            .Select(row => (row.ToRow(), row.RelationshipStoredText))];
     }
 
     // These two input images never change during output transitions. Index the stored
@@ -637,9 +641,7 @@ internal sealed class XVerOperandEvidence : IDisposable
         }
         catch (SqliteException exception) when (exception.SqliteErrorCode == 1)
         {
-            throw new InvalidOperationException(
-                $"Prepared {_options.Kind} operands cannot read required columns of '{requirement.TableName}'. Reload the database if incompatible.",
-                exception);
+            throw IncompatibleColumns(requirement, exception);
         }
     }
 
@@ -648,6 +650,32 @@ internal sealed class XVerOperandEvidence : IDisposable
         RequireActive();
         return new(ReadInteger("PRAGMA data_version"), ReadInteger("SELECT total_changes()"), ReadInteger("PRAGMA schema_version"));
     }
+
+    private bool Matches(XVerTableRequirement requirement, IXVerTableImage expected)
+    {
+        if (!DefinitionInventoryStore.TableExists(_connection, requirement.TableName))
+        {
+            return expected is MissingTable;
+        }
+        if (expected is MissingTable)
+        {
+            return false;
+        }
+        try
+        {
+            using IDbCommand command = _connection.CreateCommand();
+            command.CommandText = $"SELECT {string.Join(", ", requirement.Manifest.PersistedFields)} FROM {requirement.TableName} ORDER BY Key ASC";
+            using IDataReader reader = command.ExecuteReader();
+            return expected.Matches(reader);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 1)
+        {
+            throw IncompatibleColumns(requirement, exception);
+        }
+    }
+
+    private InvalidOperationException IncompatibleColumns(XVerTableRequirement requirement, SqliteException exception) =>
+        new($"Prepared {_options.Kind} operands cannot read required columns of '{requirement.TableName}'. Reload the database if incompatible.", exception);
 
     private long ReadInteger(string sql)
     {
@@ -669,7 +697,7 @@ internal sealed class XVerOperandEvidence : IDisposable
 
     internal interface IXVerTableImage
     {
-        bool ExactlyEquals(IXVerTableImage other);
+        bool Matches(IDataReader reader);
     }
 
     private interface IXVerRows<T> where T : DbRecordBase
@@ -679,7 +707,7 @@ internal sealed class XVerOperandEvidence : IDisposable
 
     private sealed record MissingTable : IXVerTableImage
     {
-        public bool ExactlyEquals(IXVerTableImage other) => other is MissingTable;
+        public bool Matches(IDataReader reader) => false;
     }
 
     private sealed class TableImage<T, TRow>(IEnumerable<TRow> rows, Func<TRow, T> copy) : IXVerTableImage, IXVerRows<T>
@@ -689,11 +717,92 @@ internal sealed class XVerOperandEvidence : IDisposable
         private readonly ImmutableArray<TRow> _rows = [.. rows];
         internal ImmutableArray<TRow> StoredRows => _rows;
 
-        public bool ExactlyEquals(IXVerTableImage other) =>
-            other is TableImage<T, TRow> image && _rows.SequenceEqual(image._rows);
+        public bool Matches(IDataReader reader)
+        {
+            Func<TRow, IDataRecord, bool> matches = StoredFieldComparer<T, TRow>.Matches;
+            foreach (TRow row in _rows)
+            {
+                if (!reader.Read() || !matches(row, reader))
+                {
+                    return false;
+                }
+            }
+            return !reader.Read();
+        }
 
         public List<T> CopyRows() => [.. _rows.Select(copy)];
     }
+
+    // Bind each manifest column once, not per row. StoredText/StoredInteger are
+    // the original SQLite values where the typed projection loses information.
+    private static class StoredFieldComparer<T, TRow>
+    {
+        internal static readonly Func<TRow, IDataRecord, bool> Matches = Compile();
+
+        private static Func<TRow, IDataRecord, bool> Compile()
+        {
+            XVerTableManifest manifest = Manifest.Single(table => table.RowType == typeof(T));
+            ParameterExpression row = Expression.Parameter(typeof(TRow));
+            ParameterExpression reader = Expression.Parameter(typeof(IDataRecord));
+            Expression matches = Expression.Constant(true);
+            for (int i = 0; i < manifest.PersistedFields.Length; i++)
+            {
+                string name = manifest.PersistedFields[i];
+                PropertyInfo property = typeof(TRow).GetProperty(name + "StoredText") ??
+                    typeof(TRow).GetProperty(name + "StoredInteger") ?? typeof(TRow).GetProperty(name) ??
+                    throw new InvalidOperationException($"No stored operand for {manifest.TableName}.{name}.");
+                Expression expected = Expression.Property(row, property);
+                ConstantExpression ordinal = Expression.Constant(i);
+                if (property.PropertyType == typeof(string))
+                {
+                    matches = Expression.AndAlso(matches, Expression.Call(typeof(XVerOperandEvidence),
+                        nameof(TextMatches), null, reader, ordinal, expected));
+                    continue;
+                }
+                Expression actual;
+                if (property.PropertyType == typeof(int))
+                {
+                    actual = Expression.Call(reader, nameof(IDataRecord.GetInt64), null, ordinal);
+                }
+                else if (property.PropertyType == typeof(int?) || property.PropertyType == typeof(long?))
+                {
+                    actual = Expression.Call(typeof(XVerOperandEvidence), nameof(ReadNullableLong), null, reader, ordinal);
+                }
+                else
+                {
+                    throw new InvalidOperationException($"Unsupported stored operand {manifest.TableName}.{name}: {property.PropertyType}.");
+                }
+                matches = Expression.AndAlso(matches, Expression.Equal(Expression.Convert(expected, actual.Type), actual));
+            }
+            return Expression.Lambda<Func<TRow, IDataRecord, bool>>(matches, row, reader).Compile();
+        }
+    }
+
+    private static bool TextMatches(IDataRecord reader, int ordinal, string? expected)
+    {
+        if (reader.IsDBNull(ordinal))
+        {
+            return expected is null;
+        }
+        if (expected is null)
+        {
+            return false;
+        }
+        if (reader is SqliteDataReader sqlite && sqlite.Handle is { } statement)
+        {
+            // Request UTF-8 before taking the length-delimited byte span (also
+            // valid for UTF-16 databases). Never keep SQLite memory past this row.
+            raw.sqlite3_column_text(statement, ordinal);
+            if (Ascii.Equals(raw.sqlite3_column_blob(statement, ordinal), expected))
+            {
+                return true;
+            }
+        }
+        return reader.GetString(ordinal) == expected;
+    }
+
+    private static long? ReadNullableLong(IDataRecord reader, int ordinal) =>
+        reader.IsDBNull(ordinal) ? null : reader.GetInt64(ordinal);
 
     internal sealed record XVerTableManifest(
         Type RowType,

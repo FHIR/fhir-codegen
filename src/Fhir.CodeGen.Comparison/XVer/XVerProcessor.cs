@@ -281,7 +281,7 @@ public partial class XVerProcessor
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.Resource, maxStepSize: 1);
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.Resource);
-                CompareInDatabase();
+                //CompareInDatabase();
 
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, maxStepSize: 1);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, specificPairs: specificPairs);

@@ -212,13 +212,13 @@ public class ElementComparer
         int increment = sourceIndex < targetIndex ? 1 : -1;
 
         // get element comparisons for each step, keyed by StructureComparisonKey
-        Dictionary<int, List<DbElementComparison>> stepElementComparisons = [];
+        Dictionary<int, ILookup<int, DbElementComparison>> stepElementComparisons = [];
         foreach (DbStructureComparison sdCompStep in sdTr.ComparisonSteps)
         {
             List<DbElementComparison> currentStepComparisons = DbElementComparison.SelectList(
                 _db,
                 StructureComparisonKey: sdCompStep.Key);
-            stepElementComparisons[sdCompStep.Key] = currentStepComparisons;
+            stepElementComparisons[sdCompStep.Key] = currentStepComparisons.ToLookup(ec => ec.SourceElementKey);
         }
 
         // get the initial source elements that are not extension or id elements
@@ -242,8 +242,7 @@ public class ElementComparer
                 .ToDictionary(e => e.Key);
 
         // build a lookup from source element key to the first step's element comparisons
-        ILookup<int, DbElementComparison> firstStepBySourceElement = stepElementComparisons[sdTr.ComparisonSteps[0].Key]
-            .ToLookup(ec => ec.SourceElementKey);
+        ILookup<int, DbElementComparison> firstStepBySourceElement = stepElementComparisons[sdTr.ComparisonSteps[0].Key];
 
         // iterate over each source element and follow it through the transitive steps
         foreach (DbElement sourceElement in sourceElements.OrderBy(ed => ed.ResourceFieldOrder))
@@ -319,8 +318,7 @@ public class ElementComparer
             for (int step = 1; step < sdTr.ComparisonSteps.Count; step++)
             {
                 DbStructureComparison stepComparison = sdTr.ComparisonSteps[step];
-                List<DbElementComparison> stepElements = stepElementComparisons[stepComparison.Key];
-                ILookup<int, DbElementComparison> stepBySourceElement = stepElements.ToLookup(ec => ec.SourceElementKey);
+                ILookup<int, DbElementComparison> stepBySourceElement = stepElementComparisons[stepComparison.Key];
 
                 int stepTargetIndex = sourceIndex + (increment * (step + 1));
 
