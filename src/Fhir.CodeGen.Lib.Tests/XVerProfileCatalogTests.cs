@@ -2789,6 +2789,8 @@ public class XVerProfileCatalogTests
             Type = [new() { Code = "BackboneElement" }] });
         holder.Snapshot.Element.Add(new() { ElementId = "UseHolder.group.again", Path = "UseHolder.group.again",
             Min = 0, Max = "*", ContentReference = "#UseHolder.group" });
+        holder.Snapshot.Element.Add(new() { ElementId = "UseHolder.group.required", Path = "UseHolder.group.required",
+            Min = 0, Max = "1", Type = [new() { Code = "boolean" }], DefaultValue = new Hl7.Fhir.Model.FhirBoolean(false) });
         using CatalogImport imported = new(definitions);
         imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
@@ -2800,6 +2802,14 @@ public class XVerProfileCatalogTests
         branch.Diagnostics.ShouldBeEmpty();
         facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!, nativeContext: branch)
             .Kind.ShouldBe(ProfileProofKind.NativeReuse);
+
+        ProfileRepresentationProof recursive = facts.Prove(facts.ForDefinition(owner), owner);
+        recursive.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
+        recursive.IsAcceptedDecision.ShouldBeTrue();
+        recursive.Reasons.ShouldContain(reason => reason.Restriction != null &&
+            reason.Restriction.Kind == ProfileRestrictionKind.RecursiveContentReference);
+        recursive.NativeFacts[".group.required"].Restrictions.ShouldContain(fact =>
+            fact.Name == "defaultValueBoolean" && fact.Value.ValueKind == JsonValueKind.False);
     }
 
     [Fact]

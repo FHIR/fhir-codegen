@@ -40,6 +40,7 @@ internal enum ProfileRestrictionKind
     PrimitiveTypeObligation,
     OrderMeaning,
     DefaultValue,
+    RecursiveContentReference,
 }
 
 internal sealed record ProfileRestriction(
@@ -901,7 +902,8 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             Validate(target, []);
             if (reasons.Count != 0)
             {
-                return Result(ProfileProofKind.Unsupported);
+                return Result(reasons.All(reason => reason.Category == ProfileReasonCategory.RestrictionTransformation)
+                    ? ProfileProofKind.Unrepresentable : ProfileProofKind.Unsupported);
             }
             if (source.TargetProfileFacts is not null || target.TargetProfileFacts is not null)
             {
@@ -1182,6 +1184,14 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                         Difference(ProfileReasonCategory.UnclassifiedRestriction, id, element,
                             "unclassified or malformed restriction " + fact.Name + " " + fact.Value.GetRawText(), fact);
                     }
+                    if (!prohibited)
+                    {
+                        foreach (ProfileRestriction fact in element.Restrictions.Where(fact => fact.Kind == ProfileRestrictionKind.RecursiveContentReference))
+                        {
+                            Difference(ProfileReasonCategory.RestrictionTransformation, id, element,
+                                "recursive contentReference requires an unsupported representation proof", fact);
+                        }
+                    }
                     if (prohibited || id == "")
                     {
                         continue;
@@ -1334,7 +1344,14 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 string id = row.Id[root.Id.Length..];
                 if (referencedOwner.Key == owner.Key && (id == referenceId || id.StartsWith(referenceId + ".", StringComparison.Ordinal)))
                 {
-                    // Retain the unresolved reference locally; an unrelated occurrence does not need its recursive subtree.
+                    // Retain the resolved edge without expanding its recursive subtree.
+                    EffectiveProfileElement recursive = elements[id];
+                    elements[id] = recursive with
+                    {
+                        Types = recursive.Types.IsEmpty ? elements[referenceId].Types : recursive.Types,
+                        Restrictions = [.. recursive.Restrictions.Select(fact => fact.Name == "contentReference"
+                            ? fact with { Kind = ProfileRestrictionKind.RecursiveContentReference } : fact)],
+                    };
                     continue;
                 }
                 IReadOnlyDictionary<string, EffectiveProfileElement> referencedElements = referencedOwner.Key == owner.Key
@@ -1893,9 +1910,14 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         ProfileRestrictionKind.Unsupported or ProfileRestrictionKind.SemanticExtension => false,
         ProfileRestrictionKind.PrimitiveTypeObligation => ValidPrimitiveTypeObligation(fact.Value),
         ProfileRestrictionKind.OrderMeaning => fact.Value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(fact.Value.GetString()),
-        ProfileRestrictionKind.DefaultValue => fact.Value.ValueKind == JsonValueKind.Number &&
-            (fact.Name == "defaultValueDecimal" && fact.Value.TryGetDecimal(out _) ||
-                fact.Name == "defaultValueInteger" && fact.Value.TryGetInt32(out _)),
+        ProfileRestrictionKind.DefaultValue => fact.Name switch
+        {
+            "defaultValueBoolean" => fact.Value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+            "defaultValueDecimal" => fact.Value.ValueKind == JsonValueKind.Number && fact.Value.TryGetDecimal(out _),
+            "defaultValueInteger" => fact.Value.ValueKind == JsonValueKind.Number && fact.Value.TryGetInt32(out _),
+            _ => false,
+        },
+        ProfileRestrictionKind.RecursiveContentReference => fact.Value.ValueKind == JsonValueKind.String,
         ProfileRestrictionKind.Invariant => ValidInvariant(fact.Value),
         ProfileRestrictionKind.Binding => Text(fact.Value, "strength") is "required" or "extensible" or "preferred" or "example" &&
             (ValidCanonical(Text(fact.Value, "valueSet")) ||

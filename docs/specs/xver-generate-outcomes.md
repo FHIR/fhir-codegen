@@ -83,6 +83,10 @@ Well-formed `structuredefinition-explicit-type-name` and
 `structuredefinition-display-hint` extensions on an element produce a warning
 and are ignored as naming or presentation metadata, not restrictions.
 Malformed instances and other unclassified restrictions still fail the gate.
+Boolean defaults are retained as restrictions, including `false`. A resolved
+recursive `contentReference` is not expanded into an infinite subtree. If the
+recursion is within the branch being proved, it blocks a positive representation
+decision without being reported as missing datatype facts.
 
 `PersistNegativeDecisions` uses existing
 `DbElementOutcome.ExtensionDefinitionIsProhibited` / `ExtensionProhibitionReason`
