@@ -91,7 +91,7 @@ public class StructureOutcomeGenerator
                     applyCachedChanges(packagePair);
                     elementOutcomeGenerator.DoPostProcessing(packagePair);
                     applyCachedChanges(packagePair);
-                    new UnsafeCodeOutcomeGenerator(_db).GenerateForPair(packagePair, dependency, operation);
+                    new UnsafeCodeOutcomeGenerator(_db, _logger).GenerateForPair(packagePair, dependency, operation);
                 }
                 finally
                 {

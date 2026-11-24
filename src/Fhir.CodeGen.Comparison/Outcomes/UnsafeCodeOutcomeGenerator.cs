@@ -5,16 +5,19 @@
 
 using System.Collections.Immutable;
 using System.Data;
+using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.Terminology;
 using Hl7.Fhir.Model;
+using Microsoft.Extensions.Logging;
 
 namespace Fhir.CodeGen.Comparison.Outcomes;
 
-internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
+internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db, ILogger? logger = null)
 {
     internal void ValidateAnnotationProvenance(FhirPackageComparisonPair pair, IReadOnlyList<DbUnsafeCodeTrigger> triggers)
         => ValidateAnnotationProvenance(pair, triggers, null);
@@ -72,172 +75,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                 continue;
             }
 
-            foreach (DbElement root in facts.Roots[structure.Key])
-            {
-                Walk(root, [], [], false, new HashSet<(int, int, string)>());
-            }
-
-            void Walk(
-                DbElement element,
-                ImmutableArray<UnsafeCodePathStep> prefix,
-                ImmutableArray<MappingUse> inheritedContexts,
-                bool carrierCode,
-                HashSet<(int, int, string)> edges,
-                string? typeName = null,
-                bool contentReference = false)
-            {
-                if (!facts.Permits(element))
-                {
-                    return;
-                }
-
-                ImmutableArray<UnsafeCodePathStep> path = prefix.Add(new(element.Id, typeName, contentReference));
-                ImmutableArray<MappingUse> contexts = [.. facts.Contexts(element, outcome).Concat(inheritedContexts).Distinct()];
-
-                string[] typeNames = facts.TypeNames(element);
-                bool carrier = typeNames.Any(IsCarrier);
-                ImmutableArray<MappingUse> childContexts = carrier || typeNames.Any(name => name is "CodeableConcept" or "CodeableReference")
-                    ? contexts : [];
-                bool mixedSafety = facts.HasNativeTarget(element) && typeNames.Length == 2 && typeNames.Contains("Coding", StringComparer.Ordinal) &&
-                    typeNames.Any(name => name is "boolean" or "code");
-                if (mixedSafety)
-                {
-                    UnsafeCodeEffectiveTypeFacts sourceFacts = facts.SourceUseFacts(element);
-                    foreach (UnsafeCodeTypeFact type in sourceFacts.Types.Where(type => type.SourceTypeName is "Coding" or "code"))
-                    {
-                        UnsafeCodeSourceUseNormalization normalized = UnsafeCodeSourceUseNormalizer.Normalize(
-                            path.Add(new(type.Roots.Length == 1 ? type.Roots[0].ElementId : type.SourceTypeName, type.TypeUseToken, false)),
-                            new Dictionary<int, UnsafeCodeEffectiveTypeFacts> { [path.Length] = sourceFacts });
-                        if (normalized.Failure is not null || normalized.SourceUse is null)
-                        {
-                            throw new InvalidOperationException($"Unsafe-code type graph is unresolved for {element.Id} ({type.TypeUseToken}), pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: {normalized.Failure}. Reload source definitions and regenerate comparisons and outcomes.");
-                        }
-
-                        Classify(element, normalized.SourceUse.SelectedPath, contexts,
-                            normalized.SourceUse.QualificationKind == UnsafeCodeQualificationKind.Typed);
-                    }
-                }
-                else if (carrier)
-                {
-                    Classify(element, path, contexts, true);
-                }
-                else if (!carrierCode && typeNames.Contains("code", StringComparer.Ordinal))
-                {
-                    Classify(element, path, contexts, false);
-                }
-
-                if (prefix.Length > 0 && facts.IsResourceUse(element))
-                {
-                    return;
-                }
-
-                foreach (DbElement child in facts.Children(element))
-                {
-                    Follow(child, "child", null, false, carrier && RelativeName(child, element) == "code", childContexts);
-                }
-
-                foreach ((string? TypeName, int StructureKey) type in facts.TypeStructures(element))
-                {
-                    if (facts.IsResource(type.StructureKey))
-                    {
-                        continue;
-                    }
-
-                    foreach (DbElement root in facts.Roots[type.StructureKey])
-                    {
-                        // Inline snapshot children override the corresponding type fields.
-                        foreach (DbElement child in facts.Children(root))
-                        {
-                            if (facts.PermitsChild(element, child, type.StructureKey) &&
-                                !facts.Children(element).Any(local => RelativeName(local, element) == RelativeName(child, root)))
-                            {
-                                Follow(child, "type", type.TypeName, false, carrier && RelativeName(child, root) == "code", childContexts);
-                            }
-                        }
-                    }
-                }
-
-                if (element.ContentReferenceSourceKey is int referenceKey && facts.SourceElements.TryGetValue(referenceKey, out DbElement? reference))
-                {
-                    Follow(reference, "reference", null, true, carrierCode, contexts);
-                }
-
-                void Follow(DbElement next, string kind, string? nextType, bool isReference, bool inCarrier, ImmutableArray<MappingUse> uses)
-                {
-                    // Keep the first recurrence in the semantic path; repeated edges close the graph.
-                    (int, int, string) edge = (element.Key, next.Key, kind);
-                    if (edges.Add(edge))
-                    {
-                        Walk(next, path, uses, inCarrier, edges, nextType, isReference);
-                        edges.Remove(edge);
-                    }
-                }
-            }
-
-            void Classify(DbElement element, ImmutableArray<UnsafeCodePathStep> path, ImmutableArray<MappingUse> contexts, bool typed)
-            {
-                if (contexts.IsEmpty)
-                {
-                    contexts = [new(new(pair.SourcePackageKey, pair.TargetPackageKey, element.Id, string.Empty), element, null)];
-                }
-
-                foreach (MappingUse use in contexts)
-                {
-                    UnsafeCodeElementAnnotation[] annotations = facts.AnnotationsFor(use);
-                    UnsafeCodeMapEvidence[] evidence = facts.EvidenceFor(use);
-                    UnsafeCodeMapEvidence[] potentialEvidence = facts.PotentialEvidenceFor(use);
-                    if (annotations.Length > 0 && potentialEvidence.Any(item => item.ExplicitNoMap && item.SourceCode is not null && item.SourceSystem.Url is null))
-                    {
-                        throw new InvalidOperationException($"Unsafe-code identity is ambiguous for {element.Id}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: the applicable authored no-map code has no qualified source system. Supply authoritative source binding context and regenerate outcomes.");
-                    }
-
-                    UnsafeCodeIdentity[] candidates = [.. facts.Rules.Where(rule => !rule.NoMapOnly || potentialEvidence.Any(item =>
-                            item.ExplicitNoMap && item.SourceSystem.Url == rule.Identity.System && item.SourceCode == rule.Identity.Code &&
-                            (rule.Identity.Version is null || item.SourceSystem.Version is null || rule.Identity.Version == item.SourceSystem.Version)))
-                        .Select(rule => rule.Identity)
-                        .Concat(annotations.Length == 0 ? [] : potentialEvidence.Where(item => item.ExplicitNoMap && item.SourceSystem.Url is not null && item.SourceCode is not null)
-                            .Select(item => new UnsafeCodeIdentity(item.SourceSystem.Url!, item.SourceSystem.Version, item.SourceCode!)))
-                        .Distinct()];
-                    foreach (IGrouping<(string System, string Code), UnsafeCodeIdentity> group in candidates.GroupBy(candidate => (candidate.System, candidate.Code)))
-                    {
-                        UnsafeCodeIdentity identity = new(group.Key.System, null, group.Key.Code);
-                        if (!typed)
-                        {
-                            UnsafeCodeIdentity? resolved = facts.PrimitiveIdentity(element, use.Source, identity, group, outcome);
-                            if (resolved is null)
-                            {
-                                continue;
-                            }
-
-                            identity = resolved;
-                        }
-
-                        if (potentialEvidence.Except(evidence).Any(item => item.ExplicitNoMap &&
-                            item.SourceSystem.Url == identity.System && item.SourceCode == identity.Code &&
-                            VersionsOverlap(item.SourceSystem.Version, identity.Version) &&
-                            (annotations.Length > 0 || facts.Rules.Any(rule => rule.NoMapOnly &&
-                                rule.Identity.System == identity.System && rule.Identity.Code == identity.Code &&
-                                VersionsOverlap(rule.Identity.Version, identity.Version) &&
-                                VersionsOverlap(rule.Identity.Version, item.SourceSystem.Version)))))
-                        {
-                            throw new InvalidOperationException(
-                                $"Unsafe-code binding scope is ambiguous for {element.Id}, mapping {use.Context.SourceElementId}->{use.Context.TargetElementId}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}, candidate {identity.System}|{identity.Version}#{identity.Code}. Resolve the applicable authored no-map source/target binding scopes and regenerate outcomes.");
-                        }
-
-                        foreach (UnsafeCodeDecision decision in UnsafeCodePolicy.Classify(
-                            identity, pair.TargetFhirSequence.ToLongVersion(), use.Context, annotations, evidence, facts.Rules))
-                        {
-                            triggers.Add(new(
-                                outcome.Key, use.Context, path, decision.Identity, decision.VersionMatch,
-                                [.. facts.EvidenceRows.Where(row => decision.EvidenceProvenance.Contains(Provenance(row))).Select(row => row.Key).Order()],
-                                [.. facts.RuleRows.Where(row => decision.RuleProvenance.Contains(new(row.SourceRelativeFilename, row.EntryIndex))).Select(row => row.Key).Order()])
-                            {
-                                AnnotationKeys = [.. facts.SelectedAnnotationKeys(decision, use)],
-                            });
-                        }
-                    }
-                }
-            }
+            WalkResource(structure, outcome);
         }
 
         IEnumerable<UnsafeCodeTrigger> normalized = triggers.GroupBy(trigger => (
@@ -252,6 +90,257 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
         ProfileUseFacts.PersistNegativeDecisions(db, pair, profileDecisions, operation);
         UnsafeCodeInputStore.InsertTriggers(db, normalized, operation);
         UnsafeCodeInputStore.CompleteOutcomes(db, dependency, operation);
+
+        void WalkResource(DbStructureDefinition structure, DbStructureOutcome outcome)
+        {
+            // Classification depends on the occurrence and its contributing mapping contexts, not
+            // the path prefix. Discover those states once; only enumerate paths to actual results.
+            Dictionary<WalkState, WalkNode> nodes = [];
+            Queue<WalkNode> pending = new();
+            List<(DbElement Root, WalkNode Node)> roots = [];
+            Queue<WalkNode> productive = new();
+            Stopwatch progress = Stopwatch.StartNew();
+            long paths = 0;
+            int startCount = triggers.Count;
+            logger?.LogInformation("Planning unsafe-code paths for {Resource}, pair {Source}->{Target}",
+                structure.Id, pair.SourcePackageKey, pair.TargetPackageKey);
+            foreach (DbElement root in facts.Roots[structure.Key])
+            {
+                roots.Add((root, Node(root, [], false, true)));
+            }
+            while (pending.TryDequeue(out WalkNode? node))
+            {
+                ReportProgress();
+                try
+                {
+                    Expand(node);
+                }
+                catch (InvalidOperationException error)
+                {
+                    // Discovery ignores path-local cycle closures. Surface a data error only if
+                    // emission can reach this exact state by a legal path, as in the original walk.
+                    node.Error = ExceptionDispatchInfo.Capture(error);
+                }
+                if (node.LocalTriggers.Count != 0 || node.Error is not null)
+                {
+                    node.Productive = true;
+                    productive.Enqueue(node);
+                }
+            }
+            while (productive.TryDequeue(out WalkNode? child))
+            {
+                foreach (WalkNode parent in child.Parents)
+                {
+                    if (!parent.Productive)
+                    {
+                        parent.Productive = true;
+                        productive.Enqueue(parent);
+                    }
+                }
+            }
+            HashSet<(int From, int To, string Kind)> edges = [];
+            List<UnsafeCodePathStep> path = [];
+            Stack<WalkNode> frontier = new();
+            long search = 0;
+            foreach ((DbElement root, WalkNode node) in roots)
+            {
+                if (node.Productive) Emit(node, new(root.Id, null, false));
+            }
+            logger?.LogInformation("Finished unsafe-code paths for {Resource}, pair {Source}->{Target}: {States} states, {Paths} visited paths, {Triggers} triggers",
+                structure.Id, pair.SourcePackageKey, pair.TargetPackageKey, nodes.Count, paths, triggers.Count - startCount);
+
+            void ReportProgress()
+            {
+                if (logger is not null && progress.Elapsed >= TimeSpan.FromSeconds(10))
+                {
+                    logger.LogInformation("Unsafe-code paths for {Resource}, pair {Source}->{Target}: {States} states, {Paths} visited paths, {Triggers} triggers",
+                        structure.Id, pair.SourcePackageKey, pair.TargetPackageKey, nodes.Count, paths, triggers.Count - startCount);
+                    progress.Restart();
+                }
+            }
+
+            WalkNode Node(DbElement element, ImmutableArray<MappingUse> inherited, bool carrierCode, bool root = false)
+            {
+                WalkState state = new(element.Key, inherited, carrierCode, root);
+                if (!nodes.TryGetValue(state, out WalkNode? node))
+                {
+                    node = new(state);
+                    nodes.Add(state, node);
+                    pending.Enqueue(node);
+                }
+                return node;
+            }
+
+            void Expand(WalkNode node)
+            {
+                DbElement element = facts.SourceElements[node.State.ElementKey];
+                if (!facts.Permits(element)) return;
+                ImmutableArray<MappingUse> contexts = facts.Contexts(element, outcome);
+                if (!node.State.Inherited.IsEmpty)
+                {
+                    contexts = [.. contexts.Concat(node.State.Inherited).Distinct()];
+                }
+
+                string[] typeNames = facts.TypeNames(element);
+                bool carrier = typeNames.Any(IsCarrier);
+                ImmutableArray<MappingUse> childContexts = carrier || typeNames.Any(name => name is "CodeableConcept" or "CodeableReference")
+                    ? contexts : [];
+                bool mixedSafety = typeNames.Length == 2 && typeNames.Contains("Coding", StringComparer.Ordinal) &&
+                    typeNames.Any(name => name is "boolean" or "code") && facts.HasNativeTarget(element);
+                if (mixedSafety)
+                {
+                    UnsafeCodeEffectiveTypeFacts sourceFacts = facts.SourceUseFacts(element);
+                    foreach (UnsafeCodeTypeFact type in sourceFacts.Types.Where(type => type.SourceTypeName is "Coding" or "code"))
+                    {
+                        UnsafeCodePathStep endpoint = new(type.Roots.Length == 1 ? type.Roots[0].ElementId : type.SourceTypeName, type.TypeUseToken, false);
+                        UnsafeCodeSourceUseNormalization selection = UnsafeCodeSourceUseNormalizer.Normalize(
+                            [new(element.Id, null, false), endpoint], new Dictionary<int, UnsafeCodeEffectiveTypeFacts> { [1] = sourceFacts });
+                        if (selection.Failure is not null || selection.SourceUse is null)
+                        {
+                            throw new InvalidOperationException($"Unsafe-code type graph is unresolved for {element.Id} ({type.TypeUseToken}), pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: {selection.Failure}. Reload source definitions and regenerate comparisons and outcomes.");
+                        }
+
+                        Classify(node, element, [endpoint], contexts,
+                            selection.SourceUse.QualificationKind == UnsafeCodeQualificationKind.Typed);
+                    }
+                }
+                else if (carrier)
+                {
+                    Classify(node, element, [], contexts, true);
+                }
+                else if (!node.State.CarrierCode && typeNames.Contains("code", StringComparer.Ordinal))
+                {
+                    Classify(node, element, [], contexts, false);
+                }
+
+                if (!node.State.Root && facts.IsResourceUse(element))
+                {
+                    return;
+                }
+
+                foreach (TraversalEdge edge in facts.TraversalEdges(element))
+                {
+                    bool reference = edge.Kind == "reference";
+                    WalkNode next = Node(edge.Element, reference ? contexts : childContexts,
+                        reference ? node.State.CarrierCode : carrier && edge.CodeChild);
+                    node.Children.Add(new(next, (element.Key, edge.Element.Key, edge.Kind), new(edge.Element.Id, edge.TypeName, reference)));
+                    next.Parents.Add(node);
+                }
+            }
+
+            void Emit(WalkNode node, UnsafeCodePathStep step)
+            {
+                paths++;
+                ReportProgress();
+                node.Error?.Throw();
+                path.Add(step);
+                foreach (UnsafeCodeTrigger trigger in node.LocalTriggers)
+                {
+                    triggers.Add(trigger with { SourcePath = [.. path, .. trigger.SourcePath] });
+                }
+                foreach (WalkEdge edge in node.Children)
+                {
+                    if (edge.Next.Productive && edges.Add(edge.Key))
+                    {
+                        if (node.Children.Count == 1 || CanReachResult(edge.Next))
+                        {
+                            Emit(edge.Next, edge.Step);
+                        }
+                        edges.Remove(edge.Key);
+                    }
+                }
+                path.RemoveAt(path.Count - 1);
+            }
+
+            // A globally productive cycle can become dead once the current path has used its
+            // only exit edge. Check reachability without enumerating trails around that cycle.
+            bool CanReachResult(WalkNode start)
+            {
+                search++;
+                frontier.Clear();
+                frontier.Push(start);
+                start.LastSearch = search;
+                while (frontier.TryPop(out WalkNode? node))
+                {
+                    if (node.LocalTriggers.Count != 0 || node.Error is not null) return true;
+                    foreach (WalkEdge edge in node.Children)
+                    {
+                        if (edge.Next.Productive && edge.Next.LastSearch != search && !edges.Contains(edge.Key))
+                        {
+                            edge.Next.LastSearch = search;
+                            frontier.Push(edge.Next);
+                        }
+                    }
+                }
+                return false;
+            }
+
+            void Classify(WalkNode node, DbElement element, ImmutableArray<UnsafeCodePathStep> suffix, ImmutableArray<MappingUse> contexts, bool typed)
+            {
+                if (contexts.IsEmpty)
+                {
+                    contexts = [new(new(pair.SourcePackageKey, pair.TargetPackageKey, element.Id, string.Empty), element, null)];
+                }
+
+                foreach (MappingUse use in contexts)
+                {
+                    UnsafeCodeElementAnnotation[] annotations = facts.AnnotationsFor(use);
+                    if (annotations.Length == 0 && facts.Rules.Length == 0) continue;
+                    UnsafeCodeMapEvidence[] potentialNoMaps = facts.PotentialNoMapsFor(use);
+                    if (annotations.Length > 0 && potentialNoMaps.Any(item => item.SourceCode is not null && item.SourceSystem.Url is null))
+                    {
+                        throw new InvalidOperationException($"Unsafe-code identity is ambiguous for {element.Id}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: the applicable authored no-map code has no qualified source system. Supply authoritative source binding context and regenerate outcomes.");
+                    }
+
+                    UnsafeCodeIdentity[] candidates = [.. facts.Rules.Where(rule => !rule.NoMapOnly || potentialNoMaps.Any(item =>
+                            item.SourceSystem.Url == rule.Identity.System && item.SourceCode == rule.Identity.Code &&
+                            (rule.Identity.Version is null || item.SourceSystem.Version is null || rule.Identity.Version == item.SourceSystem.Version)))
+                        .Select(rule => rule.Identity)
+                        .Concat(annotations.Length == 0 ? [] : potentialNoMaps.Where(item => item.SourceSystem.Url is not null && item.SourceCode is not null)
+                            .Select(item => new UnsafeCodeIdentity(item.SourceSystem.Url!, item.SourceSystem.Version, item.SourceCode!)))
+                        .Distinct()];
+                    if (candidates.Length == 0) continue;
+                    UnsafeCodeMapEvidence[] evidence = facts.EvidenceFor(use);
+                    foreach (IGrouping<(string System, string Code), UnsafeCodeIdentity> group in candidates.GroupBy(candidate => (candidate.System, candidate.Code)))
+                    {
+                        UnsafeCodeIdentity identity = new(group.Key.System, null, group.Key.Code);
+                        if (!typed)
+                        {
+                            UnsafeCodeIdentity? resolved = facts.PrimitiveIdentity(element, use.Source, identity, group, outcome);
+                            if (resolved is null)
+                            {
+                                continue;
+                            }
+
+                            identity = resolved;
+                        }
+
+                        if (potentialNoMaps.Except(evidence).Any(item => item.SourceSystem.Url == identity.System && item.SourceCode == identity.Code &&
+                            VersionsOverlap(item.SourceSystem.Version, identity.Version) &&
+                            (annotations.Length > 0 || facts.Rules.Any(rule => rule.NoMapOnly &&
+                                rule.Identity.System == identity.System && rule.Identity.Code == identity.Code &&
+                                VersionsOverlap(rule.Identity.Version, identity.Version) &&
+                                VersionsOverlap(rule.Identity.Version, item.SourceSystem.Version)))))
+                        {
+                            throw new InvalidOperationException(
+                                $"Unsafe-code binding scope is ambiguous for {element.Id}, mapping {use.Context.SourceElementId}->{use.Context.TargetElementId}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}, candidate {identity.System}|{identity.Version}#{identity.Code}. Resolve the applicable authored no-map source/target binding scopes and regenerate outcomes.");
+                        }
+
+                        foreach (UnsafeCodeDecision decision in UnsafeCodePolicy.Classify(
+                            identity, pair.TargetFhirSequence.ToLongVersion(), use.Context, annotations, evidence, facts.Rules))
+                        {
+                            node.LocalTriggers.Add(new(
+                                outcome.Key, use.Context, suffix, decision.Identity, decision.VersionMatch,
+                                [.. facts.EvidenceRows.Where(row => decision.EvidenceProvenance.Contains(Provenance(row))).Select(row => row.Key).Order()],
+                                [.. facts.RuleRows.Where(row => decision.RuleProvenance.Contains(new(row.SourceRelativeFilename, row.EntryIndex))).Select(row => row.Key).Order()])
+                            {
+                                AnnotationKeys = [.. facts.SelectedAnnotationKeys(decision, use)],
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private static bool IsCarrier(string? typeName) => typeName is
@@ -267,6 +356,36 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
 
     private sealed record MappingUse(UnsafeCodeMappingContext Context, DbElement Source, DbElement? Target,
         int? ElementMappingKey = null, int? ElementComparisonKey = null);
+
+    private readonly record struct WalkState(int ElementKey, ImmutableArray<MappingUse> Inherited, bool CarrierCode, bool Root)
+    {
+        public bool Equals(WalkState other) => ElementKey == other.ElementKey && CarrierCode == other.CarrierCode &&
+            Root == other.Root && Inherited.AsSpan().SequenceEqual(other.Inherited.AsSpan());
+
+        public override int GetHashCode()
+        {
+            HashCode hash = new();
+            hash.Add(ElementKey);
+            hash.Add(CarrierCode);
+            hash.Add(Root);
+            foreach (MappingUse use in Inherited) hash.Add(use);
+            return hash.ToHashCode();
+        }
+    }
+
+    private sealed class WalkNode(WalkState state)
+    {
+        internal WalkState State { get; } = state;
+        internal List<WalkNode> Parents { get; } = [];
+        internal List<WalkEdge> Children { get; } = [];
+        internal List<UnsafeCodeTrigger> LocalTriggers { get; } = [];
+        internal ExceptionDispatchInfo? Error { get; set; }
+        internal bool Productive { get; set; }
+        internal long LastSearch { get; set; }
+    }
+
+    private sealed record WalkEdge(WalkNode Next, (int From, int To, string Kind) Key, UnsafeCodePathStep Step);
+    private sealed record TraversalEdge(DbElement Element, string Kind, string? TypeName, bool CodeChild);
 
     private sealed class PairFacts : IDisposable
     {
@@ -288,10 +407,13 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
         private readonly UnsafeCodeBindingScopeResolver _bindingResolver;
         private readonly Dictionary<int, UnsafeCodeBindingScope?> _bindings = [];
         private readonly Dictionary<int, DbElement[]> _effectiveChildren = [];
+        private readonly Dictionary<int, TraversalEdge[]> _traversalEdges = [];
+        private readonly Dictionary<int, bool> _permitted = [];
         private readonly Dictionary<int, DbElementType[]> _effectiveTypes = [];
         private readonly Dictionary<MappingUse, UnsafeCodeMapEvidence[]> _scopedEvidence = [];
-        private readonly Dictionary<MappingUse, UnsafeCodeMapEvidence[]> _potentialEvidence = [];
-        private readonly Dictionary<(int ElementKey, int OwnerKey), ImmutableArray<MappingUse>> _contexts = [];
+        private readonly Dictionary<MappingUse, UnsafeCodeMapEvidence[]> _potentialNoMaps = [];
+        private int? _contextOwner;
+        private readonly Dictionary<int, ImmutableArray<MappingUse>> _contexts = [];
         private readonly Dictionary<int, string[]> _typeNames = [];
         private readonly Dictionary<MappingUse, HashSet<int>> _selectedAnnotationKeys = [];
 
@@ -308,6 +430,8 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
         private readonly DbUnsafeCodeElementAnnotation[] _annotationRows;
         private readonly ILookup<int?, int> _annotationKeysByMapping;
         private readonly DbProfileMapOwnerFacts[] _annotationOwners;
+        private readonly ILookup<(int?, string), DbProfileMapOwnerFacts> _unnormalizedOwners;
+        private readonly UnsafeCodeMapEvidence[] _noMaps;
         private UnsafeCodeMapEvidence[] Evidence { get; }
 
         internal PairFacts(IDbConnection db, FhirPackageComparisonPair pair)
@@ -365,6 +489,8 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                     .Where(row => row.RequiresOmittedMandatoryCode)];
                 _annotationRows = annotationRows;
                 _annotationOwners = [.. operation?.Evidence.Rows<DbProfileMapOwnerFacts>(DbProfileMapOwnerFacts.DefaultTableName) ?? DbProfileMapOwnerFacts.SelectList(db)];
+                _unnormalizedOwners = _annotationOwners.Where(row => row.ResolutionState == ProfileMapOwnerResolution.Unnormalized)
+                    .ToLookup(row => (row.SourceStructureKey, row.SourceElementId));
                 _annotationKeysByMapping = _annotationOwners.Where(owner => owner.ResolutionState == ProfileMapOwnerResolution.Resolved &&
                     owner.ElementMappingKey is not null).ToLookup(owner => owner.ElementMappingKey, owner => owner.AnnotationKey);
                 Annotations = [.. annotationRows
@@ -379,6 +505,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                     new(row.SourceSystem, row.SourceSystemVersion), row.SourceCode,
                     new(row.TargetSystem, row.TargetSystemVersion), row.TargetCode, row.Relationship, row.ExplicitNoMap, Provenance(row)))];
                 RuleRows = [.. operation?.Evidence.Rows<DbUnsafeCodeRule>(DbUnsafeCodeRule.DefaultTableName) ?? DbUnsafeCodeRule.SelectList(db)];
+                _noMaps = [.. Evidence.Where(item => item.ExplicitNoMap)];
                 Rules = [.. RuleRows.Select(UnsafeCodeInputStore.ReadRule)];
             }
             finally
@@ -408,10 +535,41 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             }
         }
 
-        internal bool Permits(DbElement element) => _profileFacts.Permits(element);
+        internal bool Permits(DbElement element)
+        {
+            if (!_permitted.TryGetValue(element.Key, out bool permitted))
+                _permitted[element.Key] = permitted = _profileFacts.Permits(element);
+            return permitted;
+        }
 
-        internal bool PermitsChild(DbElement occurrence, DbElement child, int datatypeKey) =>
-            _profileFacts.PermitsChild(occurrence, child, datatypeKey);
+        internal TraversalEdge[] TraversalEdges(DbElement element)
+        {
+            if (_traversalEdges.TryGetValue(element.Key, out TraversalEdge[]? cached)) return cached;
+            List<TraversalEdge> edges = [];
+            HashSet<string> localNames = new(StringComparer.Ordinal);
+            foreach (DbElement child in Children(element))
+            {
+                string name = RelativeName(child, element);
+                localNames.Add(name);
+                edges.Add(new(child, "child", null, name == "code"));
+            }
+            foreach ((string? typeName, int key) in TypeStructures(element))
+            {
+                if (IsResource(key)) continue;
+                foreach (DbElement root in Roots[key])
+                {
+                    foreach (DbElement child in Children(root))
+                    {
+                        string name = RelativeName(child, root);
+                        if (!localNames.Contains(name) && _profileFacts.PermitsChild(element, child, key))
+                            edges.Add(new(child, "type", typeName, name == "code"));
+                    }
+                }
+            }
+            if (element.ContentReferenceSourceKey is int referenceKey && SourceElements.TryGetValue(referenceKey, out DbElement? reference))
+                edges.Add(new(reference, "reference", null, false));
+            return _traversalEdges[element.Key] = [.. edges];
+        }
 
         internal UnsafeCodeElementAnnotation[] AnnotationsFor(MappingUse use)
         {
@@ -811,7 +969,12 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
 
         internal ImmutableArray<MappingUse> Contexts(DbElement element, DbStructureOutcome owner)
         {
-            if (_contexts.TryGetValue((element.Key, owner.Key), out ImmutableArray<MappingUse> cached))
+            if (_contextOwner != owner.Key)
+            {
+                _contextOwner = owner.Key;
+                _contexts.Clear();
+            }
+            if (_contexts.TryGetValue(element.Key, out ImmutableArray<MappingUse> cached))
             {
                 return cached;
             }
@@ -854,19 +1017,20 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
 
                 // Authored annotations survive maps that could not be normalized. Require the exact
                 // directed target in a contributing structure, never a similarly named leaf.
-                HashSet<int> targetStructures = [.. Outcomes.Values.Where(row => row.SourceStructureKey == basis.StructureKey &&
-                    (basis.StructureKey != owner.SourceStructureKey || row.Key == owner.Key))
-                    .Select(row => row.TargetStructureKey).OfType<int>()];
-                bool hasContributingTarget = _targets[basis.Key].Any(target => Outcomes.TryGetValue(target.StructureOutcomeKey, out DbStructureOutcome? contributing) &&
-                    contributing.SourceStructureKey == basis.StructureKey && (basis.StructureKey != owner.SourceStructureKey || contributing.Key == owner.Key));
-                foreach (DbProfileMapOwnerFacts annotation in _annotationOwners.Where(annotation =>
-                    !hasContributingTarget && annotation.SourceStructureKey == basis.StructureKey &&
-                    annotation.ResolutionState == ProfileMapOwnerResolution.Unnormalized && annotation.SourceElementId == basis.Id))
+                if (_unnormalizedOwners.Contains((basis.StructureKey, basis.Id)) &&
+                    !_targets[basis.Key].Any(target => Outcomes.TryGetValue(target.StructureOutcomeKey, out DbStructureOutcome? contributing) &&
+                        contributing.SourceStructureKey == basis.StructureKey && (basis.StructureKey != owner.SourceStructureKey || contributing.Key == owner.Key)))
                 {
-                    foreach (DbElement target in _targetElements.Values.Where(target => target.Id == annotation.TargetElementId &&
-                        target.StructureKey == annotation.TargetStructureKey && targetStructures.Contains(target.StructureKey)))
+                    HashSet<int> targetStructures = [.. Outcomes.Values.Where(row => row.SourceStructureKey == basis.StructureKey &&
+                        (basis.StructureKey != owner.SourceStructureKey || row.Key == owner.Key))
+                        .Select(row => row.TargetStructureKey).OfType<int>()];
+                    foreach (DbProfileMapOwnerFacts annotation in _unnormalizedOwners[(basis.StructureKey, basis.Id)])
                     {
-                        uses.Add(new(new(_pair.SourcePackageKey, _pair.TargetPackageKey, basis.Id, target.Id), basis, target));
+                        foreach (DbElement target in _targetElements.Values.Where(target => target.Id == annotation.TargetElementId &&
+                            target.StructureKey == annotation.TargetStructureKey && targetStructures.Contains(target.StructureKey)))
+                        {
+                            uses.Add(new(new(_pair.SourcePackageKey, _pair.TargetPackageKey, basis.Id, target.Id), basis, target));
+                        }
                     }
                 }
 
@@ -877,7 +1041,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             }
 
             ImmutableArray<MappingUse> result = [.. uses.Distinct()];
-            _contexts.Add((element.Key, owner.Key), result);
+            _contexts.Add(element.Key, result);
             return result;
         }
 
@@ -896,18 +1060,18 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
             return evidence;
         }
 
-        internal UnsafeCodeMapEvidence[] PotentialEvidenceFor(MappingUse use)
+        internal UnsafeCodeMapEvidence[] PotentialNoMapsFor(MappingUse use)
         {
-            if (_potentialEvidence.TryGetValue(use, out UnsafeCodeMapEvidence[]? cached))
+            if (_potentialNoMaps.TryGetValue(use, out UnsafeCodeMapEvidence[]? cached))
             {
                 return cached;
             }
 
             UnsafeCodeBindingScope? source = Binding(use.Source);
             UnsafeCodeBindingScope? target = use.Target is null ? null : Binding(use.Target);
-            UnsafeCodeMapEvidence[] evidence = [.. Evidence.Select(item => UnsafeCodeEvidenceApplicability.QualifyEvidence(item, source))
+            UnsafeCodeMapEvidence[] evidence = [.. _noMaps.Select(item => UnsafeCodeEvidenceApplicability.QualifyEvidence(item, source))
                 .Where(item => UnsafeCodeEvidenceApplicability.IsPotential(item, source, target))];
-            _potentialEvidence.Add(use, evidence);
+            _potentialNoMaps.Add(use, evidence);
             return evidence;
         }
 

@@ -169,6 +169,15 @@ Errors identify element, direction, candidate identity, and the missing
 binding/scope context. Resource-valued child uses have their own owners;
 references are not followed to external resources.
 
+Within each resource outcome the safety pass classifies each distinct element,
+inherited mapping context and carrier-code state once. It works backwards from
+actual triggers to discard branches that cannot produce one, then enumerates
+the remaining paths. A repeated edge closes only the current path: shared
+datatypes still produce triggers at every distinct resource use. Qualification
+errors on reachable paths still prevent completion. The pass logs the resource
+and directed pair, with state, visited-path and trigger counts during long
+walks and at resource completion.
+
 At effective native Coding/boolean and Coding/code choices, the safety
 unit is an independently classified **source type use**. Boolean supplies
 no safety use. Coding retains typed qualification; the choice's primitive

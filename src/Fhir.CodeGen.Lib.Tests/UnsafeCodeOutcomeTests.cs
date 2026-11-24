@@ -14,6 +14,7 @@ using Fhir.CodeGen.Comparison.Outcomes;
 using Fhir.CodeGen.Comparison.Terminology;
 using Hl7.Fhir.Model;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -1458,6 +1459,84 @@ public class UnsafeCodeOutcomeTests
         DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
         trigger.IsWildcardVersion.ShouldBeTrue();
         JsonSerializer.Deserialize<string[]>(trigger.VersionsJson).ShouldBe(["v,1"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SharedNonmatchingSubgraphIsClassifiedWithoutEnumeratingItsPaths(bool cycle)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        DbStructureDefinition resource = fixture.Structure(pair.SourcePackage);
+        fixture.AddElement(resource, resource.Id);
+        DbStructureDefinition leaf = fixture.AddStructure(pair.SourcePackage, "Nonmember");
+        fixture.AddElement(leaf, leaf.Id);
+        DbValueSet binding = fixture.SetBinding(pair.SourcePackage, "urn:other-system");
+        fixture.AddElement(leaf, leaf.Id + ".status", "code", binding.VersionedUrl);
+
+        const int levels = 16;
+        DbStructureDefinition next = leaf;
+        for (int i = 0; i < levels; i++)
+        {
+            DbStructureDefinition fork = fixture.AddStructure(pair.SourcePackage, "Fork" + i);
+            fixture.AddElement(fork, fork.Id);
+            foreach (string side in new[] { ".left", ".right" })
+            {
+                fixture.AddType(fixture.AddElement(fork, fork.Id + side, next.Id), next.Id, next);
+            }
+            next = fork;
+        }
+        DbStructureDefinition live = fixture.AddStructure(pair.SourcePackage, "Live");
+        fixture.AddElement(live, live.Id);
+        fixture.AddElement(live, live.Id + ".coding", "Coding");
+        fixture.AddType(fixture.AddElement(live, "Live.dead", next.Id), next.Id, next);
+        DbStructureDefinition junction = fixture.AddStructure(pair.SourcePackage, "Junction");
+        fixture.AddElement(junction, junction.Id);
+        fixture.AddType(fixture.AddElement(junction, "Junction.value", live.Id), live.Id, live);
+        DbStructureDefinition gate = fixture.AddStructure(pair.SourcePackage, "Gate");
+        fixture.AddElement(gate, gate.Id);
+        fixture.AddType(fixture.AddElement(gate, "Gate.enter", junction.Id), junction.Id, junction);
+        if (cycle)
+        {
+            // The only route back to Live.coding crosses Gate.enter -> Junction.value a second time.
+            fixture.AddType(fixture.AddElement(leaf, "Nonmember.again", gate.Id), gate.Id, gate);
+        }
+        foreach (string side in new[] { ".first", ".second" })
+        {
+            fixture.AddType(fixture.AddElement(resource, resource.Id + side, gate.Id), gate.Id, gate);
+        }
+        fixture.AddRule();
+        fixture.AddOutcome(pair, resource);
+        fixture.CompleteAuthoredArrangement(pair);
+
+        WalkLog log = new();
+        new UnsafeCodeOutcomeGenerator(fixture.Connection, log).GenerateForPair(pair);
+        string[][] paths = [.. Triggers(fixture).Select(row => JsonSerializer.Deserialize<UnsafeCodePathStep[]>(row.SourcePathJson)!
+            .Select(step => step.ElementId).ToArray()).OrderBy(path => path[1], StringComparer.Ordinal)];
+        paths.Length.ShouldBe(2);
+        paths[0].ShouldBe(["ValueSet", "ValueSet.first", "Gate.enter", "Junction.value", "Live.coding"]);
+        paths[1].ShouldBe(["ValueSet", "ValueSet.second", "Gate.enter", "Junction.value", "Live.coding"]);
+        log.States.ShouldBeInRange(levels * 2, levels * 2 + 16);
+        log.Paths.ShouldBe(9);
+        AssertCompleted(fixture, pair);
+    }
+
+    private sealed class WalkLog : ILogger
+    {
+        internal int States { get; private set; }
+        internal long Paths { get; private set; }
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (state is not IEnumerable<KeyValuePair<string, object?>> fields) return;
+            foreach ((string name, object? value) in fields)
+            {
+                if (name == "States" && value is int states) States = states;
+                if (name == "Paths" && value is long paths) Paths = paths;
+            }
+        }
     }
 
     [Fact]
