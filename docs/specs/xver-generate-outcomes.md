@@ -73,8 +73,9 @@ there are zero unsafe-code candidates/triggers. Complete typed decisions are
 `NativeReuse`, legal `OwnerProjection`, or structured `Unrepresentable`.
 The last means no faithful representation supported by this bounded implementation,
 not universal mathematical impossibility. Unknown/malformed/missing facts,
-conflicting ownership or unclassified required semantics still fail the gate;
-an arbitrary Unsupported result/diagnostic is not an accepted negative.
+conflicting ownership or unclassified required semantics warn and leave the
+affected proof unresolved. Other owners and occurrences are still classified.
+An arbitrary Unsupported result/diagnostic is not an accepted negative.
 If a comparison cites a missing or contradictory normalized element mapping,
 `ProfileUseFacts` warns and excludes that comparison from the profile proof.
 The normal fallback rules still apply; the warning does not make the cited
@@ -82,7 +83,7 @@ mapping valid or establish that any restrictions are preserved.
 Well-formed `structuredefinition-explicit-type-name` and
 `structuredefinition-display-hint` extensions on an element produce a warning
 and are ignored as naming or presentation metadata, not restrictions.
-Malformed instances and other unclassified restrictions still fail the gate.
+Malformed instances and other unclassified restrictions cannot establish reuse.
 Boolean defaults are retained as restrictions, including `false`. A resolved
 recursive `contentReference` is not expanded into an infinite subtree. If the
 recursion is within the branch being proved, it blocks a positive representation
@@ -98,7 +99,10 @@ usable generated/substitution/target canonicals. They do not set
 `PreservesRestrictions`, create unsafe-code qualification, or authorize scheduling
 an unsupported artifact. `RequirePersistedDecisions` recomputes classifications
 from current facts and compares exact envelopes on reopened consumer readiness;
-rows/stamps alone cannot hide missing or changed decisions.
+missing or changed decisions produce a warning and the pair is not verified.
+Persistence groups accepted negatives by occurrence, reads missing elements and
+owners in batches, and uses the existing transactional list insert/update
+operations for nonempty batches. Pairs without negatives do no persistence I/O.
 
 The actual five-core proof census is **3,604 = 284 native reuses + 0 owner
 projections + 3,320 structured negatives**, zero unresolved. This classifies uses

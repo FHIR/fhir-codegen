@@ -18,6 +18,8 @@ internal sealed class XVerStructureCatalog : IDisposable
     private readonly XVerOperandEvidence? _evidence;
     private bool _disposed;
     private readonly Dictionary<int, DbStructureDefinition> _structures;
+    private readonly Dictionary<(int, string), DbStructureDefinition[]> _definitionsByUrl;
+    private readonly Dictionary<(int, string), DbStructureDefinition[]> _nativeByName;
     private readonly Dictionary<int, DbFhirPackage> _packages;
     private readonly Dictionary<int, DbElement> _elements;
     private readonly Dictionary<int, DbStructureDefinitionFacts> _facts;
@@ -61,6 +63,12 @@ internal sealed class XVerStructureCatalog : IDisposable
         _db = db;
         _evidence = evidence;
         _structures = structures.ToDictionary(row => row.Key);
+        _definitionsByUrl = _structures.Values.GroupBy(row => (row.FhirPackageKey, row.UnversionedUrl))
+            .ToDictionary(group => group.Key, group => group.ToArray());
+        _nativeByName = _structures.Values.Where(IsNative)
+            .SelectMany(row => new[] { row.Id, row.Name }.Distinct().Select(name => (name, row)))
+            .GroupBy(entry => (entry.row.FhirPackageKey, entry.name), entry => entry.row)
+            .ToDictionary(group => group.Key, group => group.ToArray());
         _packages = packages.ToDictionary(row => row.Key);
         _elements = elements.ToDictionary(row => row.Key);
         _facts = facts.ToDictionary(row => row.StructureKey);
@@ -110,7 +118,7 @@ internal sealed class XVerStructureCatalog : IDisposable
     {
         RequireActive();
         return _evidence is null ? DbElementMapping.SelectSingle(_db!, Key: key) :
-            _evidence.Rows<DbElementMapping>(DbElementMapping.DefaultTableName).SingleOrDefault(row => row.Key == key);
+            _evidence.GetElementMapping(key);
     }
 
     internal bool HasValueSet(int packageKey, string canonical)
@@ -119,9 +127,8 @@ internal sealed class XVerStructureCatalog : IDisposable
         UnsafeCodeCanonical identity = UnsafeCodeCanonical.Parse(canonical);
         return identity.Url is not null && identity.Version is not null &&
             (_evidence is null
-                ? DbValueSet.SelectList(_db!, FhirPackageKey: packageKey, UnversionedUrl: identity.Url, Version: identity.Version).Count
-                : _evidence.Rows<DbValueSet>(DbValueSet.DefaultTableName).Count(row => row.FhirPackageKey == packageKey &&
-                    row.UnversionedUrl == identity.Url && row.Version == identity.Version)) == 1;
+                ? DbValueSet.SelectCount(_db!, FhirPackageKey: packageKey, UnversionedUrl: identity.Url, Version: identity.Version) == 1
+                : _evidence.HasUniqueValueSet(packageKey, identity.Url, identity.Version));
     }
 
     internal IReadOnlyList<DbStructureDefinition> GetDefinitions(int fhirPackageKey) =>
@@ -130,12 +137,14 @@ internal sealed class XVerStructureCatalog : IDisposable
     internal IReadOnlyList<DbStructureDefinition> GetProcessedStructures(int fhirPackageKey) =>
         [.. GetDefinitions(fhirPackageKey).Where(IsProcessed)];
 
-    internal DbStructureDefinition GetStructure(int key)
+    internal DbStructureDefinition? FindStructure(int key)
     {
         RequireActive();
-        return _structures.TryGetValue(key, out DbStructureDefinition? owner)
-            ? owner : throw new InvalidOperationException($"Definition catalog owner {key} is missing.");
+        return _structures.GetValueOrDefault(key);
     }
+
+    internal DbStructureDefinition GetStructure(int key) => FindStructure(key) ??
+        throw new InvalidOperationException($"Definition catalog owner {key} is missing.");
 
     internal bool IsProcessed(int key) => IsProcessed(GetStructure(key));
 
@@ -223,8 +232,13 @@ internal sealed class XVerStructureCatalog : IDisposable
     }
 
     internal DbStructureDefinition? ResolveDefinition(
-        int fhirPackageKey, string? canonical, int? existingKey = null, bool required = true, string? context = null) =>
-        ResolveDefinition(ActiveStructures(), fhirPackageKey, canonical, existingKey, required, context);
+        int fhirPackageKey, string? canonical, int? existingKey = null, bool required = true, string? context = null)
+    {
+        RequireActive();
+        string? url = UnsafeCodeCanonical.Parse(canonical).Url;
+        return ResolveDefinition(url is null ? [] : _definitionsByUrl.GetValueOrDefault((fhirPackageKey, url)) ?? [],
+            fhirPackageKey, canonical, existingKey, required, context);
+    }
 
     internal static DbStructureDefinition? ResolveDefinition(
         IEnumerable<DbStructureDefinition> structures, int fhirPackageKey, string? canonical,
@@ -254,8 +268,12 @@ internal sealed class XVerStructureCatalog : IDisposable
     }
 
     internal DbStructureDefinition? ResolveNativeType(
-        int fhirPackageKey, string? name, int? existingKey = null, bool required = true, string? context = null) =>
-        ResolveNativeType(ActiveStructures(), fhirPackageKey, name, existingKey, required, context);
+        int fhirPackageKey, string? name, int? existingKey = null, bool required = true, string? context = null)
+    {
+        RequireActive();
+        return ResolveNativeType(name is null ? [] : _nativeByName.GetValueOrDefault((fhirPackageKey, name)) ?? [],
+            fhirPackageKey, name, existingKey, required, context);
+    }
 
     internal static DbStructureDefinition? ResolveNativeType(
         IEnumerable<DbStructureDefinition> structures, int fhirPackageKey, string? name,
@@ -676,6 +694,16 @@ internal sealed class XVerStructureCatalog : IDisposable
 
     internal DbStructureDefinition GetOwner(DbElement element) => RequireOwner(element);
 
+    internal DbElement? FindOwnedElement(DbStructureDefinition owner, int key)
+    {
+        RequireActive();
+        return _elements.TryGetValue(key, out DbElement? element) && element.StructureKey == owner.Key &&
+            element.FhirPackageKey == owner.FhirPackageKey ? element : null;
+    }
+
+    internal DbElement GetOwnedElement(DbStructureDefinition owner, int key) => FindOwnedElement(owner, key) ??
+        throw Error(owner, $"missing owned element key {key}");
+
     internal string? GetDeclaredType(DbStructureDefinition owner) => RequireFacts(owner).Type;
 
     // Only the catalog owner ends a payload lifetime; facts are borrowers.
@@ -734,6 +762,8 @@ internal sealed class XVerStructureCatalog : IDisposable
         _roots.Clear();
         _ancestors.Clear();
         _structures.Clear();
+        _definitionsByUrl.Clear();
+        _nativeByName.Clear();
         _packages.Clear();
         _elements.Clear();
         _facts.Clear();
@@ -781,7 +811,9 @@ internal sealed class XVerStructureCatalog : IDisposable
         if (!_payloadElements.TryGetValue(owner.Key, out Dictionary<string, ElementDefinition>? elements))
         {
             elements = [];
-            foreach (ElementDefinition row in ReadPayload(owner).Snapshot.Element)
+            StructureDefinition.SnapshotComponent snapshot = ReadPayload(owner).Snapshot ??
+                throw Error(owner, "available normalized snapshot is missing from payload");
+            foreach (ElementDefinition row in snapshot.Element)
             {
                 if (row.ElementId is null || !elements.TryAdd(row.ElementId, row))
                 {

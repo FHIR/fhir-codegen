@@ -134,7 +134,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         XVerStructureCatalog catalog = operation.Catalog;
         DbStructureDefinition owner = catalog.GetStructure(fixture.Structure(schedule[0].SourcePackage).Key);
         using ProfileUseFacts sibling = new(catalog, schedule[0].SourcePackageKey, schedule[0].TargetPackageKey);
-        EffectiveProfileBranch use = sibling.ForDefinition(owner);
+        EffectiveProfileBranch use = sibling.ForDefinition(owner).ShouldNotBeNull();
         StructureDefinition payload = catalog.ReadPayload(owner);
         int pageReads = 0;
         int legacyCatalogReads = 0;
@@ -171,7 +171,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         legacyCatalogReads.ShouldBe(0);
         PrivateField<XVerStructureCatalog?>(pages, "_catalog").ShouldBeNull();
         catalog.ReadPayload(owner).ShouldBeSameAs(payload);
-        sibling.ForDefinition(owner).Elements.ShouldBeSameAs(use.Elements);
+        sibling.ForDefinition(owner).ShouldNotBeNull().Elements.ShouldBeSameAs(use.Elements);
         operation.Audit();
         operation.Dispose();
         AssertNoPayloads(catalog);
@@ -406,7 +406,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
         foreach (int seam in Enumerable.Range(0, 3))
         {
-            Should.Throw<InvalidOperationException>(() => Build(seam));
+            AssertMalformedProfileWarning(() => Build(seam));
             AssertReleasedBuilder(builder);
         }
         facts.StructureDefinitionJson = original;
@@ -644,8 +644,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
             schedule[0].SourcePackageKey, schedule[0].TargetPackageKey), [], [negative],
             () => DbElementOutcome.Update(fixture.Connection, [negative]));
         operation.Audit();
-        Should.Throw<InvalidOperationException>(() => UnsafeCodeInputStore.AuditExportReady(fixture.Connection, schedule, operation))
-            .Message.ShouldContain("decision");
+        UnsafeCodeInputStore.AuditExportReady(fixture.Connection, schedule, operation).ShouldBe(schedule.Skip(1));
         retained.Completed = true;
     }
 
@@ -868,14 +867,13 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldBeEmpty();
         DbElementOutcome outcome = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: source.Key)!;
         ProfileUseFacts.ReadDecisions(outcome.ExtensionProhibitionReason!).ShouldNotBeEmpty();
-        ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog);
+        ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog).ShouldBeTrue();
         // Even a well-formed replacement cannot become the independent expectation.
         JsonObject envelope = JsonNode.Parse(outcome.ExtensionProhibitionReason!)!.AsObject();
         envelope["Decisions"]![0]!["Reasons"]![0]!["Detail"] = "forged independent proof";
         outcome.ExtensionProhibitionReason = envelope.ToJsonString();
         DbElementOutcome.Update(fixture.Connection, [outcome]);
-        Should.Throw<InvalidOperationException>(() =>
-            ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog));
+        ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog).ShouldBeFalse();
     }
 
     [Fact]
@@ -1794,11 +1792,11 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         StructureDefinition payload = catalog.ReadPayload(owner);
         using ProfileUseFacts first = new(catalog, fixture.Packages[2].Key, fixture.Packages[0].Key);
         using ProfileUseFacts second = new(catalog, fixture.Packages[2].Key, fixture.Packages[0].Key);
-        EffectiveProfileBranch branch = second.ForDefinition(owner);
-        first.ForDefinition(owner);
+        EffectiveProfileBranch branch = second.ForDefinition(owner).ShouldNotBeNull();
+        first.ForDefinition(owner).ShouldNotBeNull();
         first.Dispose();
         catalog.ReadPayload(owner).ShouldBeSameAs(payload);
-        second.ForDefinition(owner).Elements.ShouldBeSameAs(branch.Elements);
+        second.ForDefinition(owner).ShouldNotBeNull().Elements.ShouldBeSameAs(branch.Elements);
         catalog.ReleasePayloads();
         catalog.ReadPayload(owner).ShouldNotBeSameAs(payload);
         branch.Elements.ShouldContainKey(".code");
@@ -1839,7 +1837,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.TypeComparison));
         XVerProfileWorkPacket packet = operation.GetComparisonPacket(fixture.Packages[2].Key, fixture.Packages[0].Key);
         packet.Operands.HasCorrespondence.ShouldBeFalse();
-        packet.Facts.ForDefinition(fixture.Structure(fixture.Packages[2], "Coding")).Elements.ShouldContainKey(".code");
+        packet.Facts.ForDefinition(fixture.Structure(fixture.Packages[2], "Coding")).ShouldNotBeNull().Elements.ShouldContainKey(".code");
         operation.GetComparisonPacket(fixture.Packages[2].Key, fixture.Packages[0].Key).ShouldBeSameAs(packet);
         operation.ReleasePairWorkingFacts(fixture.Packages[2].Key, fixture.Packages[0].Key);
         AssertNoPayloads(operation.Catalog);
@@ -1928,7 +1926,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
             Read(pair.SourcePackageKey, pair.TargetPackageKey), Read(pair.TargetPackageKey, pair.SourcePackageKey));
         operation.ReleasePairWorkingFacts(pair.SourcePackageKey, pair.TargetPackageKey);
         AssertNoPayloads(operation.Catalog);
-        ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog);
+        ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog).ShouldBeTrue();
         DbElementOutcome outcome = DbElementOutcome.SelectSingle(fixture.Connection, SourceElementKey: source.Key)!;
         JsonObject document = JsonNode.Parse(outcome.ExtensionProhibitionReason!)!.AsObject();
         JsonObject decision = document["Decisions"]![0]!.AsObject();
@@ -1975,8 +1973,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         outcome.ExtensionProhibitionReason = mutation == "malformed" ? "{\"ProfileDecisionFormat\":" :
             document.ToJsonString(new() { WriteIndented = false });
         DbElementOutcome.Update(fixture.Connection, [outcome]);
-        Should.Throw<InvalidOperationException>(() =>
-            ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog));
+        ProfileUseFacts.RequirePersistedDecisions(fixture.Connection, pair, expected, operation.Catalog).ShouldBeFalse();
     }
 
     [Fact]
@@ -2009,7 +2006,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         string original = facts.StructureDefinitionJson;
         facts.StructureDefinitionJson = "{}";
         DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
-        Should.Throw<InvalidOperationException>(() => comparer.DoTypeComparisons(pair, source, target, 3));
+        comparer.DoTypeComparisons(pair, source, target, 3).TypeRelationship.ShouldBe(ConceptMap.ConceptMapRelationship.SourceIsBroaderThanTarget);
         PrivateField<XVerStructureCatalog?>(comparer, "_catalog").ShouldBeNull();
         facts.StructureDefinitionJson = original;
         DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
@@ -2040,7 +2037,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void LegacyBuildersAndRepresentationQueriesReleasePayloadsOnSuccessExceptionAndReuse()
+    public void LegacyBuildersAndRepresentationQueriesReleasePayloadsOnSuccessWarningAndReuse()
     {
         using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
         FhirPackageComparisonPair pair = fixture.PreparePair();
@@ -2076,7 +2073,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         string original = facts.StructureDefinitionJson;
         facts.StructureDefinitionJson = "{}";
         DbStructureDefinitionFacts.Update(fixture.Connection, [facts]);
-        Should.Throw<InvalidOperationException>(() => builder.BuildDefinitions(Tracking()));
+        AssertMalformedProfileWarning(() => builder.BuildDefinitions(Tracking()));
         AssertReleasedBuilder(builder);
         built.Representations.Occurrences(owner.Key).ToArray().ShouldNotBeEmpty();
         AssertReleasedIndex(built.Representations);
@@ -2091,6 +2088,23 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         Should.Throw<InvalidOperationException>(reader.Audit).Message.ShouldContain("not a live readiness capability");
         built.Representations.Resolve(owner.Key, path).ShouldNotBeEmpty();
         AssertReleasedIndex(built.Representations);
+    }
+
+    private static void AssertMalformedProfileWarning(Action build)
+    {
+        using StringWriter warnings = new();
+        TextWriter previous = Console.Error;
+        try
+        {
+            Console.SetError(warnings);
+            build();
+        }
+        finally
+        {
+            Console.SetError(previous);
+        }
+        warnings.ToString().ShouldContain("normalized payload contradicts canonical/version");
+        warnings.ToString().ShouldContain("Warning: ProfileUseFacts");
     }
 
     private static void AssertReleasedBuilder(StructureFhirExporter builder)
@@ -2756,8 +2770,8 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         using ProfileUseFacts ageFacts = new(catalog, r2, r4);
         DbStructureDefinition sourceAge = catalog.ResolveDefinition(r2, StructureUrl + "Age|1.0.2")!;
         DbStructureDefinition targetAge = catalog.ResolveDefinition(r4, StructureUrl + "Age|4.0.1")!;
-        EffectiveProfileBranch source = ageFacts.ForDefinition(sourceAge);
-        EffectiveProfileBranch target = ageFacts.ForDefinition(targetAge);
+        EffectiveProfileBranch source = ageFacts.ForDefinition(sourceAge).ShouldNotBeNull();
+        EffectiveProfileBranch target = ageFacts.ForDefinition(targetAge).ShouldNotBeNull();
         ProfileInvariant sourceInvariant = source.Elements[""].Invariants.Single(invariant => invariant.Key == "age-1");
         ProfileInvariant targetInvariant = target.Elements[""].Invariants.First(invariant => invariant.Key == "age-1");
         sourceInvariant.XPath.ShouldNotBeNull();
@@ -2806,7 +2820,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
         using ProfileUseFacts quantityFacts = new(catalog, r5, r4);
         DbStructureDefinition targetQuantity = catalog.ResolveNativeType(r4, "Quantity")!;
         ProfileRepresentationProof binding = quantityFacts.Prove(
-            quantityFacts.ForDefinition(catalog.ResolveNativeType(r5, "Quantity")!), targetQuantity);
+            quantityFacts.ForDefinition(catalog.ResolveNativeType(r5, "Quantity")!).ShouldNotBeNull(), targetQuantity);
         binding.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
         binding.TargetCanonical.ShouldBeNull();
         binding.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.Binding);
@@ -2815,7 +2829,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
             owner.ArtifactClass == FhirArtifactClassEnum.Profile && catalog.GetDeclaredType(owner) == "Quantity")
             .Where(owner => owner.Key == targetQuantity.Key || catalog.GetAncestors(owner).Any(ancestor => ancestor.Key == targetQuantity.Key)))
         {
-            EffectiveProfileElement comparator = quantityFacts.ForDefinition(candidate).Elements[".comparator"];
+            EffectiveProfileElement comparator = quantityFacts.ForDefinition(candidate).ShouldNotBeNull().Elements[".comparator"];
             (comparator.Prohibited || comparator.Restrictions.Any(restriction =>
                 restriction.Kind == ProfileRestrictionKind.Binding && ProfileUseFacts.Text(restriction.Value, "strength") == "required" &&
                 ProfileUseFacts.Text(restriction.Value, "valueSet") == comparatorValueSet + "|4.0.1")).ShouldBeTrue(candidate.VersionedUrl);
@@ -3024,7 +3038,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
                     type.TargetProfile.ShouldBeNull();
                     type.TargetProfileStructureKey.ShouldBeNull();
                     type.TypeStructureKey.ShouldBe(catalog.ResolveNativeType(package.Key, source.Type)!.Key);
-                    EffectiveProfileBranch effective = facts.ForDefinition(owner);
+                    EffectiveProfileBranch effective = facts.ForDefinition(owner).ShouldNotBeNull();
                     effective.Diagnostics.ShouldBeEmpty();
                     string.Equals(effective.Elements[""].Types.ShouldHaveSingleItem().Code, source.Type, StringComparison.Ordinal)
                         .ShouldBeTrue();
@@ -3036,7 +3050,7 @@ public class XVerPreparedOperationTests(ITestOutputHelper output)
                     string expectedId = name == "SimpleQuantity" && collection.FhirSequence == FhirReleases.FhirSequenceCodes.STU3
                         ? "Quantity:simplequantity" : "Quantity";
                     root.Id.ShouldBe(expectedId);
-                    EffectiveProfileBranch definition = facts.ForDefinition(owner);
+                    EffectiveProfileBranch definition = facts.ForDefinition(owner).ShouldNotBeNull();
                     definition.Diagnostics.ShouldBeEmpty();
                     string.Equals(definition.Elements[""].Types.ShouldHaveSingleItem().Code, "Quantity", StringComparison.Ordinal)
                         .ShouldBeTrue();

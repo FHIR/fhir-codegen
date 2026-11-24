@@ -185,11 +185,8 @@ public class StructureFhirExporter
             plans.Add((igTr, BuildDefinitions(igTr, operation)));
         }
         operation.Audit();
-        foreach (XVerIgExportTrackingRecord tracking in tr.XVerIgs)
-        {
-            ProfileUseFacts.RequirePersistedDecisions(_db, tracking.PackagePair,
-                operation.ExportDecisions(tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey), operation.Catalog);
-        }
+        plans.RemoveAll(plan => !ProfileUseFacts.RequirePersistedDecisions(_db, plan.Tracking.PackagePair,
+            operation.ExportDecisions(plan.Tracking.PackagePair.SourcePackageKey, plan.Tracking.PackagePair.TargetPackageKey), operation.Catalog));
         operation.Audit();
         foreach ((XVerIgExportTrackingRecord tracking, BuiltDefinitions definitions) in plans)
         {
@@ -3147,25 +3144,42 @@ public class StructureFhirExporter
         }
 
         // add this element and its children to the differential
-        addToDifferentialRecursive(
-            extSd,
-            igTr,
-            sourceElements,
-            targetElements,
-            elementComparisons,
-            contentReferenceExtUrlsByEdKey,
-            edOutcome,
-            sourceSd,
-            sourceEd,
-            dataTypeNameLiteral: dataTypeNameLiteral,
-            generatingForCardinality: generatingForCardinality);
+        Dictionary<int, List<EdOutcomeMapTargetRecord>> mapTargets = [];
+        try
+        {
+            addToDifferentialRecursive(
+                extSd, igTr, mapTargets, sourceElements, targetElements, elementComparisons,
+                contentReferenceExtUrlsByEdKey, edOutcome, sourceSd, sourceEd,
+                dataTypeNameLiteral: dataTypeNameLiteral, generatingForCardinality: generatingForCardinality);
+        }
+        catch (UnresolvedProfileException exception)
+        {
+            _logger.LogWarning("Skipping extension {Url}: {Reason}", extSd.Url, exception.Message);
+            if (extSd.Url is not null) _representations!.RemoveExtension(extSd.Url);
+            generatedExtensionIds.Remove(id);
+            return null;
+        }
+        foreach ((int key, List<EdOutcomeMapTargetRecord> records) in mapTargets)
+        {
+            if (igTr.EdOutcomeMapTargets.TryGetValue(key, out List<EdOutcomeMapTargetRecord>? existing))
+            {
+                existing.AddRange(records);
+            }
+            else
+            {
+                igTr.EdOutcomeMapTargets.Add(key, records);
+            }
+        }
 
         return extSd;
     }
 
+    private sealed class UnresolvedProfileException(string message) : Exception(message);
+
     private void addToDifferentialRecursive(
         StructureDefinition extSd,
         XVerIgExportTrackingRecord igTr,
+        Dictionary<int, List<EdOutcomeMapTargetRecord>> mapTargets,
         Dictionary<int, DbElement> sourceElements,
         Dictionary<int, DbElement> targetElements,
         Dictionary<int, DbElementComparison> elementComparisons,
@@ -3212,10 +3226,10 @@ public class StructureFhirExporter
         extElementPath ??= "Extension";
         dtValueElements ??= [];
 
-        if (!igTr.EdOutcomeMapTargets.TryGetValue(edOutcome.Key, out List<EdOutcomeMapTargetRecord>? mapTargetRecs))
+        if (!mapTargets.TryGetValue(edOutcome.Key, out List<EdOutcomeMapTargetRecord>? mapTargetRecs))
         {
             mapTargetRecs = [];
-            igTr.EdOutcomeMapTargets[edOutcome.Key] = mapTargetRecs;
+            mapTargets[edOutcome.Key] = mapTargetRecs;
         }
 
         //bool isRoot = edOutcome.ParentElementOutcomeKey is null;
@@ -3577,6 +3591,7 @@ public class StructureFhirExporter
             addToDifferentialRecursive(
                 extSd,
                 igTr,
+                mapTargets,
                 sourceElements,
                 targetElements,
                 elementComparisons,
@@ -3622,6 +3637,7 @@ public class StructureFhirExporter
                     addToDifferentialRecursive(
                         extSd,
                         igTr,
+                        mapTargets,
                         sourceElements,
                         targetElements,
                         elementComparisons,
@@ -3712,6 +3728,7 @@ public class StructureFhirExporter
                         addToDifferentialRecursive(
                             extSd,
                             igTr,
+                            mapTargets,
                             sourceElements,
                             targetElements,
                             elementComparisons,
@@ -3750,6 +3767,7 @@ public class StructureFhirExporter
                     addToDifferentialRecursive(
                         extSd,
                         igTr,
+                        mapTargets,
                         sourceElements,
                         targetElements,
                         elementComparisons,
@@ -3894,18 +3912,26 @@ public class StructureFhirExporter
                     {
                         DbStructureDefinition target = _catalog.ResolveDefinition(igTr.PackagePair.TargetPackageKey,
                             branch.Definition.UnversionedUrl, required: false) ??
-                            _catalog.ResolveNativeType(igTr.PackagePair.TargetPackageKey, rawTypeName)!;
-                        EffectiveProfileBranch native = facts.ForDefinition(target);
+                            _catalog.ResolveNativeType(igTr.PackagePair.TargetPackageKey, rawTypeName, required: false) ??
+                            throw new UnresolvedProfileException($"Missing target datatype for {input.Id}, type {rawTypeName}.");
+                        EffectiveProfileBranch native = facts.ForDefinition(target) ??
+                            throw new UnresolvedProfileException($"Missing effective facts for {target.VersionedUrl}.");
                         // The enclosing extension carries occurrence repetition; value[x] carries the datatype.
                         // No restriction is removed from either graph when comparing these value domains.
                         native = native with
                         {
-                            TargetProfileFacts = branch.TargetProfileFacts is null ? null : facts.ForDefinition(
+                            TargetProfileFacts = branch.TargetProfileFacts is null ? null :
                                 _catalog.ResolveDefinition(igTr.PackagePair.TargetPackageKey,
-                                    branch.TargetProfileFacts.Definition.UnversionedUrl)!),
+                                    branch.TargetProfileFacts.Definition.UnversionedUrl, required: false) is { } targetProfile &&
+                                facts.ForDefinition(targetProfile) is { } targetFacts ? targetFacts :
+                                throw new UnresolvedProfileException($"Missing target profile facts for {branch.TargetProfileFacts.Definition.VersionedUrl}."),
                         };
                         ProfileRepresentationProof proof = facts.Prove(branch, target, nativeContext: native,
                             occurrenceCardinalityCarried: true);
+                        if (!proof.IsAcceptedDecision)
+                        {
+                            throw new UnresolvedProfileException($"Unresolved extension value {input.Id}: {string.Join("; ", proof.Diagnostics)}");
+                        }
                         if (!proof.PreservesRestrictions)
                         {
                             throw new InvalidOperationException($"Unrepresentable extension value {sourceSd.VersionedUrl}#{input.Id}, " +
@@ -3922,7 +3948,7 @@ public class StructureFhirExporter
                     }
                     if (!use.Diagnostics.IsEmpty || use.Branches.IsEmpty)
                     {
-                        throw new InvalidOperationException($"Missing effective extension value facts for {input.Id}: {string.Join("; ", use.Diagnostics)}");
+                        throw new UnresolvedProfileException($"Missing effective extension value facts for {input.Id}: {string.Join("; ", use.Diagnostics)}");
                     }
                 }
 
@@ -4046,17 +4072,24 @@ public class StructureFhirExporter
         HashSet<string> valids = [];
         foreach (string v in urls)
         {
-            DbStructureDefinition source = _catalog.ResolveDefinition(tracking.PackagePair.SourcePackageKey, v)!;
+            DbStructureDefinition source = _catalog.ResolveDefinition(tracking.PackagePair.SourcePackageKey, v, required: false) ??
+                throw new UnresolvedProfileException($"Cannot resolve required source reference {v}.");
             DbStructureDefinition? counterpart = _catalog.ResolveDefinition(tracking.PackagePair.TargetPackageKey,
                 source.UnversionedUrl, required: false);
             if (source.ArtifactClass == FhirArtifactClassEnum.Profile)
             {
                 if (counterpart is null)
                 {
-                    throw new InvalidOperationException($"Missing exact target profile for required reference {v}; no base fallback is permitted.");
+                    throw new UnresolvedProfileException($"Missing exact target profile for required reference {v}; no base fallback is permitted.");
                 }
                 ProfileUseFacts facts = _operation!.GetComparisonPacket(tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey).Facts;
-                ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), counterpart);
+                EffectiveProfileBranch branch = facts.ForDefinition(source) ??
+                    throw new UnresolvedProfileException($"Missing effective reference profile facts for {v}.");
+                ProfileRepresentationProof proof = facts.Prove(branch, counterpart);
+                if (!proof.IsAcceptedDecision)
+                {
+                    throw new UnresolvedProfileException($"Unresolved reference profile {v}: {string.Join("; ", proof.Diagnostics)}");
+                }
                 if (!proof.PreservesRestrictions)
                 {
                     throw new InvalidOperationException($"Unrepresentable required profile reference {v}: {string.Join("; ", proof.Diagnostics)}");

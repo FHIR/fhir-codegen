@@ -136,10 +136,12 @@ public XVerExporter(IDbConnection db, ConfigXVer config)
 ### Exceptions
 
 `XVerExporter.Export` rejects missing/incomplete/incompatible/stale catalog,
-input, comparison, outcome or persisted-decision state, and unsupported actual
+input, comparison or outcome state, and unsupported actual
 scheduled representations, before any IG/vocabulary/output writes when structures
 are requested. Later materialization/emission/finalization can still fail; this
 is preflight, not transactional rollback of all possible export errors.
+An invalid persisted profile-decision envelope warns and excludes its directed
+pair from the export schedule. Other verified pairs can still export.
 
 ## Detailed Algorithm
 
@@ -484,7 +486,7 @@ definition indiscriminately. A complete `Unrepresentable` outcome is retained as
 negative evidence, never Equivalent, preserved restrictions, fake unsafe-code
 qualification or a usable target. It blocks an unsupported scheduled use, while
 unrelated unscheduled negatives need not block a proven Range consumer. Missing,
-malformed and unclassified required semantics remain errors, not accepted negatives.
+malformed and unclassified required semantics produce warnings, not accepted negatives.
 
 `ProjectScheduledUses` can re-prove a negative as `OwnerProjection` only inside an
 already-scheduled resource profile, with exact target owner/occurrence and complete

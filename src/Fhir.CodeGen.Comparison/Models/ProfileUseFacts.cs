@@ -74,13 +74,12 @@ internal sealed record EffectiveProfileBranch(
     EffectiveProfileBranch? TargetProfileFacts = null);
 
 internal sealed record EffectiveProfileUse(
-    DbStructureDefinition Owner, DbElement Element, ImmutableArray<EffectiveProfileBranch> Branches,
+    DbStructureDefinition? Owner, DbElement Element, ImmutableArray<EffectiveProfileBranch> Branches,
     ImmutableArray<string> Diagnostics)
 {
     // A prohibition is branch-local. The occurrence permits the union, not the intersection.
     internal bool Permits(string relativeId) => Diagnostics.Length == 0 && Branches.Any(branch => branch.Diagnostics.Length == 0 &&
-        branch.Elements.TryGetValue(relativeId, out EffectiveProfileElement? element) && !element.Prohibited &&
-        !branch.Elements.Any(pair => pair.Value.Prohibited && relativeId.StartsWith(pair.Key + ".", StringComparison.Ordinal)));
+        branch.Elements.ContainsKey(relativeId) && !ProfileUseFacts.IsProhibited(branch.Elements, relativeId));
 }
 
 internal sealed record ProfileQualification(
@@ -168,37 +167,58 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     IReadOnlyList<DbElementComparison>? comparisons = null) : IDisposable
 {
     internal const string XPathExtensionUrl = CommonDefinitions.ExtUrlEdConstraintXPath;
+    private const int ReadBatchSize = 500;
 
     private readonly Dictionary<int, (DbElement Root, ImmutableDictionary<string, EffectiveProfileElement> Elements,
         ImmutableArray<string> Diagnostics)> _definitions = [];
     private readonly Dictionary<(int, int, int), EffectiveProfileUse> _uses = [];
+    private readonly Dictionary<int, HashSet<string>> _parentsByOwner = [];
     private readonly HashSet<int> _active = [];
     private readonly HashSet<int> _warnedMappingComparisons = [];
     private readonly HashSet<(ProfileFactOrigin Origin, string Url)> _warnedMetadata = [];
     private readonly ILookup<int, DbElementComparison> _correspondenceComparisons = (comparisons ?? [])
-        .Where(comparison => comparison.SourceFhirPackageKey == sourcePackageKey && comparison.TargetFhirPackageKey == targetPackageKey)
         .ToLookup(comparison => comparison.SourceElementKey);
 
-    internal static string SerializeDecisions(IEnumerable<ProfileRepresentationProof> decisions, string? existingReason = null) =>
-        JsonSerializer.Serialize(new ProfileDecisionDocument(1, existingReason,
-            [.. decisions.Select(PersistedProfileDecision.FromProof)]));
+    internal static void Warn(string message) => Console.Error.WriteLine($"Warning: ProfileUseFacts: {message}");
 
-    internal static IReadOnlyList<PersistedProfileDecision> ReadDecisions(string json)
+    private static bool IsFactError(Exception error) => error is InvalidOperationException or ArgumentException or
+        KeyNotFoundException or FormatException or ArithmeticException or IndexOutOfRangeException or
+        JsonException or NotSupportedException or InvalidDataException or System.Data.Common.DbException or DataException;
+
+    internal static string? SerializeDecisions(IEnumerable<ProfileRepresentationProof> decisions, string? existingReason = null)
     {
         try
         {
-            ProfileDecisionDocument document = JsonSerializer.Deserialize<ProfileDecisionDocument>(json)
+            return JsonSerializer.Serialize(new ProfileDecisionDocument(1, existingReason,
+                [.. decisions.Select(PersistedProfileDecision.FromProof)]));
+        }
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            Warn($"Cannot serialize profile decisions: {exception.Message}");
+            return null;
+        }
+    }
+
+    internal static IReadOnlyList<PersistedProfileDecision> ReadDecisions(string? json) =>
+        ReadDecisionDocument(json)?.Decisions ?? [];
+
+    private static ProfileDecisionDocument? ReadDecisionDocument(string? json)
+    {
+        try
+        {
+            ProfileDecisionDocument document = JsonSerializer.Deserialize<ProfileDecisionDocument>(json ?? "")
                 ?? throw new InvalidOperationException("Missing persisted profile decisions.");
             if (document.ProfileDecisionFormat != 1 || document.Decisions is not { Length: > 0 } ||
                 document.Decisions.Any(decision => decision is null || decision.Kind != ProfileProofKind.Unrepresentable || !Valid(decision)))
             {
                 throw new InvalidOperationException("Incomplete or incompatible persisted negative profile decisions.");
             }
-            return document.Decisions;
+            return document;
         }
-        catch (JsonException exception)
+        catch (Exception exception) when (IsFactError(exception))
         {
-            throw new InvalidOperationException("Malformed persisted negative profile decisions.", exception);
+            Warn($"Cannot read persisted negative profile decisions: {exception.Message}");
+            return null;
         }
 
         static bool Valid(PersistedProfileDecision decision) =>
@@ -218,7 +238,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             {
                 ProfileProofKind.NativeReuse => !string.IsNullOrEmpty(decision.TargetCanonical) && decision.Reasons.IsEmpty,
                 ProfileProofKind.Unrepresentable => decision.TargetCanonical is null && !decision.Reasons.IsEmpty &&
-                    decision.Reasons.All(reason => reason.Origin is not null &&
+                    decision.Reasons.All(reason => reason?.Origin is not null &&
                         reason.Category is not (ProfileReasonCategory.InvalidFacts or ProfileReasonCategory.UnclassifiedRestriction)),
                 _ => false,
             };
@@ -226,40 +246,65 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
 
     internal EffectiveProfileUse AtUse(DbElement element, DbElementType row)
     {
-        DbStructureDefinition owner = catalog.GetOwner(element);
-        EffectiveProfileElement local = Definition(owner).Elements[element.Id[catalog.ResolveRoot(owner).Id.Length..]];
-        ProfileTypeAlternative[] alternatives = [.. local.Types.Where(type => type.Code == row.TypeName &&
-            (row.TypeProfile is null ? type.Profiles.IsEmpty : type.Profiles.Contains(row.TypeProfile)) &&
-            (row.TargetProfile is null ? type.TargetProfiles.IsEmpty : type.TargetProfiles.Contains(row.TargetProfile)))];
-        if (alternatives.Length != 1)
+        DbStructureDefinition? owner = null;
+        try
         {
-            throw new InvalidOperationException(Context(owner, element.Id, $"missing/ambiguous effective type-use for row {row.Key}"));
+            owner = catalog.GetOwner(element);
+            EffectiveProfileElement local = Definition(owner).Elements[element.Id[catalog.ResolveRoot(owner).Id.Length..]];
+            ProfileTypeAlternative? alternative = local.Types.SingleOrDefault(type => type.Code == row.TypeName &&
+                (row.TypeProfile is null ? type.Profiles.IsEmpty : type.Profiles.Contains(row.TypeProfile)) &&
+                (row.TargetProfile is null ? type.TargetProfiles.IsEmpty : type.TargetProfiles.Contains(row.TargetProfile)));
+            if (alternative is not null)
+            {
+                return AtUse(owner, element, alternative.Token);
+            }
+            return Unresolved(owner, element, $"missing effective type-use for row {row.Key}");
         }
-        return AtUse(owner, element, alternatives[0].Token);
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            return Unresolved(owner, element, $"type-use row {row.Key}: {exception.Message}");
+        }
+    }
+
+    private EffectiveProfileUse Unresolved(DbStructureDefinition? owner, DbElement element, string detail)
+    {
+        string message = $"Pair {sourcePackageKey}->{targetPackageKey}, owner {element.StructureKey}, element '{element.Id}': {detail}";
+        Warn(message);
+        return new(owner, element, [], [message]);
     }
 
     internal bool Permits(DbElement element)
     {
-        DbStructureDefinition owner = catalog.GetOwner(element);
-        string id = element.Id[catalog.ResolveRoot(owner).Id.Length..];
-        return !Definition(owner).Elements.Any(pair => pair.Value.Prohibited &&
-            (id == pair.Key || id.StartsWith(pair.Key + ".", StringComparison.Ordinal)));
+        try
+        {
+            DbStructureDefinition owner = catalog.GetOwner(element);
+            string id = element.Id[catalog.ResolveRoot(owner).Id.Length..];
+            return !IsProhibited(Definition(owner).Elements, id);
+        }
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            Warn($"Cannot determine permission for {element.Id}: {exception.Message}");
+            return false;
+        }
     }
 
     internal bool PermitsChild(DbElement occurrence, DbElement child, int datatypeKey)
     {
-        DbStructureDefinition owner = catalog.GetOwner(occurrence);
-        string id = occurrence.Id[catalog.ResolveRoot(owner).Id.Length..];
-        string childId = child.Id[catalog.ResolveRoot(catalog.GetOwner(child)).Id.Length..];
-        EffectiveProfileElement local = Definition(owner).Elements[id];
-        EffectiveProfileUse[] uses = [.. local.Types.Select(type => AtUse(owner, occurrence, type.Token))];
-        if (uses.Any(use => !use.Diagnostics.IsEmpty))
+        try
         {
-            throw new InvalidOperationException(Context(owner, occurrence.Id, string.Join("; ", uses.SelectMany(use => use.Diagnostics))));
+            DbStructureDefinition owner = catalog.GetOwner(occurrence);
+            string id = occurrence.Id[catalog.ResolveRoot(owner).Id.Length..];
+            string childId = child.Id[catalog.ResolveRoot(catalog.GetOwner(child)).Id.Length..];
+            EffectiveProfileElement local = Definition(owner).Elements[id];
+            EffectiveProfileUse[] uses = [.. local.Types.Select(type => AtUse(owner, occurrence, type.Token))];
+            return uses.All(use => use.Diagnostics.IsEmpty) && uses.SelectMany(use => use.Branches).Any(branch =>
+                branch.Definition.Key == datatypeKey && branch.Diagnostics.IsEmpty && !IsProhibited(branch.Elements, childId));
         }
-        return uses.SelectMany(use => use.Branches).Where(branch => branch.Definition.Key == datatypeKey).Any(branch =>
-            branch.Diagnostics.IsEmpty && !branch.Elements.Any(pair => pair.Value.Prohibited &&
-                (childId == pair.Key || childId.StartsWith(pair.Key + ".", StringComparison.Ordinal))));
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            Warn($"Cannot determine permission for {occurrence.Id} / {child.Id}: {exception.Message}");
+            return false;
+        }
     }
 
     // Classification deliberately follows declared profile obligations, not the unrelated native FHIR graph.
@@ -267,39 +312,93 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     internal IReadOnlyList<ProfileRepresentationProof> ClassifyRequiredUses()
     {
         List<ProfileRepresentationProof> decisions = [];
-        IReadOnlyList<DbStructureDefinition> owners = catalog.GetProcessedStructures(sourcePackageKey);
-        HashSet<int> usedDefinitions = [.. owners.SelectMany(catalog.GetOwnedElements)
-            .Where(element => element.ResourceFieldOrder != 0)
-            .SelectMany(catalog.GetTypeUses)
-            .Select(type => type.TypeProfileStructureKey ?? type.TypeStructureKey).OfType<int>()];
+        Dictionary<string, bool> requiredNativeTypes = new(StringComparer.Ordinal);
+        Dictionary<string, bool> constrainedTargets = new(StringComparer.Ordinal);
+        List<DbStructureDefinition> owners = [];
+        HashSet<int> usedDefinitions = [];
+        try
+        {
+            foreach (DbStructureDefinition owner in catalog.GetDefinitions(sourcePackageKey))
+            {
+                try
+                {
+                    if (!catalog.IsProcessed(owner))
+                    {
+                        continue;
+                    }
+                    owners.Add(owner);
+                    foreach (DbElement element in catalog.GetOwnedElements(owner).Where(element => element.ResourceFieldOrder != 0))
+                    {
+                        try
+                        {
+                            foreach (DbElementType type in catalog.GetTypeUses(element))
+                            {
+                                if ((type.TypeProfileStructureKey ?? type.TypeStructureKey) is int key)
+                                {
+                                    usedDefinitions.Add(key);
+                                }
+                            }
+                        }
+                        catch (Exception exception) when (IsFactError(exception))
+                        {
+                            Warn(Context(owner, element.Id, exception.Message));
+                        }
+                    }
+                }
+                catch (Exception exception) when (IsFactError(exception))
+                {
+                    Warn(Context(owner, "", exception.Message));
+                }
+            }
+        }
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            Warn($"Cannot enumerate definitions for pair {sourcePackageKey}->{targetPackageKey}: {exception.Message}");
+        }
         foreach (DbStructureDefinition owner in owners)
         {
-            DbElement root = catalog.ResolveRoot(owner);
-            if (catalog.IsQuantityFamily(owner) &&
-                (owner.ArtifactClass == Common.Models.FhirArtifactClassEnum.Profile || usedDefinitions.Contains(owner.Key)))
+            try
             {
-                Decide(ForDefinition(owner), null);
+                (DbElement root, ImmutableDictionary<string, EffectiveProfileElement> elements, _) = Definition(owner);
+                if (catalog.IsQuantityFamily(owner) &&
+                    (owner.ArtifactClass == Common.Models.FhirArtifactClassEnum.Profile || usedDefinitions.Contains(owner.Key)))
+                {
+                    Decide(DefinitionBranch(owner), null);
+                }
+                foreach (DbElement element in catalog.GetOwnedElements(owner).Where(element => element.Key != root.Key))
+                {
+                    EffectiveProfileElement local = elements[element.Id[root.Id.Length..]];
+                    if (IsProhibited(elements, local.RelativeId))
+                    {
+                        continue;
+                    }
+                    foreach (ProfileTypeAlternative type in local.Types)
+                    {
+                        try
+                        {
+                            if (!Required(type))
+                            {
+                                continue;
+                            }
+                            EffectiveProfileUse use = AtUse(owner, element, type.Token);
+                            if (use.Diagnostics.IsEmpty)
+                            {
+                                foreach (EffectiveProfileBranch branch in use.Branches)
+                                {
+                                    Decide(branch, element);
+                                }
+                            }
+                        }
+                        catch (Exception exception) when (IsFactError(exception))
+                        {
+                            Warn(Context(owner, element.Id, exception.Message));
+                        }
+                    }
+                }
             }
-            foreach (DbElement element in catalog.GetOwnedElements(owner).Where(element => element.Key != root.Key))
+            catch (Exception exception) when (IsFactError(exception))
             {
-                EffectiveProfileElement local = Definition(owner).Elements[element.Id[root.Id.Length..]];
-                if (Definition(owner).Elements.Any(pair => pair.Value.Prohibited &&
-                    (local.RelativeId == pair.Key || local.RelativeId.StartsWith(pair.Key + ".", StringComparison.Ordinal))))
-                {
-                    continue;
-                }
-                foreach (ProfileTypeAlternative type in local.Types.Where(Required))
-                {
-                    EffectiveProfileUse use = AtUse(owner, element, type.Token);
-                    if (!use.Diagnostics.IsEmpty || use.Branches.IsEmpty)
-                    {
-                        throw new InvalidOperationException(Context(owner, element.Id, string.Join("; ", use.Diagnostics)));
-                    }
-                    foreach (EffectiveProfileBranch branch in use.Branches)
-                    {
-                        Decide(branch, element);
-                    }
-                }
+                Warn(Context(owner, "", exception.Message));
             }
         }
         return decisions;
@@ -309,20 +408,40 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             bool constrainedTarget = false;
             foreach (string canonical in type.TargetProfiles)
             {
-                DbStructureDefinition referenced = catalog.ResolveDefinition(sourcePackageKey, canonical)!;
-                catalog.ResolveRoot(referenced);
-                catalog.ReadPayload(referenced);
-                constrainedTarget |= referenced.ArtifactClass == Common.Models.FhirArtifactClassEnum.Profile;
+                if (!constrainedTargets.TryGetValue(canonical, out bool constrained))
+                {
+                    DbStructureDefinition referenced = catalog.ResolveDefinition(sourcePackageKey, canonical)!;
+                    catalog.ResolveRoot(referenced);
+                    catalog.ReadPayload(referenced);
+                    constrainedTargets[canonical] = constrained = referenced.ArtifactClass == Common.Models.FhirArtifactClassEnum.Profile;
+                }
+                constrainedTarget |= constrained;
             }
             if (!type.Profiles.IsEmpty || constrainedTarget)
             {
                 return true;
             }
-            DbStructureDefinition? native = catalog.ResolveNativeType(sourcePackageKey, type.Code, required: type.Code == "Quantity");
-            return native is not null && catalog.IsQuantityFamily(native);
+            if (!requiredNativeTypes.TryGetValue(type.Code, out bool required))
+            {
+                DbStructureDefinition? native = catalog.ResolveNativeType(sourcePackageKey, type.Code, required: type.Code == "Quantity");
+                requiredNativeTypes[type.Code] = required = native is not null && catalog.IsQuantityFamily(native);
+            }
+            return required;
         }
 
         void Decide(EffectiveProfileBranch branch, DbElement? occurrence)
+        {
+            try
+            {
+                DecideBranch(branch, occurrence);
+            }
+            catch (Exception exception) when (IsFactError(exception))
+            {
+                Warn(Context(branch.Definition, occurrence?.Id ?? branch.Root.Id, exception.Message));
+            }
+        }
+
+        void DecideBranch(EffectiveProfileBranch branch, DbElement? occurrence)
         {
             List<EffectiveProfileBranch> targets = [];
             bool cardinalityCarried = false;
@@ -330,9 +449,9 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             {
                 DbStructureDefinition useOwner = catalog.GetOwner(occurrence);
                 List<DbElement> targetElements = [];
-                foreach (DbElementComparison comparison in comparisons ?? [])
+                foreach (DbElementComparison comparison in _correspondenceComparisons[occurrence.Key])
                 {
-                    if (comparison.SourceElementKey == occurrence.Key && !comparison.NotMapped &&
+                    if (!comparison.NotMapped &&
                         comparison.TargetStructureKey is int ownerKey && comparison.TargetElementKey is int elementKey)
                     {
                         if (comparison.SourceFhirPackageKey != sourcePackageKey || comparison.TargetFhirPackageKey != targetPackageKey ||
@@ -395,7 +514,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 }
                 target ??= catalog.ResolveNativeType(targetPackageKey, catalog.GetDeclaredType(branch.Definition),
                     context: branch.Root.Id + " required representation")!;
-                targets.Add(ForDefinition(target));
+                targets.Add(DefinitionBranch(target));
                 cardinalityCarried = occurrence is not null;
             }
             ProfileRepresentationProof[] proofs = [.. targets.Select(target => Prove(branch, target.Definition, nativeContext: target,
@@ -403,8 +522,9 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             // Invalid alternatives are not evidence for a negative classification.
             if (proofs.Any(proof => !proof.IsAcceptedDecision))
             {
-                throw new InvalidOperationException(Context(branch.Definition, branch.Root.Id,
+                Warn(Context(branch.Definition, occurrence?.Id ?? branch.Root.Id,
                     string.Join("; ", proofs.Where(proof => !proof.IsAcceptedDecision).SelectMany(proof => proof.Diagnostics))));
+                return;
             }
             ProfileRepresentationProof? positive = proofs.FirstOrDefault(proof => proof.PreservesRestrictions);
             if (positive is not null)
@@ -420,26 +540,24 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
 
     internal static IReadOnlyList<ProfileRepresentationProof> ClassifyPair(IDbConnection db, FhirPackageComparisonPair pair)
     {
-        XVerStructureCatalog catalog = new(db, XVer.XVerProcessor._exclusionSet);
         try
         {
+            using XVerStructureCatalog catalog = new(db, XVer.XVerProcessor._exclusionSet);
             return ClassifyPair(db, pair, catalog);
         }
-        finally
+        catch (Exception exception) when (IsFactError(exception))
         {
-            catalog.Dispose();
+            Warn($"Cannot classify pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: {exception.Message}");
+            return [];
         }
     }
 
     private static IReadOnlyList<ProfileRepresentationProof> ClassifyPair(
         IDbConnection db, FhirPackageComparisonPair pair, XVerStructureCatalog catalog)
     {
-        ImmutableArray<ProfileRepresentationProof> decisions = ClassifyDirection(catalog,
+        return ClassifyDirection(catalog,
             pair.SourcePackageKey, pair.TargetPackageKey,
             DbElementComparison.SelectList(db, SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey));
-        ClassifyDirection(catalog, pair.TargetPackageKey, pair.SourcePackageKey,
-            DbElementComparison.SelectList(db, SourceFhirPackageKey: pair.TargetPackageKey, TargetFhirPackageKey: pair.SourcePackageKey));
-        return decisions;
     }
 
     internal static ImmutableArray<ProfileRepresentationProof> ClassifyDirection(XVerStructureCatalog catalog,
@@ -452,70 +570,136 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     internal ProfileRepresentationProof ProveInOwner(ProfileRepresentationProof decision,
         DbStructureDefinition emittedOwner, IReadOnlySet<int> emittedOwnerKeys)
     {
-        DbStructureDefinition sourceOwner = catalog.GetStructure(decision.Input.OwnerKey);
-        DbElement sourceElement = catalog.GetOwnedElements(sourceOwner).Single(element => element.Key == decision.Input.ElementKey);
-        EffectiveProfileBranch source = AtUse(sourceOwner, sourceElement, decision.Input.TypeUseToken).Branches
-            .Single(branch => branch.Key == decision.Input);
         if (decision.NativeInput is not ProfileUseKey native || native.OwnerKey != emittedOwner.Key ||
             native.TypeUseToken < 0 || decision.OccurrenceCardinalityCarried)
         {
             return decision;
         }
-        DbElement targetElement = catalog.GetOwnedElements(emittedOwner).Single(element => element.Key == native.ElementKey);
-        EffectiveProfileBranch target = AtUse(emittedOwner, targetElement, native.TypeUseToken).Branches
-            .Single(branch => branch.Key == native);
-        return Prove(source, target.Definition, emittedOwner, targetElement, emittedOwnerKeys, target);
+        try
+        {
+            DbStructureDefinition sourceOwner = catalog.GetStructure(decision.Input.OwnerKey);
+            DbElement sourceElement = catalog.GetOwnedElement(sourceOwner, decision.Input.ElementKey);
+            EffectiveProfileBranch source = AtUse(sourceOwner, sourceElement, decision.Input.TypeUseToken).Branches
+                .Single(branch => branch.Key == decision.Input);
+            DbElement targetElement = catalog.GetOwnedElement(emittedOwner, native.ElementKey);
+            EffectiveProfileBranch target = AtUse(emittedOwner, targetElement, native.TypeUseToken).Branches
+                .Single(branch => branch.Key == native);
+            return Prove(source, target.Definition, emittedOwner, targetElement, emittedOwnerKeys, target);
+        }
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            string detail = Context(emittedOwner, decision.Input.SliceContext, exception.Message);
+            Warn(detail);
+            return decision with { Kind = ProfileProofKind.MissingFacts, Diagnostics = [detail], TargetCanonical = null,
+                Projection = [], ProjectionOwner = null };
+        }
     }
 
     internal static void PersistNegativeDecisions(IDbConnection db, FhirPackageComparisonPair pair,
         IReadOnlyList<ProfileRepresentationProof> decisions, XVerPreparedOperation? operation = null)
     {
-        operation?.Audit();
-        List<DbElementOutcome> outcomes = operation is null ? DbElementOutcome.SelectList(db,
-            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-            : [.. operation.Evidence.Rows<DbElementOutcome>(DbElementOutcome.DefaultTableName)
-                .Where(row => row.SourceFhirPackageKey == pair.SourcePackageKey && row.TargetFhirPackageKey == pair.TargetPackageKey)];
+        try
+        {
+            PersistNegativeDecisionsCore(db, pair, decisions, operation);
+        }
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            Warn($"Cannot persist negative decisions for pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: {exception.Message}");
+        }
+    }
+
+    private static void PersistNegativeDecisionsCore(IDbConnection db, FhirPackageComparisonPair pair,
+        IReadOnlyList<ProfileRepresentationProof> decisions, XVerPreparedOperation? operation)
+    {
+        IGrouping<int, ProfileRepresentationProof>[] negatives = [.. decisions.Where(proof => !proof.PreservesRestrictions)
+            .GroupBy(proof => proof.Input.ElementKey).Where(group =>
+            {
+                if (group.All(proof => proof.IsAcceptedDecision && proof.Input.PackageKey == pair.SourcePackageKey &&
+                    proof.TargetPackageKey == pair.TargetPackageKey && proof.Input.OwnerKey == group.First().Input.OwnerKey))
+                {
+                    return true;
+                }
+                Warn($"Skipping incomplete or misowned negative decisions for element {group.Key}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}.");
+                return false;
+            })];
+        if (negatives.Length == 0)
+        {
+            return;
+        }
+        HashSet<int> elementKeys = [.. negatives.Select(group => group.Key)];
+        List<DbElementOutcome> outcomes = operation?.Evidence.ProfileElementOutcomes(pair, elementKeys) ??
+            [.. elementKeys.Chunk(ReadBatchSize).SelectMany(keys => DbElementOutcome.SelectList(db,
+                SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey, SourceElementKeyValues: [.. keys]))];
         List<DbElementOutcome> updates = [];
         List<DbElementOutcome> inserts = [];
-        foreach (IGrouping<int, ProfileRepresentationProof> group in decisions.Where(proof => !proof.PreservesRestrictions)
-            .GroupBy(proof => proof.Input.ElementKey))
+        ILookup<int, DbElementOutcome> byElement = outcomes.ToLookup(outcome => outcome.SourceElementKey);
+        Dictionary<int, DbElement> missingElements = [];
+        Dictionary<int, DbStructureDefinition> missingOwners = [];
+        if (operation is null)
         {
-            DbElementOutcome[] matches = [.. outcomes.Where(outcome => outcome.SourceElementKey == group.Key)];
+            missingElements = elementKeys.Where(key => !byElement.Contains(key)).Chunk(ReadBatchSize)
+                .SelectMany(keys => DbElement.SelectList(db, FhirPackageKey: pair.SourcePackageKey, KeyValues: [.. keys]))
+                .ToDictionary(row => row.Key);
+            missingOwners = missingElements.Values.Select(row => row.StructureKey).Distinct().Chunk(ReadBatchSize)
+                .SelectMany(keys => DbStructureDefinition.SelectList(db, FhirPackageKey: pair.SourcePackageKey, KeyValues: [.. keys]))
+                .ToDictionary(row => row.Key);
+        }
+        foreach (IGrouping<int, ProfileRepresentationProof> group in negatives)
+        {
+            DbElementOutcome[] matches = [.. byElement[group.Key]];
             if (matches.Length > 1)
             {
-                throw new InvalidOperationException($"Ambiguous negative profile outcome for element {group.Key}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}.");
+                Warn($"Ambiguous negative profile outcome for element {group.Key}, pair {pair.SourcePackageKey}->{pair.TargetPackageKey}.");
+                continue;
             }
             DbElementOutcome outcome;
             if (matches.Length == 0)
             {
                 DbStructureDefinition owner;
                 DbElement element;
-                if (operation is null)
+                try
                 {
-                    element = DbElement.SelectSingle(db, Key: group.Key)!;
-                    owner = DbStructureDefinition.SelectSingle(db, Key: element.StructureKey)!;
+                    int ownerKey = group.First().Input.OwnerKey;
+                    owner = operation?.Catalog.GetStructure(ownerKey) ?? missingOwners[ownerKey];
+                    element = operation?.Catalog.GetOwnedElement(owner, group.Key) ?? missingElements[group.Key];
+                    if (element.StructureKey != ownerKey || owner.FhirPackageKey != pair.SourcePackageKey)
+                    {
+                        Warn($"Skipping negative outcome for misowned element {group.Key}, owner {ownerKey}.");
+                        continue;
+                    }
                 }
-                else
+                catch (Exception exception) when (IsFactError(exception))
                 {
-                    owner = operation.Catalog.GetStructure(group.First().Input.OwnerKey);
-                    element = operation.Catalog.GetOwnedElements(owner).Single(row => row.Key == group.Key);
+                    Warn($"Cannot resolve negative outcome for element {group.Key}: {exception.Message}");
+                    continue;
                 }
                 outcome = NegativeOutcome(pair, owner, element);
-                inserts.Add(outcome);
             }
             else
             {
                 outcome = matches[0];
-                updates.Add(outcome);
+                if (outcome.SourceStructureKey != group.First().Input.OwnerKey)
+                {
+                    Warn($"Skipping misowned negative outcome {outcome.Key} for element {group.Key}.");
+                    continue;
+                }
             }
             string? existingReason = outcome.ExtensionProhibitionReason;
             if (IsDecisionDocument(existingReason))
             {
-                ReadDecisions(existingReason!);
-                existingReason = JsonSerializer.Deserialize<ProfileDecisionDocument>(existingReason!)!.ExistingProhibitionReason;
+                if (ReadDecisionDocument(existingReason) is not { } document)
+                {
+                    continue;
+                }
+                existingReason = document.ExistingProhibitionReason;
             }
+            if (SerializeDecisions(group, existingReason) is not string serialized)
+            {
+                continue;
+            }
+            (matches.Length == 0 ? inserts : updates).Add(outcome);
             outcome.ExtensionDefinitionIsProhibited = true;
-            outcome.ExtensionProhibitionReason = SerializeDecisions(group, existingReason);
+            outcome.ExtensionProhibitionReason = serialized;
             outcome.IsEquivalent = false;
             outcome.IsIdentical = false;
             outcome.FullyMapsAcrossAllTargets = false;
@@ -524,12 +708,14 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             outcome.ExtensionSubstitutionUrl = null;
             outcome.ContentReferenceExtensionUrl = null;
         }
+        if (inserts.Count == 0 && updates.Count == 0)
+        {
+            return;
+        }
         HashSet<int> negativeOutcomes = [.. inserts.Concat(updates).Select(outcome => outcome.Key)];
-        List<DbElementOutcomeTarget> targets = [.. (operation is null ? DbElementOutcomeTarget.SelectList(db,
-            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-            : operation.Evidence.Rows<DbElementOutcomeTarget>(DbElementOutcomeTarget.DefaultTableName))
-            .Where(target => target.SourceFhirPackageKey == pair.SourcePackageKey && target.TargetFhirPackageKey == pair.TargetPackageKey &&
-                negativeOutcomes.Contains(target.ElementOutcomeKey))];
+        List<DbElementOutcomeTarget> targets = operation?.Evidence.ProfileOutcomeTargets(pair, negativeOutcomes) ??
+            [.. negativeOutcomes.Chunk(ReadBatchSize).SelectMany(keys => DbElementOutcomeTarget.SelectList(db,
+                SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey, ElementOutcomeKeyValues: [.. keys]))];
         foreach (DbElementOutcomeTarget target in targets)
         {
             target.FullyMapsToThisTarget = false;
@@ -538,12 +724,10 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             target.CardinalityContextRootExtensionUrl = null;
             target.CardinalityContextParentExtensionUrl = null;
         }
-        HashSet<int> negativeOwners = [.. decisions.Where(proof => !proof.PreservesRestrictions).Select(proof => proof.Input.OwnerKey)];
-        List<DbStructureOutcome> structures = [.. (operation is null ? DbStructureOutcome.SelectList(db,
-            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey)
-            : operation.Evidence.Rows<DbStructureOutcome>(DbStructureOutcome.DefaultTableName))
-            .Where(outcome => outcome.SourceFhirPackageKey == pair.SourcePackageKey && outcome.TargetFhirPackageKey == pair.TargetPackageKey &&
-                negativeOwners.Contains(outcome.SourceStructureKey))];
+        HashSet<int> negativeOwners = [.. inserts.Concat(updates).Select(outcome => outcome.SourceStructureKey)];
+        List<DbStructureOutcome> structures = operation?.Evidence.ProfileStructureOutcomes(pair, negativeOwners) ??
+            [.. negativeOwners.Chunk(ReadBatchSize).SelectMany(keys => DbStructureOutcome.SelectList(db,
+                SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey, SourceStructureKeyValues: [.. keys]))];
         foreach (DbStructureOutcome outcome in structures)
         {
             outcome.IsEquivalent = false;
@@ -555,10 +739,10 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         }
         void Write()
         {
-            inserts.Insert(db, insertPrimaryKey: true);
-            updates.Update(db);
-            targets.Update(db);
-            structures.Update(db);
+            if (inserts.Count != 0) inserts.Insert(db, insertPrimaryKey: true);
+            if (updates.Count != 0) updates.Update(db);
+            if (targets.Count != 0) targets.Update(db);
+            if (structures.Count != 0) structures.Update(db);
         }
         if (operation is null)
         {
@@ -572,29 +756,43 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         }
     }
 
-    internal static void RequirePersistedDecisions(IDbConnection db, FhirPackageComparisonPair pair)
+    internal static bool RequirePersistedDecisions(IDbConnection db, FhirPackageComparisonPair pair)
     {
-        XVerStructureCatalog catalog = new(db, XVer.XVerProcessor._exclusionSet);
         try
         {
+            using XVerStructureCatalog catalog = new(db, XVer.XVerProcessor._exclusionSet);
             IReadOnlyList<ProfileRepresentationProof> required = ClassifyPair(db, pair, catalog);
-            RequirePersistedDecisions(db, pair, required, catalog);
+            return RequirePersistedDecisions(db, pair, required, catalog);
         }
-        finally
+        catch (Exception exception) when (IsFactError(exception))
         {
-            catalog.Dispose();
+            Warn($"Cannot check persisted decisions for pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: {exception.Message}");
+            return false;
         }
     }
 
-    internal static void RequirePersistedDecisions(IDbConnection db, FhirPackageComparisonPair pair,
+    internal static bool RequirePersistedDecisions(IDbConnection db, FhirPackageComparisonPair pair,
+        IReadOnlyList<ProfileRepresentationProof> required, XVerStructureCatalog catalog)
+    {
+        try
+        {
+            ValidatePersistedDecisions(db, pair, required, catalog);
+            return true;
+        }
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            Warn($"Cannot validate persisted decisions for pair {pair.SourcePackageKey}->{pair.TargetPackageKey}: {exception.Message}");
+            return false;
+        }
+    }
+
+    private static void ValidatePersistedDecisions(IDbConnection db, FhirPackageComparisonPair pair,
         IReadOnlyList<ProfileRepresentationProof> required, XVerStructureCatalog catalog)
     {
         List<DbStructureOutcome> structureOutcomes = DbStructureOutcome.SelectList(db,
             SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
         List<DbElementOutcome> elementOutcomes = DbElementOutcome.SelectList(db,
-            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
-        List<DbElementOutcomeTarget> elementTargets = DbElementOutcomeTarget.SelectList(db,
-            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey);
+            SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey, ExtensionProhibitionReasonIsNull: false);
         if (required.Any(proof => !proof.IsAcceptedDecision || proof.Input.PackageKey != pair.SourcePackageKey ||
             proof.TargetPackageKey != pair.TargetPackageKey ||
             catalog.GetStructure(proof.Input.OwnerKey).FhirPackageKey != pair.SourcePackageKey))
@@ -626,7 +824,11 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 throw new InvalidOperationException("Negative profile outcome advertises a usable/equivalent representation.");
             }
             negativeOutcomes.Add(outcome.Key);
-            foreach (PersistedProfileDecision decision in ReadDecisions(outcome.ExtensionProhibitionReason!))
+            if (ReadDecisionDocument(outcome.ExtensionProhibitionReason) is not { } document)
+            {
+                throw new InvalidOperationException($"Invalid profile decision document on outcome {outcome.Key}.");
+            }
+            foreach (PersistedProfileDecision decision in document.Decisions)
             {
                 if (decision.Input.OwnerKey != outcome.SourceStructureKey || decision.Input.ElementKey != outcome.SourceElementKey ||
                     decision.Input.PackageKey != pair.SourcePackageKey || decision.TargetPackageKey != pair.TargetPackageKey ||
@@ -645,10 +847,10 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         if (structureOutcomes.Any(outcome => negativeOwners.Contains(outcome.SourceStructureKey) &&
                 (outcome.IsEquivalent || outcome.IsIdentical || outcome.FullyMapsAcrossAllTargets || outcome.FullyMapsToThisTarget ||
                     outcome.TargetCanonicalVersioned is not null || outcome.TargetCanonicalUnversioned is not null)) ||
-            elementTargets
-                .Any(target => negativeOutcomes.Contains(target.ElementOutcomeKey) &&
-                    (target.FullyMapsToThisTarget || target.ContextRootExtensionUrl is not null || target.ContextParentExtensionUrl is not null ||
-                        target.CardinalityContextRootExtensionUrl is not null || target.CardinalityContextParentExtensionUrl is not null)))
+            negativeOutcomes.Chunk(ReadBatchSize).SelectMany(keys => DbElementOutcomeTarget.SelectList(db,
+                SourceFhirPackageKey: pair.SourcePackageKey, TargetFhirPackageKey: pair.TargetPackageKey, ElementOutcomeKeyValues: [.. keys]))
+                .Any(target => target.FullyMapsToThisTarget || target.ContextRootExtensionUrl is not null || target.ContextParentExtensionUrl is not null ||
+                    target.CardinalityContextRootExtensionUrl is not null || target.CardinalityContextParentExtensionUrl is not null))
         {
             throw new InvalidOperationException("Persisted negative profile decisions advertise a usable target.");
         }
@@ -690,6 +892,21 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         {
             return cached;
         }
+        EffectiveProfileUse use;
+        try
+        {
+            use = BuildUse(owner, element, typeUseToken);
+        }
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            use = Unresolved(owner, element, exception.Message);
+        }
+        _uses.Add((owner.Key, element.Key, typeUseToken), use);
+        return use;
+    }
+
+    private EffectiveProfileUse BuildUse(DbStructureDefinition owner, DbElement element, int typeUseToken)
+    {
         catalog.ResolveOwnedElement(owner, element.Id, element.Key);
         (DbElement root, ImmutableDictionary<string, EffectiveProfileElement> elements, ImmutableArray<string> diagnostics) = Definition(owner);
         string relative = element.Id[root.Id.Length..];
@@ -737,14 +954,14 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                         if (targetProfile is not null)
                         {
                             DbStructureDefinition target = catalog.ResolveDefinition(owner.FhirPackageKey, targetProfile, context: element.Id)!;
-                            targetFacts = ForDefinition(target);
+                            targetFacts = DefinitionBranch(target);
                         }
                         (DbElement datatypeRoot, ImmutableDictionary<string, EffectiveProfileElement> datatypeElements,
                             ImmutableArray<string> datatypeErrors) = Definition(datatype);
-                        Dictionary<string, EffectiveProfileElement> merged = datatypeElements.ToDictionary();
+                        ImmutableDictionary<string, EffectiveProfileElement>.Builder merged = datatypeElements.ToBuilder();
                         List<string> branchErrors = [.. datatypeErrors, .. local.Diagnostics];
                         merged[""] = Merge(merged[""], local with { RelativeId = "" }, branchErrors, rootType: true, occurrence: true);
-                        foreach ((string id, EffectiveProfileElement child) in elements.Where(pair => pair.Key.StartsWith(relative + ".", StringComparison.Ordinal)))
+                        foreach ((string id, EffectiveProfileElement child) in Descendants(owner.Key, elements, relative))
                         {
                             string childId = id[relative.Length..];
                             EffectiveProfileElement atChild = child with { RelativeId = childId };
@@ -752,28 +969,66 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                             merged[childId] = merged.TryGetValue(childId, out EffectiveProfileElement? inherited)
                                 ? Merge(inherited, atChild, branchErrors) : atChild;
                         }
-                        branches.Add(new(key, datatype, datatypeRoot, merged.ToImmutableDictionary(), [.. branchErrors], targetFacts));
+                        branches.Add(new(key, datatype, datatypeRoot, merged.ToImmutable(), [.. branchErrors], targetFacts));
                     }
-                    catch (InvalidOperationException exception)
+                    catch (Exception exception) when (IsFactError(exception))
                     {
                         errors.Add(Context(owner, element.Id, exception.Message));
                     }
                 }
             }
         }
-        EffectiveProfileUse use = new(owner, element, [.. branches], [.. errors]);
-        _uses.Add((owner.Key, element.Key, typeUseToken), use);
-        return use;
+        if (errors.Count != 0)
+        {
+            Warn(string.Join("; ", errors));
+        }
+        return new(owner, element, [.. branches], [.. errors]);
+    }
+
+    private IEnumerable<KeyValuePair<string, EffectiveProfileElement>> Descendants(int ownerKey,
+        ImmutableDictionary<string, EffectiveProfileElement> elements, string relativeId)
+    {
+        // Most occurrences are leaves. Include ancestors from inherited and expanded
+        // contentReference facts, not just the local relational child count.
+        if (!_parentsByOwner.TryGetValue(ownerKey, out HashSet<string>? parents))
+        {
+            parents = [];
+            foreach (string id in elements.Keys)
+            {
+                for (int dot = id.LastIndexOf('.'); dot >= 0; dot = dot == 0 ? -1 : id.LastIndexOf('.', dot - 1))
+                {
+                    if (!parents.Add(id[..dot])) break;
+                }
+            }
+            _parentsByOwner.Add(ownerKey, parents);
+        }
+        if (!parents.Contains(relativeId)) return [];
+        string prefix = relativeId + ".";
+        return elements.Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal));
     }
 
     public void Dispose()
     {
         _uses.Clear();
         _definitions.Clear();
+        _parentsByOwner.Clear();
         _active.Clear();
     }
 
-    internal EffectiveProfileBranch ForDefinition(DbStructureDefinition owner)
+    internal EffectiveProfileBranch? ForDefinition(DbStructureDefinition owner)
+    {
+        try
+        {
+            return DefinitionBranch(owner);
+        }
+        catch (Exception exception) when (IsFactError(exception))
+        {
+            Warn(Context(owner, "", exception.Message));
+            return null;
+        }
+    }
+
+    private EffectiveProfileBranch DefinitionBranch(DbStructureDefinition owner)
     {
         (DbElement root, ImmutableDictionary<string, EffectiveProfileElement> elements, ImmutableArray<string> diagnostics) = Definition(owner);
         return new(new(owner.FhirPackageKey, owner.Key, root.Key, -1, owner.UnversionedUrl + "|" + owner.Version, null, root.Id),
@@ -788,6 +1043,8 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     {
         ProfileFactOrigin sourceRoot = Origin(source.Definition, source.Root.Id);
         EffectiveProfileBranch? target = null;
+        ProfileFactOrigin? inputOwnerRoot = null;
+        ProfileFactOrigin? nativeOwnerRoot = null;
         List<ProfileDecisionReason> reasons = [];
         List<ProfileRepresentationProof> childProofs = [];
         ProfileRepresentationProof Result(ProfileProofKind kind, string? canonical = null,
@@ -798,19 +1055,14 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             {
                 TargetPackageKey = targetPackageKey, Reasons = [.. reasons],
                 NativeInput = target?.Key,
-                InputOwnerRoot = OwnerRoot(source.Key),
-                NativeOwnerRoot = target is null ? null : OwnerRoot(target.Key),
+                InputOwnerRoot = inputOwnerRoot,
+                NativeOwnerRoot = nativeOwnerRoot,
                 OccurrenceCardinalityCarried = occurrenceCardinalityCarried,
                 ProjectionOwner = kind == ProfileProofKind.OwnerProjection ? Origin(emittedOwner!, targetOccurrence!.Id) : null,
                 RequiredFacts = source.Elements,
                 NativeFacts = target?.Elements ?? ImmutableDictionary<string, EffectiveProfileElement>.Empty,
                 ChildProofs = [.. childProofs],
             };
-        ProfileFactOrigin? OwnerRoot(ProfileUseKey key)
-        {
-            DbStructureDefinition? owner = catalog.GetDefinitions(key.PackageKey).SingleOrDefault(owner => owner.Key == key.OwnerKey);
-            return owner is null ? null : Origin(owner, catalog.ResolveRoot(owner).Id);
-        }
         ProfileRepresentationProof Failure(ProfileProofKind kind, string fact) =>
             Fail(kind, new(ProfileReasonCategory.InvalidFacts, "", sourceRoot, null, fact));
         ProfileRepresentationProof Fail(ProfileProofKind kind, ProfileDecisionReason reason)
@@ -827,7 +1079,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         }
         try
         {
-            target = nativeContext ?? ForDefinition(targetDefinition);
+            target = nativeContext ?? DefinitionBranch(targetDefinition);
             if (nativeContext is null && emittedOwner is not null && targetOccurrence is not null)
             {
                 EffectiveProfileUse targetUse = AtUse(emittedOwner, targetOccurrence, 0);
@@ -842,14 +1094,17 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             catalog.ResolveOwnedElement(targetDefinition, target.Root.Id, target.Root.Key);
             foreach (EffectiveProfileBranch branch in new[] { source, target })
             {
-                DbStructureDefinition? inputOwner = catalog.GetDefinitions(branch.Key.PackageKey)
-                    .SingleOrDefault(owner => owner.Key == branch.Key.OwnerKey);
+                DbStructureDefinition? inputOwner = catalog.FindStructure(branch.Key.OwnerKey);
                 if (branch.Definition.FhirPackageKey != branch.Key.PackageKey || inputOwner is null ||
-                    !catalog.GetOwnedElements(inputOwner).Any(element => element.Key == branch.Key.ElementKey) ||
+                    inputOwner.FhirPackageKey != branch.Key.PackageKey ||
+                    catalog.FindOwnedElement(inputOwner, branch.Key.ElementKey) is null ||
                     catalog.ResolveRoot(branch.Definition).Key != branch.Root.Key)
                 {
                     return Failure(ProfileProofKind.ConflictingFacts, "branch input/root contradicts its exact owner graph");
                 }
+                ProfileFactOrigin origin = Origin(inputOwner, catalog.ResolveRoot(inputOwner).Id);
+                if (ReferenceEquals(branch, source)) inputOwnerRoot = origin;
+                if (ReferenceEquals(branch, target)) nativeOwnerRoot = origin;
                 catalog.ReadPayload(inputOwner);
             }
             if (target.Definition.Key != targetDefinition.Key || target.Key.PackageKey != targetPackageKey)
@@ -944,6 +1199,16 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             }
             bool cannotProject = false;
             Dictionary<string, string> corresponding = CorrespondingElements(source, target);
+            HashSet<string> mappedTargets = [.. corresponding.Values];
+            HashSet<string> renamedParents = [];
+            foreach ((string from, string to) in corresponding)
+            {
+                if (from == to) continue;
+                for (int dot = from.LastIndexOf('.'); dot >= 0; dot = dot == 0 ? -1 : from.LastIndexOf('.', dot - 1))
+                {
+                    renamedParents.Add(from[..dot]);
+                }
+            }
             foreach ((string id, EffectiveProfileElement element) in source.Elements)
             {
                 if (!corresponding.TryGetValue(id, out string? targetId))
@@ -953,8 +1218,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                     continue;
                 }
                 EffectiveProfileElement counterpart = target.Elements[targetId];
-                bool renamedDescendants = corresponding.Any(pair => pair.Key != pair.Value &&
-                    (id == "" || pair.Key.StartsWith(id + ".", StringComparison.Ordinal)));
+                bool renamedDescendants = renamedParents.Contains(id);
                 if (!(occurrenceCardinalityCarried && id == "") &&
                     (element.Minimum != counterpart.Minimum || element.Maximum != counterpart.Maximum))
                 {
@@ -994,7 +1258,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                     }
                 }
             }
-            foreach ((string id, EffectiveProfileElement element) in target.Elements.Where(pair => !corresponding.ContainsValue(pair.Key)))
+            foreach ((string id, EffectiveProfileElement element) in target.Elements.Where(pair => !mappedTargets.Contains(pair.Key)))
             {
                 if (element.Minimum > 0 || element.Restrictions.Length != 0)
                 {
@@ -1048,20 +1312,17 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 return Failure(ProfileProofKind.ConflictingFacts, $"unproven target occurrence datatype context at {emittedOwner.VersionedUrl}#{targetOccurrence.Id}");
             }
             List<ProfileElementProjection> projection = [];
-            List<string> targetOrder = [];
+            Dictionary<string, int> targetOrder = new(StringComparer.Ordinal);
             foreach (DbStructureDefinition owner in catalog.GetAncestors(targetDefinition).Reverse().Append(targetDefinition))
             {
                 DbElement root = catalog.ResolveRoot(owner);
-                foreach (DbElement child in catalog.GetOwnedElements(owner).OrderBy(child => child.ResourceFieldOrder))
+                foreach (DbElement child in catalog.GetOwnedElements(owner))
                 {
                     string relative = child.Id[root.Id.Length..];
-                    if (!targetOrder.Contains(relative, StringComparer.Ordinal))
-                    {
-                        targetOrder.Add(relative);
-                    }
+                    targetOrder.TryAdd(relative, targetOrder.Count);
                 }
             }
-            foreach ((string id, EffectiveProfileElement element) in source.Elements.OrderBy(pair => targetOrder.IndexOf(corresponding[pair.Key])))
+            foreach ((string id, EffectiveProfileElement element) in source.Elements.OrderBy(pair => targetOrder.GetValueOrDefault(corresponding[pair.Key], -1)))
             {
                 string targetId = corresponding[id];
                 EffectiveProfileElement counterpart = target.Elements[targetId];
@@ -1141,8 +1402,9 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             reasons.Clear();
             return Result(ProfileProofKind.OwnerProjection, canonical, [.. projection]);
         }
-        catch (InvalidOperationException exception)
+        catch (Exception exception) when (IsFactError(exception))
         {
+            Warn(Context(source.Definition, source.Root.Id, exception.Message));
             return Failure(ProfileProofKind.MissingFacts, exception.Message);
         }
 
@@ -1213,7 +1475,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                             catalog.ReadPayload(definition);
                             if (definition.ArtifactClass == Common.Models.FhirArtifactClassEnum.Profile)
                             {
-                                Validate(ForDefinition(definition), active);
+                                Validate(DefinitionBranch(definition), active);
                             }
                         }
                     }
@@ -1233,7 +1495,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     private ImmutableArray<EffectiveProfileBranch> OccurrenceBranches(ProfileUseKey key)
     {
         DbStructureDefinition owner = catalog.GetStructure(key.OwnerKey);
-        DbElement occurrence = catalog.GetOwnedElements(owner).Single(element => element.Key == key.ElementKey);
+        DbElement occurrence = catalog.GetOwnedElement(owner, key.ElementKey);
         string relative = occurrence.Id[catalog.ResolveRoot(owner).Id.Length..];
         if (owner.FhirPackageKey != key.PackageKey || relative != key.SliceContext)
         {
@@ -1275,7 +1537,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             Text(fact.Value, "strength") == "required"))
         {
             string? canonical = Text(binding.Value, "valueSet");
-            if (canonical is null || !requiredBindingDomains.TryGetValue(canonical, out ImmutableArray<UnsafeCodeIdentity> members))
+            if (canonical is null || !requiredBindingDomains.TryGetValue(canonical, out ImmutableArray<UnsafeCodeIdentity> members) || members.IsDefault)
             {
                 return new(ProfileProofKind.Unsupported, [], [Context(branch.Definition, element.ElementId, "required binding domain membership/system/version is unknown")]);
             }
@@ -1314,9 +1576,11 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                     elements[id] = element with { ElementId = root.Id + id, Path = root.Path + id };
                 }
             }
+            List<DbElement> references = [];
             foreach (DbElement row in catalog.GetOwnedElements(owner))
             {
                 ElementDefinition element = catalog.ReadElement(row);
+                if (element.ContentReference is not null) references.Add(row);
                 string id = row.Id[root.Id.Length..];
                 EffectiveProfileElement local = Read(owner, element, id, diagnostics);
                 if (row.Key == root.Key && local.Types.IsEmpty && payload.Type is { Length: > 0 } declaredType)
@@ -1335,7 +1599,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 }
                 elements[id] = basis is null ? local : Merge(basis, local, diagnostics, rootType: id == "");
             }
-            foreach (DbElement row in catalog.GetOwnedElements(owner).Where(row => catalog.ReadElement(row).ContentReference is not null))
+            foreach (DbElement row in references)
             {
                 DbElement referenced = catalog.ResolveContentReference(row);
                 DbStructureDefinition referencedOwner = catalog.GetOwner(referenced);
@@ -1620,13 +1884,13 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                     "child profile ancestry does not constrain the declared native datatype " + type.Code));
             }
         }
-        EffectiveProfileBranch datatype = ForDefinition(definition);
+        EffectiveProfileBranch datatype = DefinitionBranch(definition);
         EffectiveProfileElement element = context.Elements[id];
         ProfileFactOrigin origin = element.Origins[^1];
         DbStructureDefinition inputOwner = catalog.ResolveDefinition(origin.PackageKey, origin.Canonical + "|" + origin.Version, origin.OwnerKey)!;
         DbElement inputElement = catalog.ResolveOwnedElement(inputOwner, origin.ElementId)!;
         List<string> diagnostics = [.. datatype.Diagnostics, .. element.Diagnostics];
-        Dictionary<string, EffectiveProfileElement> elements = datatype.Elements.ToDictionary();
+        ImmutableDictionary<string, EffectiveProfileElement>.Builder elements = datatype.Elements.ToBuilder();
         elements[""] = Merge(elements[""], element with { RelativeId = "" }, diagnostics, rootType: true, occurrence: true);
         foreach ((string childId, EffectiveProfileElement child) in context.Elements.Where(pair => pair.Key.StartsWith(id + ".", StringComparison.Ordinal)))
         {
@@ -1639,7 +1903,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         {
             Key = new(origin.PackageKey, inputOwner.Key, inputElement.Key, type.Token, profile,
                 null, context.Key.SliceContext + id),
-            Elements = elements.ToImmutableDictionary(), Diagnostics = [.. diagnostics],
+            Elements = elements.ToImmutable(), Diagnostics = [.. diagnostics],
         };
     }
 
@@ -1650,11 +1914,14 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             return source.Elements.Keys.Where(target.Elements.ContainsKey).ToDictionary(id => id, id => id, StringComparer.Ordinal);
         }
         Dictionary<string, string> result = new(StringComparer.Ordinal) { [""] = "" };
+        HashSet<string> matched = [""];
+        HashSet<int> sourceDefinitions = DefinitionKeys(source);
+        ILookup<int, string>? targetOrigins = null;
         foreach ((string id, EffectiveProfileElement element) in source.Elements.Where(pair => pair.Key != ""))
         {
-            HashSet<int> sourceKeys = OriginElements(source, id);
+            HashSet<int> sourceKeys = OriginElements(source, id, sourceDefinitions);
             DbElementComparison[] authored = [.. sourceKeys.SelectMany(key => _correspondenceComparisons[key]).Where(comparison =>
-                !comparison.NotMapped &&
+                comparison.SourceFhirPackageKey == sourcePackageKey && comparison.TargetFhirPackageKey == targetPackageKey && !comparison.NotMapped &&
                 comparison.ElementMappingKey is not null)];
             HashSet<string> candidates = [];
             foreach (DbElementComparison comparison in authored)
@@ -1665,9 +1932,16 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 {
                     continue;
                 }
-                foreach (string targetId in target.Elements.Keys.Where(targetId => targetId != "" &&
-                    (!(id.Contains(':') || targetId.Contains(':')) || id == targetId) &&
-                    comparison.TargetElementKey is int key && OriginElements(target, targetId).Contains(key)))
+                if (comparison.TargetElementKey is not int key) continue;
+                if (targetOrigins is null)
+                {
+                    HashSet<int> targetDefinitions = DefinitionKeys(target);
+                    targetOrigins = target.Elements.Keys.Where(targetId => targetId != "")
+                        .SelectMany(targetId => OriginElements(target, targetId, targetDefinitions).Select(key => (key, targetId)))
+                        .ToLookup(entry => entry.key, entry => entry.targetId);
+                }
+                foreach (string targetId in targetOrigins[key].Where(targetId =>
+                    !(id.Contains(':') || targetId.Contains(':')) || id == targetId))
                 {
                     DbStructureDefinition targetOwner = catalog.GetStructure(comparison.TargetStructureKey!.Value);
                     catalog.ResolveOwnedElement(targetOwner, comparison.TargetElementId!, comparison.TargetElementKey);
@@ -1681,7 +1955,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
             string? corresponding = candidates.SingleOrDefault() ?? (target.Elements.ContainsKey(id) ? id : null);
             if (corresponding is not null)
             {
-                if (result.ContainsValue(corresponding))
+                if (!matched.Add(corresponding))
                 {
                     throw new InvalidOperationException(At(element, "many-to-one child correspondence requires an unsupported transformation"));
                 }
@@ -1690,9 +1964,11 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         }
         return result;
 
-        HashSet<int> OriginElements(EffectiveProfileBranch branch, string id)
+        HashSet<int> DefinitionKeys(EffectiveProfileBranch branch) =>
+            [branch.Definition.Key, .. catalog.GetAncestors(branch.Definition).Select(owner => owner.Key)];
+
+        HashSet<int> OriginElements(EffectiveProfileBranch branch, string id, HashSet<int> definitions)
         {
-            HashSet<int> definitions = [branch.Definition.Key, .. catalog.GetAncestors(branch.Definition).Select(owner => owner.Key)];
             HashSet<int> keys = [];
             foreach (ProfileFactOrigin origin in branch.Elements[id].Origins)
             {
@@ -1705,7 +1981,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                 DbElement root = catalog.ResolveRoot(owner);
                 // Inheritance is exact and declared; no basename, global slice stripping, or unrelated owner lookup.
                 string expected = definitions.Contains(owner.Key) ? root.Id + id :
-                    catalog.GetOwnedElements(owner).Single(element => element.Key == branch.Key.ElementKey).Id + id;
+                    catalog.GetOwnedElement(owner, branch.Key.ElementKey).Id + id;
                 if (origin.ElementId == expected)
                 {
                     keys.Add(catalog.ResolveOwnedElement(owner, origin.ElementId)!.Key);
@@ -1808,7 +2084,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                             DbStructureDefinition definition = profile is null
                                 ? catalog.ResolveNativeType(context.Key.PackageKey, type.Code, context: context.Root.Id + contextId)!
                                 : catalog.ResolveDefinition(context.Key.PackageKey, profile, context: context.Root.Id + contextId)!;
-                            return targetProfile ? ForDefinition(definition) : AtChild(context, contextId, type, definition, profile);
+                            return targetProfile ? DefinitionBranch(definition) : AtChild(context, contextId, type, definition, profile);
                         })];
                 }
             }
@@ -1824,8 +2100,18 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     }
 
     private static bool IsProhibited(EffectiveProfileBranch branch, string id) =>
-        branch.Elements.Any(pair => pair.Value.Prohibited &&
-            (id == pair.Key || id.StartsWith(pair.Key + ".", StringComparison.Ordinal)));
+        IsProhibited(branch.Elements, id);
+
+    internal static bool IsProhibited(ImmutableDictionary<string, EffectiveProfileElement> elements, string id)
+    {
+        while (true)
+        {
+            if (elements.TryGetValue(id, out EffectiveProfileElement? element) && element.Prohibited) return true;
+            int dot = id.LastIndexOf('.');
+            if (dot < 0) return false;
+            id = id[..dot];
+        }
+    }
 
     private bool Equivalent(ProfileRestriction source, ProfileRestriction target,
         EffectiveProfileBranch sourceContext, EffectiveProfileBranch targetContext, string relativeId, string targetRelativeId)
@@ -2254,12 +2540,13 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     private static int ParseMaximum(string? maximum) => maximum is null or "*" ? int.MaxValue : int.Parse(maximum, CultureInfo.InvariantCulture);
 
     internal static string? Text(JsonElement value, string name) =>
-        value.TryGetProperty(name, out JsonElement property) && property.ValueKind == JsonValueKind.String ? property.GetString() : null;
+        value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out JsonElement property) &&
+        property.ValueKind == JsonValueKind.String ? property.GetString() : null;
 
     internal static string? InvariantXPath(JsonElement invariant)
     {
         string? direct = Text(invariant, "xpath");
-        if (!invariant.TryGetProperty("extension", out JsonElement extensions))
+        if (invariant.ValueKind != JsonValueKind.Object || !invariant.TryGetProperty("extension", out JsonElement extensions))
         {
             return direct;
         }

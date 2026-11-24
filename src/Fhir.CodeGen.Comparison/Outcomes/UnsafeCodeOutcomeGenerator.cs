@@ -727,11 +727,8 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                     return [];
                 }
 
-                DbElement exactRoot = _catalog.ResolveRoot(matches[0]);
-                if (profile is not null)
-                {
-                    _profileFacts.ForDefinition(matches[0]);
-                }
+                DbElement? exactRoot = profile is null ? _catalog.ResolveRoot(matches[0]) : _profileFacts.ForDefinition(matches[0])?.Root;
+                if (exactRoot is null) return [];
                 return [new UnsafeCodeRootFact(matches[0].Key, exactRoot.Id, IsResource(matches[0].Key))];
             }
         }
@@ -771,8 +768,9 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db)
                     EffectiveProfileUse use = _profileFacts.AtUse(element, type);
                     if (!use.Diagnostics.IsEmpty || use.Branches.Any(branch => !branch.Diagnostics.IsEmpty))
                     {
-                        throw new InvalidOperationException($"Unsafe-code effective profile facts are unresolved for {element.Id}: " +
+                        ProfileUseFacts.Warn($"Unsafe-code effective profile facts are unresolved for {element.Id}: " +
                             string.Join("; ", use.Diagnostics.Concat(use.Branches.SelectMany(branch => branch.Diagnostics))));
+                        continue;
                     }
                     RequireTypeRoot(definition.Key, type.TypeName);
                     yield return (type.TypeProfile, definition.Key);

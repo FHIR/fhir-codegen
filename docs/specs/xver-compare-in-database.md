@@ -127,7 +127,7 @@ Constrained and Quantity-family uses require complete typed proofs. A supported
 native reuse preserves the mapping authority's relationship; a structured
 `Unrepresentable` comparison is not mapped/Equivalent and retains exact facts
 and reasons in `TechnicalMessage`. Unknown/malformed/unclassified required semantics
-fail rather than becoming an accepted negative or default Equivalent. Missing
+are reported as warnings and skipped rather than becoming an accepted negative or default Equivalent. Missing
 profiles never fall back to unprofiled Quantity. The actual-core proof census
 (3,604 uses: 284 native reuses, zero projections, 3,320 negatives, zero unresolved)
 is classification evidence, not proof that all artifacts can be scheduled/exported.

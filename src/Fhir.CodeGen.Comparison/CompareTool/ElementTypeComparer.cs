@@ -384,7 +384,10 @@ public class ElementTypeComparer
             if (!sourceUse.Diagnostics.IsEmpty || !targetUse.Diagnostics.IsEmpty ||
                 sourceUse.Branches.IsEmpty || targetUse.Branches.IsEmpty)
             {
-                throw new InvalidOperationException($"Unresolved constrained comparison {sourceElement.Id}->{targetElement.Id}, pair {packagePair.SourcePackageKey}->{packagePair.TargetPackageKey}: {string.Join("; ", sourceUse.Diagnostics.Concat(targetUse.Diagnostics))}");
+                _logger.LogWarning("Skipping unresolved constrained comparison {Source}->{Target}, pair {SourceKey}->{TargetKey}: {Diagnostics}",
+                    sourceElement.Id, targetElement.Id, packagePair.SourcePackageKey, packagePair.TargetPackageKey,
+                    string.Join("; ", sourceUse.Diagnostics.Concat(targetUse.Diagnostics)));
+                return null;
             }
 
             List<ProfileRepresentationProof> decisions = [];
@@ -396,22 +399,30 @@ public class ElementTypeComparer
                     .Select(target => facts.Prove(branch, target.Definition, nativeContext: target))];
                 if (alternatives.Any(proof => !proof.IsAcceptedDecision))
                 {
-                    throw new InvalidOperationException($"Unclassified constrained comparison {sourceElement.Id}->{targetElement.Id}: {string.Join("; ", alternatives.SelectMany(proof => proof.Diagnostics))}");
+                    _logger.LogWarning("Skipping unclassified constrained comparison {Source}->{Target}: {Diagnostics}",
+                        sourceElement.Id, targetElement.Id, string.Join("; ", alternatives.SelectMany(proof => proof.Diagnostics)));
+                    return null;
                 }
                 ProfileRepresentationProof? decision = alternatives.FirstOrDefault(proof => proof.PreservesRestrictions) ??
                     alternatives.FirstOrDefault(proof => proof.IsAcceptedDecision);
                 if (decision is null)
                 {
-                    throw new InvalidOperationException($"Unresolved constrained comparison {sourceElement.Id}->{targetElement.Id}: {string.Join("; ", alternatives.SelectMany(proof => proof.Diagnostics))}");
+                    _logger.LogWarning("No effective target alternative for {Source}->{Target}", sourceElement.Id, targetElement.Id);
+                    return null;
                 }
                 decisions.Add(decision);
             }
 
             if (decisions.Count == 0)
             {
-                throw new InvalidOperationException($"Missing effective alternative for {sourceElement.Id}, type {sourceType.Literal}.");
+                _logger.LogWarning("Missing effective alternative for {Element}, type {Type}", sourceElement.Id, sourceType.Literal);
+                return null;
             }
             bool preserves = decisions.All(proof => proof.PreservesRestrictions);
+            if (ProfileUseFacts.SerializeDecisions(decisions) is not string technicalMessage)
+            {
+                return null;
+            }
             DbElementTypeComparison constrainedComparison = new()
             {
                 Key = DbElementTypeComparison.GetIndex(),
@@ -432,7 +443,7 @@ public class ElementTypeComparer
                 NotMapped = !preserves,
                 IsIdentical = false,
                 Relationship = preserves ? typeStructureMapping.Relationship : CMR.SourceIsBroaderThanTarget,
-                TechnicalMessage = ProfileUseFacts.SerializeDecisions(decisions),
+                TechnicalMessage = technicalMessage,
                 UserMessage = typeStructureMapping.Comments,
                 TargetProfileRelationship = preserves ? typeStructureMapping.Relationship : null,
                 TargetProfileMessage = null,

@@ -30,7 +30,7 @@ public class UnsafeCodePipelineTests
     [Theory]
     [InlineData("missing-type")]
     [InlineData("opaque-extension")]
-    public void ZeroCandidateRunsCannotCertifyUnclassifiedRequiredFacts(string corruption)
+    public void ZeroCandidateRunsWarnAndDoNotPublishUnclassifiedRequiredFacts(string corruption)
     {
         using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
         FhirPackageComparisonPair pair = fixture.PreparePair();
@@ -49,8 +49,27 @@ public class UnsafeCodePipelineTests
         row.StructureDefinitionJson = definition.ToJson();
         DbStructureDefinitionFacts.Update(fixture.Connection, row);
         DbUnsafeCodeRule.SelectList(fixture.Connection).ShouldBeEmpty();
-        Should.Throw<InvalidOperationException>(() => fixture.GenerateSafety(pair)).Message.ShouldContain("Quantity");
-        fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
+        if (corruption == "missing-type")
+        {
+            // Inventory consistency is checked before the profile-fact pass.
+            Should.Throw<InvalidOperationException>(() => fixture.GenerateSafety(pair)).Message.ShouldContain("inventory type/binding projection");
+            fixture.PairState(pair).OutcomeInputRevision.ShouldBeNull();
+            return;
+        }
+        using StringWriter warnings = new();
+        TextWriter previous = Console.Error;
+        try
+        {
+            Console.SetError(warnings);
+            fixture.GenerateSafety(pair);
+        }
+        finally
+        {
+            Console.SetError(previous);
+        }
+        warnings.ToString().ShouldContain("Warning: ProfileUseFacts");
+        warnings.ToString().ShouldContain("Quantity");
+        fixture.PairState(pair).OutcomeInputRevision.ShouldNotBeNull();
         DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldBeEmpty();
         DbElementOutcome.SelectList(fixture.Connection).ShouldBeEmpty();
 
@@ -59,9 +78,42 @@ public class UnsafeCodePipelineTests
         string? revision = UnsafeCodeInputStore.BeginComparison(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey);
         row.StructureDefinitionJson = definition.ToJson();
         DbStructureDefinitionFacts.Update(fixture.Connection, row);
-        Should.Throw<InvalidOperationException>(() => UnsafeCodeInputStore.CompleteComparison(fixture.Connection,
-            pair.SourcePackageKey, pair.TargetPackageKey, revision));
-        fixture.PairState(pair).ComparisonRevision.ShouldBeNull();
+        UnsafeCodeInputStore.CompleteComparison(fixture.Connection, pair.SourcePackageKey, pair.TargetPackageKey, revision);
+        fixture.PairState(pair).ComparisonRevision.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void NegativePersistenceBatchesMissingRowsAndSkipsOnlyMalformedEnvelopes()
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateRepresentationInputs();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        DbStructureDefinition quantity = fixture.Structure(pair.SourcePackage, "Quantity");
+        fixture.ConfigureDefinition(quantity, definition => definition.Snapshot.Element[0].Constraint.Add(new()
+        {
+            Key = "source-only", Severity = ConstraintSeverity.Error, Expression = "code.empty()", Human = "No code.",
+        }));
+        DbStructureDefinition owner = fixture.Structure(pair.SourcePackage);
+        DbElement first = fixture.AddTypedElement(owner, "ValueSet.firstMeasure", "Quantity");
+        DbElement second = fixture.AddTypedElement(owner, "ValueSet.secondMeasure", "Quantity");
+        fixture.CompleteAuthoredArrangement(pair);
+        IReadOnlyList<ProfileRepresentationProof> decisions = ProfileUseFacts.ClassifyPair(fixture.Connection, pair);
+        using XVerPreparedOperationTests.ObservedOperandConnection connection = new(fixture.Connection);
+        ProfileUseFacts.PersistNegativeDecisions(connection, pair, []);
+        connection.Statements.ShouldBeEmpty();
+        ProfileUseFacts.PersistNegativeDecisions(connection, pair, decisions);
+        connection.Statements.Count(sql => sql.Contains("FROM Elements ", StringComparison.OrdinalIgnoreCase)).ShouldBe(1);
+        DbElementOutcome invalid = DbElementOutcome.SelectSingle(connection, SourceElementKey: first.Key)!;
+        DbElementOutcome valid = DbElementOutcome.SelectSingle(connection, SourceElementKey: second.Key)!;
+        invalid.ExtensionProhibitionReason = "{\"ProfileDecisionFormat\":";
+        valid.ExtensionProhibitionReason = "existing reason";
+        DbElementOutcome.Update(connection, [invalid, valid]);
+
+        ProfileUseFacts.PersistNegativeDecisions(connection, pair, decisions);
+
+        DbElementOutcome.SelectSingle(connection, Key: invalid.Key)!.ExtensionProhibitionReason.ShouldBe(invalid.ExtensionProhibitionReason);
+        string? envelope = DbElementOutcome.SelectSingle(connection, Key: valid.Key)!.ExtensionProhibitionReason;
+        ProfileUseFacts.ReadDecisions(envelope).ShouldHaveSingleItem().Input.ElementKey.ShouldBe(second.Key);
+        JsonNode.Parse(envelope!)!["ExistingProhibitionReason"]!.GetValue<string>().ShouldBe("existing reason");
     }
 
     [Fact]
@@ -212,8 +264,7 @@ public class UnsafeCodePipelineTests
         DbElementOutcome.Update(fixture.Connection, outcome);
         fixture.ReopenPersistedDatabase();
         before = DatabaseSnapshot(fixture);
-        Should.Throw<InvalidOperationException>(() => UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [negativePair]))
-            .Message.ShouldContain("decisions");
+        UnsafeCodeInputStore.RequireExportReady(fixture.Connection, [negativePair, unrelated]).ShouldBe([unrelated]);
         DatabaseSnapshot(fixture).ShouldBe(before);
     }
 

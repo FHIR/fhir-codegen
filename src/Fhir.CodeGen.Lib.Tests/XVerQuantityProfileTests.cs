@@ -297,7 +297,7 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
                 int pairCases = 0;
                 foreach (DbStructureDefinition owner in profiles.Concat(natives))
                 {
-                    Check(facts.ForDefinition(owner), owner.UnversionedUrl + "|" + owner.Version + " definition", null);
+                    Check(facts.ForDefinition(owner).ShouldNotBeNull(), owner.UnversionedUrl + "|" + owner.Version + " definition", null);
                 }
                 // Tokens come from normalized declarations. Cross-product relational rows only identify the actual uses.
                 foreach (IGrouping<(int, int), DbElementType> group in uses.GroupBy(type => (type.StructureKey, type.ElementKey)))
@@ -524,7 +524,7 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         DbStructureDefinition source = catalog.ResolveDefinition(sourcePackage.Key, QuantityUrl.Replace("Quantity", "MoneyQuantity") + "|4.3.0")!;
         DbStructureDefinition target = catalog.ResolveDefinition(targetPackage.Key, source.UnversionedUrl + "|4.0.1")!;
         using ProfileUseFacts facts = new(catalog, sourcePackage.Key, targetPackage.Key);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), target);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source).ShouldNotBeNull(), target);
         proof.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
         proof.IsAcceptedDecision.ShouldBeTrue();
         proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.Binding);
@@ -581,8 +581,8 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         using ProfileUseFacts facts = new(catalog, sourcePackage.Key, targetPackage.Key);
         DbStructureDefinition source = catalog.ResolveDefinition(sourcePackage.Key, "http://hl7.org/fhir/StructureDefinition/Age|1.0.2")!;
         DbStructureDefinition target = catalog.ResolveDefinition(targetPackage.Key, "http://hl7.org/fhir/StructureDefinition/Age|4.0.1")!;
-        EffectiveProfileBranch sourceFacts = facts.ForDefinition(source);
-        EffectiveProfileBranch targetFacts = facts.ForDefinition(target);
+        EffectiveProfileBranch sourceFacts = facts.ForDefinition(source).ShouldNotBeNull();
+        EffectiveProfileBranch targetFacts = facts.ForDefinition(target).ShouldNotBeNull();
         DbElementType sourceRootType = catalog.GetTypeUses(sourceFacts.Root).ShouldHaveSingleItem();
         catalog.ResolveNativeType(sourcePackage.Key, "Age", required: false).ShouldBeNull();
         catalog.ResolveTypeUse(sourceRootType).Key.ShouldBe(source.Key);
@@ -644,7 +644,7 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
         using ProfileUseFacts facts = new(catalog, sourcePackage.Key, targetPackage.Key);
         DbStructureDefinition source = catalog.ResolveNativeType(sourcePackage.Key, "Quantity")!;
         DbStructureDefinition target = catalog.ResolveNativeType(targetPackage.Key, "Quantity")!;
-        EffectiveProfileBranch sourceFacts = facts.ForDefinition(source);
+        EffectiveProfileBranch sourceFacts = facts.ForDefinition(source).ShouldNotBeNull();
         sourceFacts.Elements[".comparator"].Restrictions.ShouldContain(restriction =>
             restriction.Kind == ProfileRestrictionKind.Binding && ProfileUseFacts.Text(restriction.Value, "strength") == "required" &&
             ProfileUseFacts.Text(restriction.Value, "valueSet") == valueSetUrl + "|5.0.0");
@@ -653,7 +653,7 @@ public class XVerQuantityProfileTests(ITestOutputHelper output)
             owner.ArtifactClass == FhirArtifactClassEnum.Profile && catalog.GetDeclaredType(owner) == "Quantity")
             .Where(owner => owner.Key == target.Key || catalog.GetAncestors(owner).Any(ancestor => ancestor.Key == target.Key)))
         {
-            EffectiveProfileElement comparator = facts.ForDefinition(candidate).Elements[".comparator"];
+            EffectiveProfileElement comparator = facts.ForDefinition(candidate).ShouldNotBeNull().Elements[".comparator"];
             (comparator.Prohibited || comparator.Restrictions.Any(restriction =>
                 restriction.Kind == ProfileRestrictionKind.Binding && ProfileUseFacts.Text(restriction.Value, "strength") == "required" &&
                 ProfileUseFacts.Text(restriction.Value, "valueSet") == valueSetUrl + "|4.0.1")).ShouldBeTrue(candidate.VersionedUrl);

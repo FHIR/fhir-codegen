@@ -112,6 +112,7 @@ public class ElementOutcomeGenerator
 
     private readonly Dictionary<int, DbElementType> _allTargetElementTypes;
     private readonly ILookup<int, DbElementType> _targetElementTypesByElementKey;
+    private ILookup<(int, int?), DbStructureMapping>? _profileTypeMappings;
 
     private readonly List<DbElementTypeComparison> _etcComparisons;
     private readonly ILookup<int, DbElementTypeComparison> _etcComparisonsBySourceElementKey;
@@ -2034,18 +2035,20 @@ public class ElementOutcomeGenerator
                         continue;
                     }
                     EffectiveProfileUse sourceUse = facts.AtUse(sourceEd, unmappedType);
+                    if (!sourceUse.Diagnostics.IsEmpty) continue;
                     foreach (DbElement targetEd in currentTargetElements.Values)
                     {
                         bool represented = false;
                         foreach (DbElementType targetType in _targetElementTypesByElementKey[targetEd.Key])
                         {
                             DbStructureDefinition targetDefinition = _catalog.ResolveTypeUse(targetType);
-                            List<DbStructureMapping> authorities = [.. _operation.Evidence.Rows<DbStructureMapping>(DbStructureMapping.DefaultTableName)
+                            _profileTypeMappings ??= _operation.Evidence.Rows<DbStructureMapping>(DbStructureMapping.DefaultTableName)
                                 .Where(row => row.SourceFhirPackageKey == _packagePair.SourcePackageKey &&
-                                    row.TargetFhirPackageKey == _packagePair.TargetPackageKey &&
-                                    row.SourceStructureKey == sourceDefinition.Key && row.TargetStructureKey == targetDefinition.Key)];
-                            DbStructureMapping[] applicable = [.. authorities.Where(mapping =>
-                                mapping.IsFallback == !authorities.Any(candidate => !candidate.IsFallback))];
+                                    row.TargetFhirPackageKey == _packagePair.TargetPackageKey)
+                                .ToLookup(row => (row.SourceStructureKey, row.TargetStructureKey));
+                            IEnumerable<DbStructureMapping> authorities = _profileTypeMappings[(sourceDefinition.Key, targetDefinition.Key)];
+                            bool fallback = !authorities.Any(candidate => !candidate.IsFallback);
+                            DbStructureMapping[] applicable = [.. authorities.Where(mapping => mapping.IsFallback == fallback)];
                             if (applicable.Select(mapping => mapping.Relationship).Distinct().Count() > 1)
                             {
                                 throw new InvalidOperationException($"Ambiguous datatype mapping authority {sourceDefinition.VersionedUrl}->{targetDefinition.VersionedUrl}.");
@@ -2056,16 +2059,17 @@ public class ElementOutcomeGenerator
                                 continue;
                             }
                             EffectiveProfileUse targetUse = facts.AtUse(targetEd, targetType);
-                            if (!sourceUse.Diagnostics.IsEmpty || !targetUse.Diagnostics.IsEmpty)
+                            if (!targetUse.Diagnostics.IsEmpty)
                             {
-                                throw new InvalidOperationException($"Unresolved effective occurrence {sourceEd.Id}->{targetEd.Id}: {string.Join("; ", sourceUse.Diagnostics.Concat(targetUse.Diagnostics))}");
+                                continue;
                             }
                             EffectiveProfileBranch[] branches = [.. sourceUse.Branches.Where(branch =>
                                 branch.Key.ProfileAlternative == unmappedType.TypeProfile &&
                                 branch.Key.TargetProfileAlternative == unmappedType.TargetProfile)];
                             if (branches.Length == 0)
                             {
-                                throw new InvalidOperationException($"Missing effective alternative for {sourceEd.Id}, type {unmappedType.Literal}.");
+                                ProfileUseFacts.Warn($"Missing effective alternative for {sourceEd.Id}, type {unmappedType.Literal}.");
+                                continue;
                             }
                             represented = branches.All(branch =>
                             {
@@ -2075,7 +2079,8 @@ public class ElementOutcomeGenerator
                                     .Select(target => facts.Prove(branch, target.Definition, nativeContext: target))];
                                 if (proofs.Any(proof => !proof.IsAcceptedDecision))
                                 {
-                                    throw new InvalidOperationException(string.Join("; ", proofs.SelectMany(proof => proof.Diagnostics)));
+                                    ProfileUseFacts.Warn($"Unresolved occurrence {sourceEd.Id}->{targetEd.Id}: {string.Join("; ", proofs.SelectMany(proof => proof.Diagnostics))}");
+                                    return false;
                                 }
                                 return proofs.Any(proof => proof.PreservesRestrictions);
                             });

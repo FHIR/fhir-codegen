@@ -94,7 +94,13 @@ public class XVerExporter
                 includeStructurePages: processStructures));
         if (processStructures)
         {
-            UnsafeCodeInputStore.RequireExportReady(_db, schedule.PackagePairs, operation);
+            IReadOnlyList<FhirPackageComparisonPair> verified = UnsafeCodeInputStore.RequireExportReady(_db, schedule.PackagePairs, operation);
+            if (verified.Count != schedule.PackagePairs.Count)
+            {
+                if (verified.Count == 0) return;
+                schedule = schedule with { PackagePairs = verified, ValidationPackages = [.. schedule.ValidationPackages.Where(
+                    package => verified.Any(pair => pair.TargetPackageKey == package.Key))] };
+            }
         }
 
         IgExporter.XVerExportTrackingRecord tr = igExporter.PrepareXVerIgs(schedule);
@@ -113,7 +119,12 @@ public class XVerExporter
             structurePageExporter = new(this, _db, _loggerFactory, operation);
         }
 
-        UnsafeCodeInputStore.AuditExportReady(_db, processStructures ? schedule.PackagePairs : [], operation);
+        IReadOnlyList<FhirPackageComparisonPair> audited = UnsafeCodeInputStore.AuditExportReady(_db, processStructures ? schedule.PackagePairs : [], operation);
+        if (processStructures && audited.Count != schedule.PackagePairs.Count)
+        {
+            // The schedule changed after construction; do not publish its stale artifacts.
+            return;
+        }
         igExporter.MaterializeXVerIgs(tr, includeIgScripts);
 
         // export vocabulary (if requested)

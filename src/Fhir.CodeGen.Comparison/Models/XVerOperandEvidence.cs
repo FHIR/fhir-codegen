@@ -518,6 +518,50 @@ internal sealed class XVerOperandEvidence : IDisposable
         return [.. image.StoredRows.Select(row => (row.ToRow(), row.RelationshipStoredText))];
     }
 
+    // These two input images never change during output transitions. Index the stored
+    // scalars, not mutable copies (copying a ValueSet also parses its FHIR payload).
+    private Dictionary<int, DbElementMappingOperand>? _profileMappings;
+    private HashSet<(int, string, string)>? _uniqueValueSets;
+
+    internal DbElementMapping? GetElementMapping(int key)
+    {
+        RequireActive();
+        _profileMappings ??= StoredRows<DbElementMapping, DbElementMappingOperand>(DbElementMapping.DefaultTableName)
+            .ToDictionary(row => row.Key);
+        return _profileMappings.GetValueOrDefault(key)?.ToRow();
+    }
+
+    internal bool HasUniqueValueSet(int packageKey, string url, string version)
+    {
+        RequireActive();
+        _uniqueValueSets ??= [.. StoredRows<DbValueSet, DbValueSetOperand>(DbValueSet.DefaultTableName)
+            .GroupBy(row => (row.FhirPackageKey, row.UnversionedUrl, row.Version))
+            .Where(group => group.Count() == 1).Select(group => group.Key)];
+        return _uniqueValueSets.Contains((packageKey, url, version));
+    }
+
+    internal List<DbElementOutcome> ProfileElementOutcomes(FhirPackageComparisonPair pair, IReadOnlySet<int> elements) =>
+        [.. StoredRows<DbElementOutcome, DbElementOutcomeOperand>(DbElementOutcome.DefaultTableName)
+            .Where(row => row.SourceFhirPackageKey == pair.SourcePackageKey && row.TargetFhirPackageKey == pair.TargetPackageKey &&
+                elements.Contains(row.SourceElementKey)).Select(row => row.ToRow())];
+
+    internal List<DbElementOutcomeTarget> ProfileOutcomeTargets(FhirPackageComparisonPair pair, IReadOnlySet<int> outcomes) =>
+        [.. StoredRows<DbElementOutcomeTarget, DbElementOutcomeTargetOperand>(DbElementOutcomeTarget.DefaultTableName)
+            .Where(row => row.SourceFhirPackageKey == pair.SourcePackageKey && row.TargetFhirPackageKey == pair.TargetPackageKey &&
+                outcomes.Contains(row.ElementOutcomeKey)).Select(row => row.ToRow())];
+
+    internal List<DbStructureOutcome> ProfileStructureOutcomes(FhirPackageComparisonPair pair, IReadOnlySet<int> owners) =>
+        [.. StoredRows<DbStructureOutcome, DbStructureOutcomeOperand>(DbStructureOutcome.DefaultTableName)
+            .Where(row => row.SourceFhirPackageKey == pair.SourcePackageKey && row.TargetFhirPackageKey == pair.TargetPackageKey &&
+                owners.Contains(row.SourceStructureKey)).Select(row => row.ToRow())];
+
+    private ImmutableArray<TRow> StoredRows<T, TRow>(string name) where T : DbRecordBase where TRow : IEquatable<TRow>
+    {
+        RequireActive();
+        return _images.TryGetValue(name, out IXVerTableImage? image) && image is TableImage<T, TRow> table
+            ? table.StoredRows : throw new InvalidOperationException($"Prepared reader for '{name}' is missing or incompatible.");
+    }
+
     internal List<T> Rows<T>(string tableName) where T : DbRecordBase
     {
         RequireActive();
@@ -556,6 +600,8 @@ internal sealed class XVerOperandEvidence : IDisposable
         _disposed = true;
         Detach();
         _images.Clear();
+        _profileMappings = null;
+        _uniqueValueSets = null;
     }
 
     private void ConnectionStateChanged(object? sender, StateChangeEventArgs args)

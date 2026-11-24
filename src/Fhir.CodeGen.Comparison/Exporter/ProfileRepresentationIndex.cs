@@ -292,6 +292,8 @@ internal sealed class ProfileRepresentationIndex
         return node;
     }
 
+    internal void RemoveExtension(string canonical) => _extensions.Remove(canonical);
+
     internal void AddProfile(DbStructureOutcome outcome, DbElement target)
     {
         _profiles[outcome.Key] = (outcome, target);
@@ -467,11 +469,8 @@ internal sealed class ProfileRepresentationIndex
                 return [];
             }
 
-            DbElement root = _catalog!.ResolveRoot(matches[0]);
-            if (profile is not null)
-            {
-                _profileFacts!.ForDefinition(matches[0]);
-            }
+            DbElement? root = profile is null ? _catalog!.ResolveRoot(matches[0]) : _profileFacts!.ForDefinition(matches[0])?.Root;
+            if (root is null) return [];
             return [new UnsafeCodeRootFact(matches[0].Key, root.Id,
                 BaseChain(root).Any(basis => _structures.GetValueOrDefault(basis.StructureKey)?.ArtifactClass == FhirArtifactClassEnum.Resource ||
                     IsResource(basis)))];

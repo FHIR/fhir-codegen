@@ -121,20 +121,20 @@ public partial class DbUnsafeCodePairState : DbRecordBase
 
 internal static class UnsafeCodeInputStore
 {
-    internal static void RequireExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule,
+    internal static IReadOnlyList<FhirPackageComparisonPair> RequireExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule,
         XVerPreparedOperation operation)
     {
         operation.RequireConnection(db);
         operation.Audit();
         if (schedule.Count == 0)
         {
-            return;
+            return [];
         }
         operation.PrepareExport(schedule);
-        AuditExportReady(db, schedule, operation);
+        return AuditExportReady(db, schedule, operation);
     }
 
-    internal static void AuditExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule,
+    internal static IReadOnlyList<FhirPackageComparisonPair> AuditExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule,
         XVerPreparedOperation operation)
     {
         try
@@ -142,12 +142,11 @@ internal static class UnsafeCodeInputStore
             operation.RequireConnection(db);
             operation.Audit();
             RequireExportState(db, schedule);
-            foreach (FhirPackageComparisonPair scheduled in schedule)
-            {
+            List<FhirPackageComparisonPair> verified = [.. schedule.Where(scheduled =>
                 ProfileUseFacts.RequirePersistedDecisions(db, scheduled,
-                    operation.ExportDecisions(scheduled.SourcePackageKey, scheduled.TargetPackageKey), operation.Catalog);
-            }
+                    operation.ExportDecisions(scheduled.SourcePackageKey, scheduled.TargetPackageKey), operation.Catalog))];
             operation.Audit();
+            return verified;
         }
         catch
         {
@@ -156,20 +155,17 @@ internal static class UnsafeCodeInputStore
         }
     }
 
-    internal static void RequireExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule)
+    internal static IReadOnlyList<FhirPackageComparisonPair> RequireExportReady(IDbConnection db, IReadOnlyList<FhirPackageComparisonPair> schedule)
     {
         DbUnsafeCodeInputState? input = RequireExportState(db, schedule);
         if (input is null)
         {
-            return;
+            return [];
         }
         try
         {
             DefinitionInventoryStore.RequireMapBinding(db, input.SnapshotId);
-            foreach (FhirPackageComparisonPair scheduled in schedule)
-            {
-                ProfileUseFacts.RequirePersistedDecisions(db, scheduled);
-            }
+            return [.. schedule.Where(scheduled => ProfileUseFacts.RequirePersistedDecisions(db, scheduled))];
         }
         catch (DbException error) when (error is SqliteException { SqliteErrorCode: 1 } &&
             (error.Message.Contains("no such table:", StringComparison.Ordinal) ||
@@ -483,8 +479,11 @@ internal static class UnsafeCodeInputStore
             throw new InvalidOperationException("Unsafe-code dependencies changed during outcomes. Rerun comparisons and outcomes.");
         }
         Dictionary<int, DbFhirPackage> packages = operation.Evidence.Rows<DbFhirPackage>(DbFhirPackage.DefaultTableName).ToDictionary(row => row.Key);
-        ProfileUseFacts.RequirePersistedDecisions(db, new(packages[pair.SourceFhirPackageKey], packages[pair.TargetFhirPackageKey]),
-            operation.OutcomeDecisions(pair.SourceFhirPackageKey, pair.TargetFhirPackageKey), operation.Catalog);
+        if (!ProfileUseFacts.RequirePersistedDecisions(db, new(packages[pair.SourceFhirPackageKey], packages[pair.TargetFhirPackageKey]),
+            operation.OutcomeDecisions(pair.SourceFhirPackageKey, pair.TargetFhirPackageKey), operation.Catalog))
+        {
+            return;
+        }
         operation.Audit();
         pair.OutcomeInputRevision = pair.InputRevision;
         pair.OutcomeComparisonRevision = pair.ComparisonRevision;
@@ -503,8 +502,11 @@ internal static class UnsafeCodeInputStore
         }
 
         Dictionary<int, DbFhirPackage> packages = DbFhirPackage.SelectDict(db);
-        ProfileUseFacts.RequirePersistedDecisions(db,
-            new(packages[pair.SourceFhirPackageKey], packages[pair.TargetFhirPackageKey]));
+        if (!ProfileUseFacts.RequirePersistedDecisions(db,
+            new(packages[pair.SourceFhirPackageKey], packages[pair.TargetFhirPackageKey])))
+        {
+            return;
+        }
         pair.OutcomeInputRevision = pair.InputRevision;
         pair.OutcomeComparisonRevision = pair.ComparisonRevision;
         pair.OutcomeFormatVersion = UnsafeCodeConstants.OutcomeFormatVersion;

@@ -145,8 +145,9 @@ For a complete constrained proof, native reuse retains the supplied structure
 mapping relationship, rather than inventing Equivalent. A typed `Unrepresentable`
 decision records facts/reasons in the type comparison's `TechnicalMessage`, marks
 it `NotMapped` and uses `SourceIsBroaderThanTarget`, not Equivalent. Missing,
-malformed or unclassified required semantics throw; no comparison/profile-base
-fallback certifies them. Legal owner projection is a separate bounded export
+malformed or unclassified required semantics produce a warning and leave the
+affected type comparison unmapped; no profile-base fallback certifies them.
+Legal owner projection is a separate bounded export
 decision inside an already-scheduled resource profile, not a comparison shortcut.
 
 ## Dependencies & Interactions

@@ -278,6 +278,31 @@ public class XVerProfileCatalogTests
         UnsafeCodeInputStore.CompleteInputs(connection, DbFhirPackage.SelectList(connection));
     }
 
+    [Fact]
+    public void RepeatedProfileBindingLookupsDoNotCopyCapturedValueSetPayloads()
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        DbFhirPackage package = fixture.Packages[0];
+        DbValueSet filler = DbValueSet.SelectList(fixture.Connection, FhirPackageKey: package.Key).Single();
+        string canonical = filler.VersionedUrl;
+        filler.UnversionedUrl = "urn:other";
+        filler.VersionedUrl = filler.UnversionedUrl + "|" + filler.Version;
+        DbValueSet.Insert(fixture.Connection, Enumerable.Repeat(filler, 1000));
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(fixture.Connection, new(XVerPreparationKind.Catalog));
+        XVerStructureCatalog catalog = operation.Catalog;
+        catalog.HasValueSet(package.Key, canonical).ShouldBeTrue();
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        int matches = 0;
+        for (int i = 0; i < 100; i++)
+        {
+            if (catalog.HasValueSet(package.Key, canonical)) matches++;
+        }
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        matches.ShouldBe(100);
+        allocated.ShouldBeLessThan(100_000L);
+        _output.WriteLine($"100 warmed exact binding lookups with 1,000 unrelated value sets: {allocated:N0} bytes allocated.");
+    }
+
     private const string SimpleQuantityJson = """
         {
           "resourceType": "StructureDefinition",
@@ -1579,6 +1604,26 @@ public class XVerProfileCatalogTests
 
     private const string QuantityUrl = "http://hl7.org/fhir/StructureDefinition/Quantity";
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ClassifierKeepsIndependentDecisionsAfterAnUnprovableProfile(bool missingPayloadSnapshot)
+    {
+        StructureDefinition invalid = ConstraintProfile("InvalidQuantity");
+        invalid.Snapshot.Element[0].Extension.Add(new("urn:unknown-restriction", new Hl7.Fhir.Model.FhirBoolean(true)));
+        StructureDefinition valid = ConstraintProfile("ValidQuantity");
+        using CatalogImport imported = ImportUses(invalid, valid);
+        using XVerStructureCatalog catalog = imported.Catalog;
+        if (missingPayloadSnapshot)
+        {
+            catalog.ReadPayload(catalog.ResolveDefinition(imported.PackageKey, invalid.Url)!).Snapshot = null;
+        }
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        IReadOnlyList<ProfileRepresentationProof> decisions = facts.ClassifyRequiredUses();
+        decisions.ShouldNotContain(proof => proof.SourceRoot.Canonical == invalid.Url && proof.IsAcceptedDecision);
+        decisions.ShouldContain(proof => proof.SourceRoot.Canonical == valid.Url && proof.IsAcceptedDecision);
+    }
+
     [Fact]
     public void FixedContextBorrowersKeepExactSlicedOwnerAndAlternativeFacts()
     {
@@ -1616,7 +1661,7 @@ public class XVerProfileCatalogTests
             invariant.Origin.OwnerKey == restricted.Definition.Key && invariant.Origin.ElementId == "Quantity:fixture");
         alternative.Elements[""].Invariants.ShouldNotContain(invariant => invariant.Key == "first-only");
         StructureDefinition payload = catalog.ReadPayload(restricted.Definition);
-        comparison.ForDefinition(restricted.Definition);
+        comparison.ForDefinition(restricted.Definition).ShouldNotBeNull();
         comparison.Dispose();
         catalog.ReadPayload(restricted.Definition).ShouldBeSameAs(payload);
         classification.AtUse(owner, occurrence, 0).ShouldBeSameAs(uses);
@@ -1876,7 +1921,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         ProfileInvariant invariant = branch.Elements[""].Invariants.ShouldHaveSingleItem();
         invariant.Key.ShouldBe("sqty-1");
         invariant.Expression.ShouldBe(profile.Snapshot.Element[0].Constraint[0].Expression);
@@ -2027,7 +2072,7 @@ public class XVerProfileCatalogTests
         recovered.Differential.Element.ShouldHaveSingleItem().Constraint.ShouldHaveSingleItem()
             .Extension.ShouldHaveSingleItem().Value.ShouldBeOfType<Hl7.Fhir.Model.FhirString>().Value.ShouldBe(xpath);
         ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
-        EffectiveProfileBranch effective = facts.ForDefinition(imported.Catalog.ResolveDefinition(imported.PackageKey, child.Url)!);
+        EffectiveProfileBranch effective = facts.ForDefinition(imported.Catalog.ResolveDefinition(imported.PackageKey, child.Url)!).ShouldNotBeNull();
         ProfileInvariant invariant = effective.Elements[""].Invariants.ShouldHaveSingleItem();
         invariant.Key.ShouldBe("original-key");
         invariant.Severity.ShouldBe("warning");
@@ -2091,7 +2136,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
         ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         branch.Elements[""].Invariants.ShouldHaveSingleItem().XPath.ShouldBeNull();
         string? revision = DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision;
         ProfileRepresentationProof proof = facts.Prove(branch, owner);
@@ -2174,7 +2219,7 @@ public class XVerProfileCatalogTests
         using CatalogImport imported = ImportUses(source, target);
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
-        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!).ShouldNotBeNull();
         ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveDefinition(imported.PackageKey, target.Url)!);
         proof.Kind.ShouldBe(ProfileProofKind.Unsupported);
         proof.IsAcceptedDecision.ShouldBeFalse();
@@ -2197,7 +2242,7 @@ public class XVerProfileCatalogTests
         using CatalogImport imported = ImportUses(profile);
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
-        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, profile.Url)!);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, profile.Url)!).ShouldNotBeNull();
         branch = missingRoot ? branch with { Elements = branch.Elements.Remove("") } :
             branch with { Key = branch.Key with { OwnerKey = -1 } };
         ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!);
@@ -2230,7 +2275,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         branch.Elements[""].Restrictions.ShouldNotContain(fact => fact.Kind == ProfileRestrictionKind.Binding);
         ProfileRepresentationProof negative = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!);
         negative.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
@@ -2292,7 +2337,7 @@ public class XVerProfileCatalogTests
         DbStructureDefinitionFacts.Update(imported.Connection, payload);
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
-        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!).ShouldNotBeNull();
         string? revision = DefinitionInventoryStore.ReadState(imported.Connection)!.CompletedRevision;
         ProfileRepresentationProof proof = facts.Prove(branch, targetOwner);
         proof.Kind.ShouldBe(ProfileProofKind.MissingFacts);
@@ -2327,7 +2372,7 @@ public class XVerProfileCatalogTests
         DbStructureDefinitionFacts.Update(imported.Connection, stored);
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
-        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, profile.Url)!);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, profile.Url)!).ShouldNotBeNull();
         ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!);
         proof.Kind.ShouldBe(ProfileProofKind.MissingFacts);
         proof.IsAcceptedDecision.ShouldBeFalse();
@@ -2368,7 +2413,7 @@ public class XVerProfileCatalogTests
         imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
-        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, legacy.Url)!);
+        EffectiveProfileBranch branch = facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, legacy.Url)!).ShouldNotBeNull();
         ProfileRepresentationProof proof = facts.Prove(branch, catalog.ResolveDefinition(imported.PackageKey, modern.Url)!);
         proof.Kind.ShouldBe(ProfileProofKind.NativeReuse);
         proof.RequiredFacts[""].Invariants.ShouldHaveSingleItem().XPath.ShouldBe(xpath);
@@ -2417,7 +2462,7 @@ public class XVerProfileCatalogTests
         using CatalogImport imported = ImportUses(source, target);
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveDefinition(imported.PackageKey, source.Url)!).ShouldNotBeNull(),
             catalog.ResolveDefinition(imported.PackageKey, target.Url)!);
         proof.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
         proof.Reasons.ShouldContain(reason => reason.Category == ProfileReasonCategory.InvariantTransformation);
@@ -2565,7 +2610,7 @@ public class XVerProfileCatalogTests
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
         DbStructureDefinition source = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
         DbStructureDefinition target = catalog.ResolveNativeType(targetPackage, "Quantity")!;
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), target);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source).ShouldNotBeNull(), target);
         if (scenario is "missing" or "ambiguous" or "wrong-version")
         {
             proof.Kind.ShouldBe(ProfileProofKind.MissingFacts);
@@ -2605,7 +2650,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).ShouldNotBeNull(),
             catalog.ResolveNativeType(targetPackage, "Quantity")!);
         proof.Kind.ShouldBe(ProfileProofKind.MissingFacts);
         proof.IsAcceptedDecision.ShouldBeFalse();
@@ -2641,7 +2686,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, child.Url)!;
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         branch.Diagnostics.ShouldBeEmpty();
         branch.Elements[".extension"].Minimum.ShouldBe(1);
         foreach (string slice in new[] { "first", "second" })
@@ -2683,7 +2728,7 @@ public class XVerProfileCatalogTests
         using CatalogImport imported = ImportUses(parent, child);
         using ProfileUseFacts facts = new(imported.Catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = imported.Catalog.ResolveDefinition(imported.PackageKey, child.Url)!;
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         branch.Elements[".extension:required"].Minimum.ShouldBe(1);
         branch.Elements[".extension:optional"].Minimum.ShouldBe(0);
         branch.Diagnostics.ShouldContain(message => message.Contains("required") && message.Contains("illegally loosens"));
@@ -2723,7 +2768,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).ShouldNotBeNull(),
             catalog.ResolveNativeType(targetPackage, "Quantity")!);
         proof.Kind.ShouldBe(ProfileProofKind.NativeReuse, string.Join("; ", proof.Diagnostics));
         proof.ChildProofs.ShouldNotBeEmpty();
@@ -2744,7 +2789,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(quantity), quantity);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(quantity).ShouldNotBeNull(), quantity);
         proof.Kind.ShouldBe(ProfileProofKind.Unsupported);
         proof.IsAcceptedDecision.ShouldBeFalse();
         proof.PreservesRestrictions.ShouldBeFalse();
@@ -2764,7 +2809,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
-        EffectiveProfileBranch branch = facts.ForDefinition(quantity);
+        EffectiveProfileBranch branch = facts.ForDefinition(quantity).ShouldNotBeNull();
         branch.Elements[".code"].Types.ShouldHaveSingleItem().Code.ShouldBe("uri");
         branch.Elements[".code"].Minimum.ShouldBe(0);
         ProfileRepresentationProof proof = facts.Prove(branch, quantity);
@@ -2772,7 +2817,7 @@ public class XVerProfileCatalogTests
 
         using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(imported.Connection, new(XVerPreparationKind.TypeComparison));
         ProfileUseFacts prepared = operation.GetComparisonPacket(imported.PackageKey, imported.PackageKey).Facts;
-        EffectiveProfileBranch captured = prepared.ForDefinition(operation.Catalog.GetStructure(quantity.Key));
+        EffectiveProfileBranch captured = prepared.ForDefinition(operation.Catalog.GetStructure(quantity.Key)).ShouldNotBeNull();
         captured.Elements[".code"].Types.ShouldHaveSingleItem().Code.ShouldBe("uri");
         captured.Elements[".code"].Minimum.ShouldBe(0);
         captured.Elements[".code"].Origins.ShouldBe(branch.Elements[".code"].Origins);
@@ -2803,7 +2848,7 @@ public class XVerProfileCatalogTests
         facts.Prove(branch, catalog.ResolveNativeType(imported.PackageKey, "Quantity")!, nativeContext: branch)
             .Kind.ShouldBe(ProfileProofKind.NativeReuse);
 
-        ProfileRepresentationProof recursive = facts.Prove(facts.ForDefinition(owner), owner);
+        ProfileRepresentationProof recursive = facts.Prove(facts.ForDefinition(owner).ShouldNotBeNull(), owner);
         recursive.Kind.ShouldBe(ProfileProofKind.Unrepresentable);
         recursive.IsAcceptedDecision.ShouldBeTrue();
         recursive.Reasons.ShouldContain(reason => reason.Restriction != null &&
@@ -2824,7 +2869,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition quantity = catalog.ResolveNativeType(imported.PackageKey, "Quantity")!;
-        EffectiveProfileBranch branch = facts.ForDefinition(quantity);
+        EffectiveProfileBranch branch = facts.ForDefinition(quantity).ShouldNotBeNull();
         branch.Elements[""].Types.ShouldHaveSingleItem().Code.ShouldBe("Quantity");
         branch.Elements[".code"].Types.ShouldBeEmpty();
         facts.Prove(branch, quantity).Kind.ShouldBe(ProfileProofKind.NativeReuse);
@@ -2839,7 +2884,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         branch.Elements[".code"].Types.ShouldHaveSingleItem().Code.ShouldBe("code");
         branch.Elements[".code"].Origins.ShouldContain(origin => origin.Canonical == QuantityUrl);
         facts.Prove(branch, owner).Kind.ShouldBe(ProfileProofKind.NativeReuse);
@@ -2855,7 +2900,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveDefinition(imported.PackageKey, profile.Url)!;
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         branch.Elements[".extension:excessive"].Maximum.ShouldBe(1);
         branch.Diagnostics.ShouldContain(message => message.Contains("excessive") && message.Contains("illegally loosens"));
         ProfileRepresentationProof proof = facts.Prove(branch, owner);
@@ -2889,7 +2934,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).ShouldNotBeNull(),
             catalog.ResolveNativeType(targetPackage, "Quantity")!);
         proof.Kind.ShouldBe(unknownRestriction ? ProfileProofKind.Unsupported : ProfileProofKind.MissingFacts);
         proof.IsAcceptedDecision.ShouldBeFalse();
@@ -2972,7 +3017,7 @@ public class XVerProfileCatalogTests
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
         DbStructureDefinition source = catalog.ResolveNativeType(imported.PackageKey, "dateTime")!;
         DbStructureDefinition target = catalog.ResolveNativeType(targetPackage, scenario == "context" ? "OtherPrimitive" : "dateTime")!;
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source), target);
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(source).ShouldNotBeNull(), target);
         bool equal = scenario is "equal" or "no-regex" or "legacy-regex" or "direct-code" or "core-bridge" or "string-integer-bridge";
         proof.Kind.ShouldBe(equal ? ProfileProofKind.NativeReuse : ProfileProofKind.Unrepresentable,
             string.Join("; ", proof.Diagnostics));
@@ -3051,7 +3096,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "dateTime")!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "dateTime")!).ShouldNotBeNull(),
             catalog.ResolveNativeType(targetPackage, differentContext ? "OtherPrimitive" : "dateTime")!);
         proof.Kind.ShouldBe(ProfileProofKind.Unsupported);
         proof.IsAcceptedDecision.ShouldBeFalse();
@@ -3083,7 +3128,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).ShouldNotBeNull(),
             catalog.ResolveNativeType(targetPackage, "Quantity")!);
         proof.Kind.ShouldBe(scenario == "equal" ? ProfileProofKind.NativeReuse : ProfileProofKind.Unrepresentable);
         proof.IsAcceptedDecision.ShouldBeTrue();
@@ -3121,7 +3166,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).ShouldNotBeNull(),
             catalog.ResolveNativeType(targetPackage, "Quantity")!);
         proof.Kind.ShouldBe(different ? ProfileProofKind.Unrepresentable : ProfileProofKind.NativeReuse);
         proof.IsAcceptedDecision.ShouldBeTrue();
@@ -3179,7 +3224,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).ShouldNotBeNull(),
             catalog.ResolveNativeType(targetPackage, "Quantity")!);
         bool invalid = scenario is "unknown" or "malformed" or "duplicate";
         proof.Kind.ShouldBe(invalid ? ProfileProofKind.Unsupported :
@@ -3231,7 +3276,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "id")!;
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         ProfileRepresentationProof proof = facts.Prove(branch, owner);
         proof.IsAcceptedDecision.ShouldBe(!missingBridge);
         proof.PreservesRestrictions.ShouldBe(!missingBridge);
@@ -3278,7 +3323,7 @@ public class XVerProfileCatalogTests
         XVerStructureCatalog catalog = imported.Catalog;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
         DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "dateTime")!;
-        EffectiveProfileBranch branch = facts.ForDefinition(owner);
+        EffectiveProfileBranch branch = facts.ForDefinition(owner).ShouldNotBeNull();
         ProfileRepresentationProof proof = facts.Prove(branch, owner);
         proof.IsAcceptedDecision.ShouldBe(primitive);
         proof.PreservesRestrictions.ShouldBe(primitive);
@@ -3312,7 +3357,7 @@ public class XVerProfileCatalogTests
         int targetPackage = DbFhirPackage.SelectList(imported.Connection).Single(package => package.Key != imported.PackageKey).Key;
         using ProfileUseFacts facts = new(catalog, imported.PackageKey, targetPackage);
         DbStructureDefinition target = catalog.ResolveNativeType(targetPackage, "Quantity")!;
-        EffectiveProfileBranch targetBranch = facts.ForDefinition(target);
+        EffectiveProfileBranch targetBranch = facts.ForDefinition(target).ShouldNotBeNull();
         if (malformed)
         {
             EffectiveProfileElement value = targetBranch.Elements[".value"];
@@ -3322,7 +3367,7 @@ public class XVerProfileCatalogTests
                     ? fact with { Value = JsonSerializer.SerializeToElement("9223372036854775808") } : fact)],
             }) };
         }
-        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!),
+        ProfileRepresentationProof proof = facts.Prove(facts.ForDefinition(catalog.ResolveNativeType(imported.PackageKey, "Quantity")!).ShouldNotBeNull(),
             target, nativeContext: targetBranch);
         proof.Kind.ShouldBe(malformed ? ProfileProofKind.Unsupported : different ? ProfileProofKind.Unrepresentable : ProfileProofKind.NativeReuse);
         proof.IsAcceptedDecision.ShouldBe(!malformed);
