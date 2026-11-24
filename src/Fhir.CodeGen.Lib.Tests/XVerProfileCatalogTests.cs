@@ -3242,6 +3242,41 @@ public class XVerProfileCatalogTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SystemStringOccurrenceRequiresAValidatedFhirIdBridge(bool valid)
+    {
+        DefinitionCollection definitions = Definitions();
+        StructureDefinition id = Definition("id", "id");
+        id.Kind = StructureDefinition.StructureDefinitionKind.PrimitiveType;
+        definitions.AddPrimitiveType(id, definitions.FhirSequence, definitions.MainPackageId, definitions.MainPackageVersion);
+        StructureDefinition timing = Definition("Timing", "Timing");
+        timing.Snapshot.Element.Add(new()
+        {
+            ElementId = "Timing.id", Path = "Timing.id", Min = 0, Max = "1",
+            Type = [new() { Code = "http://hl7.org/fhirpath/System.String",
+                Extension = valid ? [new(CommonDefinitions.ExtUrlFhirType, new Hl7.Fhir.Model.FhirUrl("id"))] : [] }],
+        });
+        AddNative(definitions, timing);
+        using CatalogImport imported = new(definitions);
+        imported.Database.TryLoadFromDefinitionCollections([], []).ShouldBeTrue();
+        XVerStructureCatalog catalog = imported.Catalog;
+        using ProfileUseFacts facts = new(catalog, imported.PackageKey, imported.PackageKey);
+        DbStructureDefinition owner = catalog.ResolveNativeType(imported.PackageKey, "Timing")!;
+        DbElement occurrence = catalog.ResolveOwnedElement(owner, "Timing.id")!;
+        EffectiveProfileUse use = facts.AtUse(owner, occurrence, 0);
+        if (!valid)
+        {
+            use.Diagnostics.ShouldNotBeEmpty();
+            use.Branches.ShouldBeEmpty();
+            return;
+        }
+        use.Diagnostics.ShouldBeEmpty();
+        use.Branches.ShouldHaveSingleItem().Definition.Id.ShouldBe("id");
+        facts.AtUse(occurrence, catalog.GetTypeUses(occurrence).ShouldHaveSingleItem()).ShouldBeSameAs(use);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void PrimitiveInheritanceUsesOnlyExplicitValidatedBridgeIdentity(bool missingBridge)

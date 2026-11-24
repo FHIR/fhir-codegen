@@ -10,6 +10,7 @@ using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Fhir.CodeGen.Common.Models;
 using Fhir.CodeGen.Common.Packaging;
+using Fhir.CodeGen.Comparison.CompareTool;
 using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.Terminology;
 using Hl7.Fhir.Model;
@@ -725,8 +726,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db, ILogger? logg
             if (use.ElementComparisonKey is not int comparisonKey || !_allComparisons.TryGetValue(comparisonKey, out DbElementComparison? comparison) ||
                 comparison.Steps <= 1 || comparison.ElementMappingKey is not null)
             {
-                yield return use;
-                yield break;
+                return [use];
             }
 
             if (!_structureComparisons.TryGetValue(comparison.StructureComparisonKey, out DbStructureComparison? structure))
@@ -737,6 +737,8 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db, ILogger? logg
             int sourceIndex = _pair.SourcePackage.PackageArrayIndex;
             int targetIndex = _pair.TargetPackage.PackageArrayIndex;
             int increment = sourceIndex < targetIndex ? 1 : -1;
+            List<MappingUse> path = [];
+            bool exactPath = true;
             for (int index = sourceIndex; index != targetIndex; index += increment)
             {
                 int nextIndex = index + increment;
@@ -754,24 +756,49 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db, ILogger? logg
                     step.SourceElementKey == source.Key && step.TargetElementKey == target.Key && !step.NotMapped &&
                     _structureComparisons.TryGetValue(step.StructureComparisonKey, out DbStructureComparison? owner) &&
                     owner.SourceStructureKey == source.StructureKey && owner.TargetStructureKey == target.StructureKey)];
-                if (steps.Length == 0 || steps.Select(step => step.ElementMappingKey).Distinct().Count() != 1)
+                if (steps.Any(step => step.SourceElementId != source.Id || step.TargetElementId != target.Id))
+                {
+                    throw new InvalidOperationException($"Transitive mapping provenance is inconsistent at {source.Id}->{target.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}.");
+                }
+                DbElementComparison[] exact = [.. steps.Where(HasExactMappingTarget)];
+                if (steps.Length != 0 && exact.Length == 0)
+                {
+                    // An ancestor approximation breaks the chain of exact annotation authorities.
+                    exactPath = false;
+                    continue;
+                }
+                if (exact.Length == 0 || exact.Select(step => step.ElementMappingKey).Distinct().Count() != 1)
                 {
                     throw new InvalidOperationException($"Transitive mapping authority is missing or ambiguous at {source.Id}->{target.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}.");
                 }
 
-                DbElementComparison step = steps[0];
-                if (step.ElementMappingKey is int mappingKey &&
-                    (!_mappings.TryGetValue(mappingKey, out DbElementMapping? mapping) ||
-                        mapping.SourceFhirPackageKey != source.FhirPackageKey || mapping.TargetFhirPackageKey != target.FhirPackageKey ||
-                        mapping.SourceStructureKey != source.StructureKey || mapping.TargetStructureKey != target.StructureKey ||
-                        mapping.SourceElementId != source.Id || mapping.TargetElementId != target.Id ||
-                        mapping.SourceElementKey is int mappedSource && mappedSource != source.Key ||
-                        mapping.TargetElementKey is int mappedTarget && mappedTarget != target.Key))
-                {
-                    throw new InvalidOperationException($"Transitive mapping provenance is inconsistent at {source.Id}->{target.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}.");
-                }
-                yield return new(use.Context, source, target, step.ElementMappingKey, step.Key);
+                DbElementComparison step = exact[0];
+                path.Add(new(use.Context, source, target, step.ElementMappingKey, step.Key));
             }
+            return exactPath ? path : [];
+        }
+
+        private bool HasExactMappingTarget(DbElementComparison comparison)
+        {
+            if (comparison.ElementMappingKey is not int mappingKey) return true;
+            if (_mappings.TryGetValue(mappingKey, out DbElementMapping? mapping) &&
+                mapping.SourceFhirPackageKey == comparison.SourceFhirPackageKey && mapping.TargetFhirPackageKey == comparison.TargetFhirPackageKey &&
+                mapping.SourceStructureKey == comparison.SourceStructureKey && mapping.TargetStructureKey == comparison.TargetStructureKey &&
+                mapping.SourceElementId == comparison.SourceElementId &&
+                (mapping.SourceElementKey is null || mapping.SourceElementKey == comparison.SourceElementKey) &&
+                (mapping.TargetElementKey is null || mapping.TargetElementKey == comparison.TargetElementKey))
+            {
+                if (mapping.TargetElementId == comparison.TargetElementId) return true;
+                // ElementComparer can compare to an ancestor when the authored descendant has no row.
+                if (!mapping.ExplicitNoMap && mapping.TargetElementKey is null && comparison.TargetElementId is string ancestor &&
+                    mapping.TargetElementId is string descendant && descendant.StartsWith(ancestor + ".", StringComparison.Ordinal) &&
+                    comparison.TargetStructureKey is int owner && comparison.TargetElementKey is int key &&
+                    ElementComparer.ResolveUnkeyedTarget(_catalog, _catalog.GetStructure(owner), descendant)?.Key == key)
+                {
+                    return false;
+                }
+            }
+            throw new InvalidOperationException($"Unsafe-code comparison provenance is inconsistent for {comparison.SourceElementId}->{comparison.TargetElementId}, mapping {mappingKey}, pair {comparison.SourceFhirPackageKey}->{comparison.TargetFhirPackageKey}. Rerun comparisons and outcomes.");
         }
 
         internal bool IsResource(int key)
@@ -996,14 +1023,10 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db, ILogger? logg
                         continue;
                     }
 
-                    if (comparison.ElementMappingKey is int mappingKey &&
-                        (!_mappings.TryGetValue(mappingKey, out DbElementMapping? mapping) ||
-                         mapping.SourceElementId != comparison.SourceElementId || mapping.TargetElementId != comparison.TargetElementId ||
-                         mapping.SourceStructureKey != basis.StructureKey || mapping.TargetStructureKey != comparison.TargetStructureKey ||
-                         (mapping.SourceElementKey is int sourceKey && sourceKey != basis.Key) ||
-                         (mapping.TargetElementKey is int targetKey && targetKey != comparison.TargetElementKey)))
+                    if (!HasExactMappingTarget(comparison))
                     {
-                        throw new InvalidOperationException($"Unsafe-code comparison provenance is inconsistent for {basis.Id}, pair {_pair.SourcePackageKey}->{_pair.TargetPackageKey}. Rerun comparisons and outcomes.");
+                        uses.Add(new(new(_pair.SourcePackageKey, _pair.TargetPackageKey, basis.Id, string.Empty), basis, null));
+                        continue;
                     }
 
                     DbElement? targetElement = comparison.TargetElementKey is int key ? _targetElements.GetValueOrDefault(key) : null;

@@ -346,6 +346,35 @@ public class UnsafeCodePipelineTests
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(0)]
+    public void AncestorComparisonDoesNotGrantTheMissingDescendantsAnnotation(int targetIndex)
+    {
+        using UnsafeCodeTestFixture fixture = UnsafeCodeTestFixture.CreateProfileInputs();
+        const string filename = "ConceptMap-elements-5to4B.json";
+        ConceptMap map = fixture.ReadMap("elements", filename);
+        string descendant = UnsafeCodeTestFixture.FilterElement + ".category";
+        map.Group[0].Element[0].Target[0].Code = descendant;
+        fixture.WriteInputMap(map, "elements", filename);
+        fixture.LoadProfileMaps();
+
+        FhirPackageComparisonPair first = new(fixture.Packages[2], fixture.Packages[1]);
+        FhirPackageComparisonPair pair = new(first.SourcePackage, fixture.Packages[targetIndex]);
+        fixture.CompareProfilePair(pair);
+        DbElementMapping mapping = DbElementMapping.SelectList(fixture.Connection, SourceFhirPackageKey: first.SourcePackageKey,
+            TargetFhirPackageKey: first.TargetPackageKey, TargetElementId: descendant).ShouldHaveSingleItem();
+        mapping.TargetElementKey.ShouldBeNull();
+        DbElementComparison comparison = DbElementComparison.SelectList(fixture.Connection, ElementMappingKey: mapping.Key).ShouldHaveSingleItem();
+        comparison.TargetElementId.ShouldBe(UnsafeCodeTestFixture.FilterElement);
+
+        fixture.GenerateProfileOutcomes(pair);
+        DbUnsafeCodePairState state = fixture.PairState(pair);
+        state.OutcomeComparisonRevision.ShouldBe(state.ComparisonRevision.ShouldNotBeNull());
+        DbUnsafeCodeTrigger.SelectList(fixture.Connection, SourceFhirPackageKey: pair.SourcePackageKey,
+            TargetFhirPackageKey: pair.TargetPackageKey).ShouldBeEmpty();
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void TransitiveAnnotationsSelectOnlyContributingOwnersAndEdges(bool separateOwner)

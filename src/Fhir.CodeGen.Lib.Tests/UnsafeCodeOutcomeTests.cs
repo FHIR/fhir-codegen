@@ -893,6 +893,39 @@ public class UnsafeCodeOutcomeTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void OnlyTheActualUnkeyedAncestorCanFallBackToSourceOnlyRules(bool keyed, bool nearerTarget)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        (DbStructureOutcome outcome, DbElement source, DbElement target) = BoundElements(fixture, pair);
+        fixture.Connect(pair, outcome, source, target);
+        DbElementMapping mapping = DbElementMapping.SelectList(fixture.Connection).ShouldHaveSingleItem();
+        mapping.TargetElementId = target.Id + ".child.category";
+        mapping.TargetElementKey = keyed ? target.Key : null;
+        DbElementMapping.Update(fixture.Connection, mapping);
+        if (nearerTarget)
+        {
+            fixture.AddElement(fixture.Structure(pair.TargetPackage), target.Id + ".child", "string");
+        }
+        fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
+        if (keyed || nearerTarget)
+        {
+            Should.Throw<InvalidOperationException>(() => Generate(fixture, pair)).Message.ShouldContain("provenance");
+            fixture.PairState(pair).OutcomeComparisonRevision.ShouldBeNull();
+            return;
+        }
+        Generate(fixture, pair);
+        DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
+        trigger.SourceElementId.ShouldBe(source.Id);
+        trigger.TargetElementId.ShouldBeEmpty();
+        JsonSerializer.Deserialize<int[]>(trigger.RuleKeysJson)!.ShouldHaveSingleItem();
+    }
+
+    [Theory]
     [InlineData("no-annotation")]
     [InlineData("no-evidence")]
     [InlineData("inferred-no-map")]

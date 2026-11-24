@@ -169,7 +169,7 @@ public class ElementComparer
         FhirPackageComparisonPair pair, DbElement source, DbElement? target, int comparisonKey) =>
         _elementTypeComparer.DoTypeComparisons(pair, source, target, comparisonKey, _operation!, _packet!);
 
-    private bool skipElement(
+    private static bool skipElement(
         DbElement ed,
         bool skipFirstElement = true,
         bool skipIds = true,
@@ -181,6 +181,19 @@ public class ElementComparer
         (skipModifierExtenions &&
             ((ed.Name == "modifierExtension") || (ed.BasePath == "DomainResource.modifierExtension") || (ed.BasePath == "BackboneElement.modifierExtension")));
 
+    internal static DbElement? ResolveUnkeyedTarget(XVerStructureCatalog catalog, DbStructureDefinition owner, string targetId)
+    {
+        for (int dot = targetId.LastIndexOf('.'); dot >= 0; dot = targetId.LastIndexOf('.'))
+        {
+            DbElement? candidate = catalog.ResolveOwnedElement(owner, targetId, required: false);
+            if (candidate is not null && !skipElement(candidate, skipFirstElement: false))
+            {
+                return candidate;
+            }
+            targetId = targetId[..dot];
+        }
+        return null;
+    }
 
     internal List<DbElementComparison> DoTransitiveElementComparisons(StructureComparisonTrackingRecord sdTr)
         => WithinPair(sdTr, transitive: true);
@@ -558,19 +571,8 @@ public class ElementComparer
                 if ((explicitMapping.TargetElementId is not null) &&
                     (explicitMapping.TargetElementKey is null))
                 {
-                    int dotCount = explicitMapping.TargetElementId.Count(c => c == '.');
-                    string[] components = explicitMapping.TargetElementId.Split('.');
-                    while (dotCount >= 1)
-                    {
-                        string testId = string.Join('.', components.Take(dotCount + 1));
-                        targetElement = targetElements.Values.FirstOrDefault(e => e.Id == testId);
-                        if (targetElement is not null)
-                        {
-                            targetIsHigherLevelThanExplicit = true;
-                            break;
-                        }
-                        dotCount--;
-                    }
+                    targetElement = ResolveUnkeyedTarget(_operation!.Catalog, targetSd, explicitMapping.TargetElementId);
+                    targetIsHigherLevelThanExplicit = targetElement is not null && targetElement.Id != explicitMapping.TargetElementId;
                 }
 
                 // use the explicit relationship

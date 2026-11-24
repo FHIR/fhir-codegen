@@ -254,6 +254,20 @@ authority; an applicable ambiguous/unresolved authority fails rather than bleedi
 across shared element IDs. Transitive contexts retain only contributing owners
 and edges, with primary authority before fallback.
 
+An element map may name a descendant that has no row in the target snapshot
+(for example, R3 `ClaimResponse.item.detail.adjudication.category` below a
+content reference). The comparison retains the authored map key and the
+nearest comparable ancestor. That ancestor is not the authored target: it
+cannot supply the descendant's annotation or target binding, and a transitive
+chain with only such a link at any step cannot carry annotations. Independent
+source-code rules still apply. A different target key, owner, or unrelated
+path remains a provenance error.
+
+Profile-use traversal resolves a FHIRPath storage type through its validated
+FHIR primitive declaration. For example, `System.String` with a FHIR type of
+`id` uses the package's native `id` definition; a missing bridge is not
+inferred from the storage type or the element name.
+
 `PairFacts` loads rules, evidence, annotations, elements, types, comparisons,
 outcomes, and binding data once per pair into dictionaries/lookups
 (`UnsafeCodeOutcomeGenerator.cs:241-283`); binding/context/evidence

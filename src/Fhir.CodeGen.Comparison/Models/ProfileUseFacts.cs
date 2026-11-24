@@ -251,7 +251,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         {
             owner = catalog.GetOwner(element);
             EffectiveProfileElement local = Definition(owner).Elements[element.Id[catalog.ResolveRoot(owner).Id.Length..]];
-            ProfileTypeAlternative? alternative = local.Types.SingleOrDefault(type => type.Code == row.TypeName &&
+            ProfileTypeAlternative? alternative = local.Types.SingleOrDefault(type => TypeIdentity(type) == row.TypeName &&
                 (row.TypeProfile is null ? type.Profiles.IsEmpty : type.Profiles.Contains(row.TypeProfile)) &&
                 (row.TargetProfile is null ? type.TargetProfiles.IsEmpty : type.TargetProfiles.Contains(row.TargetProfile)));
             if (alternative is not null)
@@ -920,6 +920,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
         }
         else
         {
+            string nativeName = TypeIdentity(type);
             foreach (string? profile in Alternatives(type.Profiles))
             {
                 foreach (string? targetProfile in Alternatives(type.TargetProfiles))
@@ -929,11 +930,11 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                     {
                         DbStructureDefinition datatype = profile is null
                             ? (targetProfile is null ? catalog.ResolveQuantityProfileRootType(element, type.Code) : null)
-                                ?? catalog.ResolveNativeType(owner.FhirPackageKey, type.Code, context: element.Id)!
+                                ?? catalog.ResolveNativeType(owner.FhirPackageKey, nativeName, context: element.Id)!
                             : catalog.ResolveDefinition(owner.FhirPackageKey, profile, context: element.Id)!;
                         if (profile is not null)
                         {
-                            DbStructureDefinition native = catalog.ResolveNativeType(owner.FhirPackageKey, type.Code, context: element.Id)!;
+                            DbStructureDefinition native = catalog.ResolveNativeType(owner.FhirPackageKey, nativeName, context: element.Id)!;
                             if (datatype.Key != native.Key && !catalog.GetAncestors(datatype).Any(ancestor => ancestor.Key == native.Key))
                             {
                                 throw new InvalidOperationException(Context(owner, element.Id,
@@ -942,7 +943,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                         }
                         // Validate the importer cross-product, but never use its rows as conjunctive declarations.
                         foreach (DbElementType row in catalog.GetTypeUses(element).Where(row =>
-                            row.TypeName == type.Code && row.TypeProfile == profile && row.TargetProfile == targetProfile))
+                            row.TypeName == nativeName && row.TypeProfile == profile && row.TargetProfile == targetProfile))
                         {
                             catalog.ResolveTypeUse(row);
                             if (targetProfile is not null)
@@ -1877,7 +1878,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
     {
         if (profile is not null)
         {
-            DbStructureDefinition native = catalog.ResolveNativeType(context.Key.PackageKey, type.Code, context: context.Root.Id + id)!;
+            DbStructureDefinition native = catalog.ResolveNativeType(context.Key.PackageKey, TypeIdentity(type), context: context.Root.Id + id)!;
             if (definition.Key != native.Key && !catalog.GetAncestors(definition).Any(ancestor => ancestor.Key == native.Key))
             {
                 throw new InvalidOperationException(Context(definition, context.Root.Id + id,
@@ -2082,7 +2083,7 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                         [.. Alternatives(profiles).Select(profile =>
                         {
                             DbStructureDefinition definition = profile is null
-                                ? catalog.ResolveNativeType(context.Key.PackageKey, type.Code, context: context.Root.Id + contextId)!
+                                ? catalog.ResolveNativeType(context.Key.PackageKey, TypeIdentity(type), context: context.Root.Id + contextId)!
                                 : catalog.ResolveDefinition(context.Key.PackageKey, profile, context: context.Root.Id + contextId)!;
                             return targetProfile ? DefinitionBranch(definition) : AtChild(context, contextId, type, definition, profile);
                         })];
