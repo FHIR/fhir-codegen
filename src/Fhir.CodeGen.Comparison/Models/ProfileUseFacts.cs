@@ -1210,7 +1210,8 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                     renamedParents.Add(from[..dot]);
                 }
             }
-            foreach ((string id, EffectiveProfileElement element) in source.Elements)
+            // The ordered reasons, diagnostics and child proofs are persisted and audited in another process.
+            foreach ((string id, EffectiveProfileElement element) in source.Elements.OrderBy(pair => pair.Key, StringComparer.Ordinal))
             {
                 if (!corresponding.TryGetValue(id, out string? targetId))
                 {
@@ -1259,7 +1260,8 @@ internal sealed class ProfileUseFacts(XVerStructureCatalog catalog, int sourcePa
                     }
                 }
             }
-            foreach ((string id, EffectiveProfileElement element) in target.Elements.Where(pair => !mappedTargets.Contains(pair.Key)))
+            foreach ((string id, EffectiveProfileElement element) in target.Elements.Where(pair => !mappedTargets.Contains(pair.Key))
+                .OrderBy(pair => pair.Key, StringComparer.Ordinal))
             {
                 if (element.Minimum > 0 || element.Restrictions.Length != 0)
                 {

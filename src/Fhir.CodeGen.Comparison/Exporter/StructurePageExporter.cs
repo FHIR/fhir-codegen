@@ -289,7 +289,7 @@ public class StructurePageExporter
 
             if (isResourceLookup)
             {
-                if (sdOutcome.GenFileName is not null)
+                if (sdOutcome.GenFileName is not null && !igTr.OmittedProfiles.ContainsKey(sdOutcome.Key))
                 {
                     mdWriter.WriteLine(
                        $"Note that there is a profile defined to simplify use of this cross-version {sourceArtifactLabel} representation:" +
@@ -328,6 +328,7 @@ public class StructurePageExporter
             ILookup<int, DbElementOutcome> edOutcomesByKey = edOutcomes.ToLookup(edo => edo.Key);
 
             writeElementTable(
+                igTr,
                 mdWriter,
                 sdOutcome,
                 edOutcomes,
@@ -349,6 +350,7 @@ public class StructurePageExporter
                 mdWriter.WriteLine("| -------------- | ---- | -------- |");
 
                 writeElementTable(
+                    igTr,
                     mdWriter,
                     sdOutcome,
                     edOutcomes,
@@ -382,6 +384,7 @@ public class StructurePageExporter
     }
 
     private void writeElementTable(
+        XVerIgExportTrackingRecord igTr,
         ExportStreamWriter mdWriter,
         DbStructureOutcome sdOutcome,
         List<DbElementOutcome> edOutcomes,
@@ -436,12 +439,12 @@ public class StructurePageExporter
                 continue;
             }
 
-            if (edOutcome.ExtensionDefinitionIsProhibited)
+            if (igTr.OmittedExtensions.TryGetValue(edOutcome.Key, out DefinitionOmission? omitted) || edOutcome.ExtensionDefinitionIsProhibited)
             {
                 mdWriter.WriteLine(
                     $"| [`{edOutcome.SourceId}`]({rootSourceSpecLink})" +
                     $" | <i>Not Available</i>" +
-                    $" | {edOutcome.ExtensionProhibitionReason?.ForMdTable()}" +
+                    $" | {(omitted?.Reason ?? edOutcome.ExtensionProhibitionReason)?.ForMdTable()}" +
                     $" |");
 
                 continue;
@@ -599,8 +602,11 @@ public class StructurePageExporter
             if (edOutcome.RequiresSliceDefinition || edOutcome.RequiresCardinalitySlice)
             {
                 // check to see if we have a slice definition
-                if ((edOutcome.ParentElementOutcomeKey is not null) &&
-                    outcomeAccumulator.TryGetValue(edOutcome.ParentElementOutcomeKey.Value, out List<(string label, string link)>? parentOutcomeLines))
+                if (edOutcome.ParentElementOutcomeKey is not int parentKey || !edOutcomesByKey.Contains(parentKey))
+                {
+                    throw new InvalidOperationException($"Missing parent outcome {edOutcome.ParentElementOutcomeKey} for slice {edOutcome.SourceId} in {igTr.PackageId}.");
+                }
+                if (outcomeAccumulator.TryGetValue(parentKey, out List<(string label, string link)>? parentOutcomeLines))
                 {
                     foreach ((string parentLabel, string parentLink) in parentOutcomeLines)
                     {
@@ -640,7 +646,9 @@ public class StructurePageExporter
                 }
                 else
                 {
-                    throw new Exception($"Failed to resolve parent outcome when slice definition is declared!");
+                    // A real parent can be prohibited, omitted, or outside this target-specific table.
+                    // There is no rendered carrier link for its slice in any of these cases.
+                    targetLines.Add($"Slice unavailable on `{edOutcomesByKey[parentKey].Single().SourceId}`");
                 }
             }
 
@@ -727,6 +735,7 @@ public class StructurePageExporter
 
             // check for a content reference link
             if ((edOutcome.RequiresDefinitionAsContentReference == true) &&
+                !(edOutcome.ContentReferenceOutcomeKey is int omittedKey && igTr.OmittedExtensions.ContainsKey(omittedKey)) &&
                 (edOutcome.ContentReferenceExtensionUrl is not null))
             {
                 string targetLabel;
@@ -941,7 +950,7 @@ public class StructurePageExporter
 
             if (isResourceLookup)
             {
-                string profileMarkdown = sdOutcome.GenFileName is null
+                string profileMarkdown = sdOutcome.GenFileName is null || igTr.OmittedProfiles.ContainsKey(sdOutcome.Key)
                     ? "No profile generated"
                     : $"[XVer Profile: {id}]({sdOutcome.GenFileName}.html)";
 

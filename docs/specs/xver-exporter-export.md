@@ -485,8 +485,30 @@ operational/referenced constraint is an intentional possible output change
 definition indiscriminately. A complete `Unrepresentable` outcome is retained as
 negative evidence, never Equivalent, preserved restrictions, fake unsafe-code
 qualification or a usable target. It blocks an unsupported scheduled use, while
-unrelated unscheduled negatives need not block a proven Range consumer. Missing,
+unrelated unscheduled negatives need not block a proven Range consumer. An
+extension prohibition takes precedence over an earlier extension or cardinality
+request: no extension is built for that row. This does not exempt an enclosing
+scheduled extension or resource profile from its own representation check. Missing,
 malformed and unclassified required semantics produce warnings, not accepted negatives.
+
+The `XVer wip` launch profile generates the representable subset for each configured
+IG. Its root `xver-omissions.json` lists withheld extensions and resource profiles
+with their source, canonical (if one was assigned), and reason. An unrepresentable
+value removes the whole definition, not just an alternative or constraint; a
+generated definition that references an omitted definition is also withheld.
+Omitted profiles remain in the analysis of unsafe-code constraints on dependent
+owners. The report is not a FHIR resource and is not added to `input/resources`.
+Normal `xver export` retains its strict scheduled-use checks unless explicitly
+invoked with `--report-omissions true`. An export-only retry with that flag and
+`--reload-db false` uses the existing outcomes without regenerating them.
+Neither mode treats
+an unsupported representation as equivalent or changes the persisted evidence.
+
+When computing transitive unsafe-code constraints, the exporter first finds
+source elements that can reach a resource-valued occurrence. It resolves actual
+representation paths only along those branches, retaining distinct choices,
+content references and cycles. It uses the full traversal if an extension
+projection itself supplies a resource value. Direct trigger resolution is unchanged.
 
 `ProjectScheduledUses` can re-prove a negative as `OwnerProjection` only inside an
 already-scheduled resource profile, with exact target owner/occurrence and complete

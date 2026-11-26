@@ -27,7 +27,8 @@ internal static class UnsafeCodeConstraintEmitter
         IReadOnlyList<StructureFhirExporter.BuiltDefinition> profiles,
         ProfileRepresentationIndex index,
         IReadOnlyList<UnsafeCodeConstraintPlan> plans,
-        string direction)
+        string direction,
+        Action<StructureFhirExporter.BuiltDefinition, string>? omit = null)
     {
         if (plans.Count == 0)
         {
@@ -41,8 +42,10 @@ internal static class UnsafeCodeConstraintEmitter
             throw Diagnostic(plan.ProfileCanonical, direction, plan, "Missing resource profile");
         }
 
+        HashSet<string> ownerTypes = [.. profiles.Select(profile => profile.SourceId).OfType<string>(), "Resource", "DomainResource"];
+        ILookup<int, RepresentationLocation> ownerLocations = index.ResourceOwnerLocations(ownerTypes);
         Dictionary<int, OwnerTransition[]> transitions = profiles.ToDictionary(profile => profile.OutcomeKey, owner =>
-            index.Occurrences(owner.OutcomeKey).SelectMany(occurrence => occurrence.Locations)
+            ownerLocations[owner.OutcomeKey]
                 .Where(location => ContainsOwner(location.Steps))
                 .SelectMany(location => profiles.Where(child => child.SourceId == location.SourceType ||
                     location.SourceType is "Resource" or "DomainResource").Select(child => new OwnerTransition(child.OutcomeKey,
@@ -59,6 +62,18 @@ internal static class UnsafeCodeConstraintEmitter
                 continue;
             }
 
+            try
+            {
+                AttachProfile(profile);
+            }
+            catch (ProjectionException exception) when (omit is not null)
+            {
+                omit(profile, exception.Message);
+            }
+        }
+
+        void AttachProfile(StructureFhirExporter.BuiltDefinition profile)
+        {
             List<(string Identity, string Expression)> constraints = [];
             HashSet<int> reachable = Reachable([profile.OutcomeKey],
                 key => transitions[key].Select(edge => edge.Target).Where(relevant.Contains));
@@ -234,7 +249,7 @@ internal static class UnsafeCodeConstraintEmitter
 
                 if (!plan.VersionMatch.Matches(plan.Row.SourceVersion))
                 {
-                    throw Diagnostic(profile.Url, direction, plan, "incompatible persisted version match");
+                    throw new InvalidOperationException(Diagnostic(profile.Url, direction, plan, "incompatible persisted version match").Message);
                 }
             }
             else
@@ -309,7 +324,9 @@ internal static class UnsafeCodeConstraintEmitter
         return escaped.ToString();
     }
 
-    private static InvalidOperationException Diagnostic(string canonical, string direction,
+    private sealed class ProjectionException(string message) : InvalidOperationException(message);
+
+    private static ProjectionException Diagnostic(string canonical, string direction,
         UnsafeCodeConstraintPlan plan, string reason, ImmutableArray<UnsafeCodeProvenance> responsibleMaps = default) => new(
         $"Unsafe-code projection failed in profile {canonical}, direction {direction}, source path {JsonSerializer.Serialize(plan.SourcePath)}, " +
         $"qualified code {plan.Row.System}|{plan.Row.SourceVersion ?? "*"}#{plan.Row.Code}, provenance {plan.Provenance}: {reason}. " +

@@ -61,12 +61,16 @@ public class StructureFhirExporter
     }
     internal sealed record BuiltDefinitionSet(IReadOnlyList<BuiltDefinition> Definitions, ProfileRepresentationIndex Representations);
 
+    internal sealed record EmissionPlan(IReadOnlyList<BuiltDefinition> Extensions, IReadOnlyList<BuiltDefinition> Profiles,
+        ImmutableArray<ProfileRepresentationProof> ProfileDecisions);
+
     internal sealed record BuiltDefinitions(
         IReadOnlyList<BuiltDefinition> Extensions,
         IReadOnlyList<BuiltDefinition> Profiles,
         ProfileRepresentationIndex Representations)
     {
         internal ImmutableArray<ProfileRepresentationProof> ProfileDecisions { get; init; } = [];
+        internal EmissionPlan ForEmission() => new(Extensions, Profiles, ProfileDecisions);
     }
 
     internal ProfileRepresentationIndex Representations => _representations ?? throw new InvalidOperationException("Build definitions before accessing representations.");
@@ -179,28 +183,31 @@ public class StructureFhirExporter
         using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
             new(XVerPreparationKind.Construction, XVer.XVerProcessor._exclusionSet, configuration: _exporter.Configuration));
         operation.PrepareExport(tr.XVerIgs.Select(tracking => tracking.PackagePair));
-        List<(XVerIgExportTrackingRecord Tracking, BuiltDefinitions Definitions)> plans = [];
+        List<(XVerIgExportTrackingRecord Tracking, EmissionPlan Definitions)> plans = [];
         foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
         {
-            plans.Add((igTr, BuildDefinitions(igTr, operation)));
+            plans.Add((igTr, BuildDefinitions(igTr, operation).ForEmission()));
         }
         operation.Audit();
         plans.RemoveAll(plan => !ProfileUseFacts.RequirePersistedDecisions(_db, plan.Tracking.PackagePair,
             operation.ExportDecisions(plan.Tracking.PackagePair.SourcePackageKey, plan.Tracking.PackagePair.TargetPackageKey), operation.Catalog));
         operation.Audit();
-        foreach ((XVerIgExportTrackingRecord tracking, BuiltDefinitions definitions) in plans)
+        foreach ((XVerIgExportTrackingRecord tracking, EmissionPlan definitions) in plans)
         {
             Emit(tracking, definitions, operation);
         }
     }
 
     internal void Emit(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions) =>
-        BuildIndependent(igTr, () => EmitCore(igTr, definitions));
+        BuildIndependent(igTr, () => EmitCore(igTr, definitions.ForEmission()));
 
     internal void Emit(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions, XVerPreparedOperation operation) =>
+        Emit(igTr, definitions.ForEmission(), operation);
+
+    internal void Emit(XVerIgExportTrackingRecord igTr, EmissionPlan definitions, XVerPreparedOperation operation) =>
         InConstructionScope(operation, () => EmitCore(igTr, definitions));
 
-    private bool EmitCore(XVerIgExportTrackingRecord igTr, BuiltDefinitions definitions)
+    private bool EmitCore(XVerIgExportTrackingRecord igTr, EmissionPlan definitions)
     {
         try
         {
@@ -210,11 +217,20 @@ public class StructureFhirExporter
             exportResourceMaps(igTr);
             exportTypeMaps(igTr);
             exportElementMaps(igTr);
+            if (_exporter.ReportOmissions)
+            {
+                DefinitionOmission[] omissions = [.. igTr.OmittedExtensions.Values.Concat(igTr.OmittedProfiles.Values)
+                    .OrderBy(item => item.Kind, StringComparer.Ordinal).ThenBy(item => item.Source, StringComparer.Ordinal)
+                    .ThenBy(item => item.Canonical, StringComparer.Ordinal)];
+                string path = Path.Combine(igTr.IgRootDir!, "xver-omissions.json");
+                File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(new { igTr.PackageId, Omissions = omissions },
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+                _logger.LogInformation("Recorded {Count} omitted definitions in {Path}", omissions.Length, path);
+            }
             return true;
         }
         finally
         {
-            definitions.Representations.ReleasePayloads();
             _profileDecisions.Clear();
         }
     }
@@ -290,7 +306,41 @@ public class StructureFhirExporter
         prepareDefinitions(igTr);
         BuiltDefinitionSet extensions = BuildExtensionsCore(igTr);
         BuiltDefinitionSet profiles = BuildProfilesCore(igTr);
-        return new(extensions.Definitions, profiles.Definitions, profiles.Representations)
+        IReadOnlyList<BuiltDefinition> builtExtensions = extensions.Definitions;
+        IReadOnlyList<BuiltDefinition> builtProfiles = profiles.Definitions;
+        if (_exporter.ReportOmissions)
+        {
+            HashSet<string> omittedUrls = [.. igTr.OmittedExtensions.Values.Concat(igTr.OmittedProfiles.Values)
+                .Select(item => item.Canonical).OfType<string>()];
+            var dependencies = builtExtensions.Select(item => (Item: item, Kind: "Extension", Omitted: igTr.OmittedExtensions))
+                .Concat(builtProfiles.Select(item => (Item: item, Kind: "Profile", Omitted: igTr.OmittedProfiles)))
+                .Select(entry => (entry.Item, entry.Kind, entry.Omitted, References: entry.Item.Definition.Differential.Element
+                    .SelectMany(element => element.Type.SelectMany(type => type.Profile.Concat(type.TargetProfile))
+                        .Append(element.ContentReference)).OfType<string>().Select(url => url.Split('|')[0]).Distinct().ToArray()))
+                .ToArray();
+            bool changed;
+            do
+            {
+                changed = false;
+                foreach (var entry in dependencies)
+                {
+                    if (!entry.Omitted.ContainsKey(entry.Item.OutcomeKey) &&
+                        entry.References.FirstOrDefault(omittedUrls.Contains) is string missing)
+                    {
+                        entry.Omitted.Add(entry.Item.OutcomeKey, new(entry.Kind, entry.Item.SourceId!, entry.Item.Definition.Url,
+                            $"Depends on omitted definition {missing}."));
+                        changed |= omittedUrls.Add(entry.Item.Definition.Url);
+                    }
+                }
+            } while (changed);
+            builtExtensions = [.. builtExtensions.Where(item => !igTr.OmittedExtensions.ContainsKey(item.OutcomeKey))];
+            builtProfiles = [.. builtProfiles.Where(item => !igTr.OmittedProfiles.ContainsKey(item.OutcomeKey))];
+            foreach (List<EdOutcomeMapTargetRecord> targets in igTr.EdOutcomeMapTargets.Values)
+            {
+                targets.RemoveAll(record => omittedUrls.Contains(record.sdCanonical.Split('|')[0]));
+            }
+        }
+        return new(builtExtensions, builtProfiles, profiles.Representations)
         {
             ProfileDecisions = _operation!.ExportDecisions(igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey),
         };
@@ -483,16 +533,17 @@ public class StructureFhirExporter
         DbElement root = _catalog.ResolveRoot(owner);
         string? relative = element is null ? null : element.Id[root.Id.Length..];
         ProfileRepresentationProof? negative = _profileDecisions[(tracking.PackagePair.SourcePackageKey, tracking.PackagePair.TargetPackageKey)]
-            .FirstOrDefault(proof => proof.Input.OwnerKey == owner.Key && !proof.PreservesRestrictions &&
+            .Where(proof => proof.Input.OwnerKey == owner.Key && !proof.PreservesRestrictions &&
                 !(projected ?? []).Any(context => context.Kind == ProfileProofKind.OwnerProjection &&
                     context.Input == proof.Input && context.NativeInput == proof.NativeInput) &&
                 (element is null || proof.Input.ElementKey == element.Key ||
-                    proof.Input.TypeUseToken != -1 && proof.Input.SliceContext.StartsWith(relative + ".", StringComparison.Ordinal)));
+                    proof.Input.TypeUseToken != -1 && proof.Input.SliceContext.StartsWith(relative + ".", StringComparison.Ordinal)))
+            .OrderByDescending(proof => proof.SourceRoot.Canonical == proof.TargetRoot?.Canonical).FirstOrDefault();
         if (negative is not null)
         {
             ProfileRepresentationProof context = (projected ?? []).FirstOrDefault(proof =>
                 proof.Input == negative.Input && proof.NativeInput == negative.NativeInput) ?? negative;
-            throw new InvalidOperationException(
+            throw new UnsupportedDefinitionException(
                 $"Unrepresentable scheduled profile use, pair {tracking.PackagePair.SourcePackageKey}->{tracking.PackagePair.TargetPackageKey}, " +
                 $"owner {owner.VersionedUrl}#{element?.Id ?? root.Id}, alternative {negative.Input.ProfileAlternative}/{negative.Input.TargetProfileAlternative}, " +
                 $"type-use {negative.Input.TypeUseToken}, slice {negative.Input.SliceContext}: {string.Join("; ", context.Diagnostics)}");
@@ -684,7 +735,7 @@ public class StructureFhirExporter
 
         foreach (DbElementOutcome edOutcome in edOutcomes)
         {
-            if (edOutcome.ExtensionDefinitionIsProhibited)
+            if (edOutcome.ExtensionDefinitionIsProhibited || igTr.OmittedExtensions.ContainsKey(edOutcome.Key))
             {
                 if (!groupsByTarget.TryGetValue("", out ConceptMap.GroupComponent? prohibited))
                 {
@@ -1515,8 +1566,17 @@ public class StructureFhirExporter
                     sdOutcome,
                     profileSd);
 
-                IReadOnlyList<ProfileRepresentationProof> projected = ProjectScheduledUses(igTr, sdOutcome, targetSd, profileSd);
-                RequireScheduledUse(igTr, sourceSd, projected: projected);
+                IReadOnlyList<ProfileRepresentationProof> projected = [];
+                try
+                {
+                    projected = ProjectScheduledUses(igTr, sdOutcome, targetSd, profileSd);
+                    RequireScheduledUse(igTr, sourceSd, projected: projected);
+                }
+                catch (UnsupportedDefinitionException exception) when (_exporter.ReportOmissions)
+                {
+                    // Keep the owner in the safety traversal; dependent owners still need its constraints.
+                    igTr.OmittedProfiles[sdOutcome.Key] = new("Profile", sourceSd.Id, profileSd.Url, exception.Message);
+                }
                 string filename = sdOutcome.GenFileName ?? throw new ArgumentNullException(nameof(sdOutcome.GenFileName));
                 definitions.Add(new(filename, profileSd, sdOutcome.Key) { SourceId = sourceSd.Name, Projections = projected });
             }
@@ -1525,7 +1585,9 @@ public class StructureFhirExporter
         UnsafeCodeConstraintEmitter.Attach(
             definitions, Representations,
             UnsafeCodeInputStore.ReadConstraintPlans(_db, igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey, _operation),
-            $"{igTr.PackagePair.SourceFhirSequence.ToRLiteral()}->{igTr.PackagePair.TargetFhirSequence.ToRLiteral()}");
+            $"{igTr.PackagePair.SourceFhirSequence.ToRLiteral()}->{igTr.PackagePair.TargetFhirSequence.ToRLiteral()}",
+            _exporter.ReportOmissions ? (profile, reason) =>
+                igTr.OmittedProfiles.TryAdd(profile.OutcomeKey, new("Profile", profile.SourceId!, profile.Definition.Url, reason)) : null);
         return new(definitions.AsReadOnly(), Representations);
     }
 
@@ -2795,12 +2857,29 @@ public class StructureFhirExporter
                     continue;
                 }
 
-                RequireScheduledUse(igTr, sourceSd, sourceEd);
                 if (edOutcome.ExtensionDefinitionIsProhibited)
                 {
+                    if (_exporter.ReportOmissions)
+                    {
+                        ProfileRepresentationProof? negative = _profileDecisions[(igTr.PackagePair.SourcePackageKey, igTr.PackagePair.TargetPackageKey)]
+                            .Where(proof => proof.Input.ElementKey == sourceEd.Key && !proof.PreservesRestrictions)
+                            .OrderByDescending(proof => proof.SourceRoot.Canonical == proof.TargetRoot?.Canonical).FirstOrDefault();
+                        igTr.OmittedExtensions[edOutcome.Key] = new("Extension", sourceEd.Id, edOutcome.GenUrl,
+                            negative is null ? edOutcome.ExtensionProhibitionReason ?? "Extension prohibited by outcome." :
+                            string.Join("; ", negative.Diagnostics));
+                    }
                     continue;
                 }
 
+                try
+                {
+                    RequireScheduledUse(igTr, sourceSd, sourceEd);
+                }
+                catch (UnsupportedDefinitionException exception) when (_exporter.ReportOmissions)
+                {
+                    igTr.OmittedExtensions[edOutcome.Key] = new("Extension", sourceEd.Id, edOutcome.GenUrl, exception.Message);
+                    continue;
+                }
                 List<StructureDefinition.ContextComponent> contexts = edOutcome.GetCombinedContexts()
                     .Select(c => new StructureDefinition.ContextComponent()
                     {
@@ -2836,7 +2915,7 @@ public class StructureFhirExporter
                 }
 
                 string filename = edOutcome.GenFileName ?? throw new ArgumentNullException(nameof(edOutcome.GenFileName));
-                definitions.Add(new(filename, extSd, edOutcome.Key));
+                definitions.Add(new(filename, extSd, edOutcome.Key) { SourceId = sourceEd.Id });
             }
         }
 
@@ -3152,9 +3231,13 @@ public class StructureFhirExporter
                 contentReferenceExtUrlsByEdKey, edOutcome, sourceSd, sourceEd,
                 dataTypeNameLiteral: dataTypeNameLiteral, generatingForCardinality: generatingForCardinality);
         }
-        catch (UnresolvedProfileException exception)
+        catch (Exception exception) when (exception is UnresolvedProfileException || _exporter.ReportOmissions && exception is UnsupportedDefinitionException)
         {
             _logger.LogWarning("Skipping extension {Url}: {Reason}", extSd.Url, exception.Message);
+            if (_exporter.ReportOmissions)
+            {
+                igTr.OmittedExtensions[edOutcome.Key] = new("Extension", sourceEd.Id, extSd.Url, exception.Message);
+            }
             if (extSd.Url is not null) _representations!.RemoveExtension(extSd.Url);
             generatedExtensionIds.Remove(id);
             return null;
@@ -3175,6 +3258,7 @@ public class StructureFhirExporter
     }
 
     private sealed class UnresolvedProfileException(string message) : Exception(message);
+    private sealed class UnsupportedDefinitionException(string message) : InvalidOperationException(message);
 
     private void addToDifferentialRecursive(
         StructureDefinition extSd,
@@ -3934,7 +4018,7 @@ public class StructureFhirExporter
                         }
                         if (!proof.PreservesRestrictions)
                         {
-                            throw new InvalidOperationException($"Unrepresentable extension value {sourceSd.VersionedUrl}#{input.Id}, " +
+                            throw new UnsupportedDefinitionException($"Unrepresentable extension value {sourceSd.VersionedUrl}#{input.Id}, " +
                                 $"pair {igTr.PackagePair.SourcePackageKey}->{igTr.PackagePair.TargetPackageKey}: {string.Join("; ", proof.Diagnostics)}");
                         }
                         typeName = _catalog.GetDeclaredType(target)!;
@@ -4092,7 +4176,7 @@ public class StructureFhirExporter
                 }
                 if (!proof.PreservesRestrictions)
                 {
-                    throw new InvalidOperationException($"Unrepresentable required profile reference {v}: {string.Join("; ", proof.Diagnostics)}");
+                    throw new UnsupportedDefinitionException($"Unrepresentable required profile reference {v}: {string.Join("; ", proof.Diagnostics)}");
                 }
                 valids.Add(proof.TargetCanonical!);
                 continue;

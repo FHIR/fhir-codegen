@@ -169,24 +169,16 @@ public class ElementComparer
         FhirPackageComparisonPair pair, DbElement source, DbElement? target, int comparisonKey) =>
         _elementTypeComparer.DoTypeComparisons(pair, source, target, comparisonKey, _operation!, _packet!);
 
-    private static bool skipElement(
-        DbElement ed,
-        bool skipFirstElement = true,
-        bool skipIds = true,
-        bool skipExtensions = true,
-        bool skipModifierExtenions = true) =>
-        (skipFirstElement && (ed.ResourceFieldOrder == 0)) ||
-        (skipIds && ((ed.BasePath == "id") || (ed.BasePath == "Element.id") || (ed.BasePath == "Resource.id"))) ||
-        (skipExtensions && ((ed.Name == "extension") || (ed.FullCollatedTypeLiteral == "Extension"))) ||
-        (skipModifierExtenions &&
-            ((ed.Name == "modifierExtension") || (ed.BasePath == "DomainResource.modifierExtension") || (ed.BasePath == "BackboneElement.modifierExtension")));
+    internal static bool IsComparableElement(DbElement ed) =>
+        ed.BasePath is not ("id" or "Element.id" or "Resource.id" or "DomainResource.modifierExtension" or "BackboneElement.modifierExtension") &&
+        ed.Name is not ("extension" or "modifierExtension") && ed.FullCollatedTypeLiteral != "Extension";
 
     internal static DbElement? ResolveUnkeyedTarget(XVerStructureCatalog catalog, DbStructureDefinition owner, string targetId)
     {
         for (int dot = targetId.LastIndexOf('.'); dot >= 0; dot = targetId.LastIndexOf('.'))
         {
             DbElement? candidate = catalog.ResolveOwnedElement(owner, targetId, required: false);
-            if (candidate is not null && !skipElement(candidate, skipFirstElement: false))
+            if (candidate is not null && IsComparableElement(candidate))
             {
                 return candidate;
             }
@@ -225,7 +217,7 @@ public class ElementComparer
         List<DbElement> sourceElements = DbElement.SelectList(
             _db,
             StructureKey: sdTr.SourceStructure.Key)
-            .Where(ed => !skipElement(ed, skipFirstElement: false))
+            .Where(IsComparableElement)
             //.Where(e => e.FullCollatedTypeLiteral?.Equals("Extension", StringComparison.Ordinal) == false)
             //.Where(e => (e.Name.Equals("id", StringComparison.Ordinal) == false) &&
             //    (e.FullCollatedTypeLiteral?.Equals("id", StringComparison.Ordinal) == false))
@@ -235,7 +227,7 @@ public class ElementComparer
         Dictionary<int, DbElement> targetElements = sdTr.TargetStructure is null
             ? []
             : DbElement.SelectList(_db, StructureKey: sdTr.TargetStructure.Key)
-                .Where(ed => !skipElement(ed, skipFirstElement: false))
+                .Where(IsComparableElement)
                 //.Where(e => e.FullCollatedTypeLiteral?.Equals("Extension", StringComparison.Ordinal) == false)
                 //.Where(e => (e.Name.Equals("id", StringComparison.Ordinal) == false) &&
                 //    (e.FullCollatedTypeLiteral?.Equals("id", StringComparison.Ordinal) == false))
@@ -442,7 +434,7 @@ public class ElementComparer
         List<DbElement> sourceElements = DbElement.SelectList(
             _db,
             StructureKey: trackingRecord.SourceStructure.Key)
-            .Where(ed => !skipElement(ed, skipFirstElement: false))
+            .Where(IsComparableElement)
             //.Where(e => e.FullCollatedTypeLiteral?.Equals("Extension", StringComparison.Ordinal) == false)
             //.Where(e => (e.Name.Equals("id", StringComparison.Ordinal) == false) &&
             //    (e.FullCollatedTypeLiteral?.Equals("id", StringComparison.Ordinal) == false))
@@ -480,7 +472,7 @@ public class ElementComparer
         Dictionary<int, DbElement> targetElements = DbElement.SelectList(
             _db,
             StructureKey: targetSd.Key)
-            .Where(ed => !skipElement(ed, skipFirstElement: false))
+            .Where(IsComparableElement)
             //.Where(e => e.FullCollatedTypeLiteral?.Equals("Extension", StringComparison.Ordinal) == false)
             //.Where(e => (e.Name.Equals("id", StringComparison.Ordinal) == false) &&
             //    (e.FullCollatedTypeLiteral?.Equals("id", StringComparison.Ordinal) == false))

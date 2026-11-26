@@ -2691,6 +2691,9 @@ public class UnsafeCodeProfileTests(ITestOutputHelper testOutput)
         RepresentationLocation location = built.Representations.Resolve(outcome.Key, SourcePath("ValueSet.child")).ShouldHaveSingleItem();
         location.Steps.ShouldContain(new ResourceOwnerStep("Child"));
         built.Representations.Occurrences(outcome.Key).ShouldNotContain(occurrence => occurrence.SourcePath.Any(step => step.ElementId == "Reference.external"));
+        RepresentationLocation owner = built.Representations.ResourceOwnerLocations(new HashSet<string> { "Child" })[outcome.Key].ShouldHaveSingleItem();
+        owner.SourceType.ShouldBe("Child");
+        owner.Steps.ShouldBe(location.Steps);
     }
 
     [Theory]

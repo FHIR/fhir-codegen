@@ -962,7 +962,64 @@ internal sealed class ProfileRepresentationIndex
         }
     }
 
-    private IEnumerable<RepresentationOccurrence> EnumerateOccurrences(int outcomeKey)
+    internal ILookup<int, RepresentationLocation> ResourceOwnerLocations(IReadOnlySet<string> ownerTypes)
+    {
+        BeginQuery();
+        try
+        {
+            HashSet<int> owners = [.. _profiles.Values.Select(profile => profile.Outcome.SourceStructureKey)];
+            HashSet<int> roots = [.. _elements.Values.Where(element => element.FhirPackageKey == _sourcePackageKey &&
+                !element.Id.Contains('.') && owners.Contains(element.StructureKey))
+                .Select(element => element.Key)];
+            Dictionary<int, HashSet<int>> predecessors = [];
+            HashSet<int> endpoints = [];
+            HashSet<int> visited = [];
+            Stack<int> pending = new(roots);
+            while (pending.TryPop(out int key))
+            {
+                DbElement source = _elements[key];
+                if (!visited.Add(key) || !_profileFacts!.Permits(source)) continue;
+                if (ownerTypes.Contains(source.DistinctTypeLiterals) ||
+                    Types(source).Any(type => ownerTypes.Contains(type.TypeName ?? type.Literal)))
+                {
+                    endpoints.Add(key);
+                }
+                if (!roots.Contains(key) && IsResource(source)) continue;
+                foreach ((DbElement child, _, _, _) in Children(source))
+                {
+                    if (!predecessors.TryGetValue(child.Key, out HashSet<int>? parents))
+                        predecessors.Add(child.Key, parents = []);
+                    parents.Add(key);
+                    pending.Push(child.Key);
+                }
+            }
+
+            HashSet<int> relevant = [.. endpoints];
+            pending = new(endpoints);
+            while (pending.TryPop(out int key))
+            {
+                if (!predecessors.TryGetValue(key, out HashSet<int>? parents)) continue;
+                foreach (int parent in parents)
+                    if (relevant.Add(parent)) pending.Push(parent);
+            }
+            // An extension projection can supply its own source type rather than the occurrence's
+            // declared type. Keep the full traversal for that case.
+            bool extensionOwners = _extensions.Values.Any(HasOwnerValue);
+            return _profiles.Keys.SelectMany(key => EnumerateOccurrences(key, extensionOwners ? null : relevant, extensionOwners ? null : endpoints)
+                .SelectMany(occurrence => occurrence.Locations).Where(location => location.SourceType is not null &&
+                    ownerTypes.Contains(location.SourceType)).Select(location => (key, location)))
+                .ToLookup(item => item.key, item => item.location);
+
+            bool HasOwnerValue(RelativeExtensionNode node) => node.ValueTypes.Any(type => ownerTypes.Contains(type.SourceType)) ||
+                node.Children.Any(HasOwnerValue);
+        }
+        finally
+        {
+            EndQuery();
+        }
+    }
+
+    private IEnumerable<RepresentationOccurrence> EnumerateOccurrences(int outcomeKey, HashSet<int>? relevant = null, HashSet<int>? endpoints = null)
     {
         if (!_profiles.TryGetValue(outcomeKey, out (DbStructureOutcome Outcome, DbElement Target) profile))
         {
@@ -980,13 +1037,14 @@ internal sealed class ProfileRepresentationIndex
         IEnumerable<RepresentationOccurrence> Walk(DbElement source, ImmutableArray<UnsafeCodePathStep> prefix,
             HashSet<(int, int, string)> edges, string? typeName, bool contentReference)
         {
-            if (!_profileFacts!.Permits(source))
+            if (relevant is not null && !relevant.Contains(source.Key) || !_profileFacts!.Permits(source))
             {
                 yield break;
             }
 
             ImmutableArray<UnsafeCodePathStep> path = prefix.Add(new(source.Id, typeName, contentReference));
-            yield return new(path, Resolve(outcomeKey, path));
+            if (endpoints is null || endpoints.Contains(source.Key))
+                yield return new(path, Resolve(outcomeKey, path));
             if (prefix.Length > 0 && IsResource(source))
             {
                 yield break;

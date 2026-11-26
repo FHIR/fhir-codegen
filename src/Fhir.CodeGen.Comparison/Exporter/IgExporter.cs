@@ -37,6 +37,8 @@ public class IgExporter
     public record struct EdOutcomeMapTargetRecord(
         string sdCanonical, string elementPath);
 
+    internal sealed record DefinitionOmission(string Kind, string Source, string? Canonical, string Reason);
+
     public class XVerIgExportTrackingRecord
     {
         public required FhirPackageComparisonPair PackagePair { get; set; }
@@ -66,6 +68,8 @@ public class IgExporter
         public List<XVerIgFileRecord> ExtensionFiles { get; set; } = [];
 
         public Dictionary<int, List<EdOutcomeMapTargetRecord>> EdOutcomeMapTargets { get; set;} = [];
+        internal Dictionary<int, DefinitionOmission> OmittedExtensions { get; } = [];
+        internal Dictionary<int, DefinitionOmission> OmittedProfiles { get; } = [];
 
         public string? ProfileDir { get; set; } = null;
         public List<XVerIgFileRecord> ProfileFiles { get; set; } = [];

@@ -38,10 +38,7 @@ internal sealed record XVerOperationOptions
         ProcessVocabulary = processVocabulary;
         IncludeIgScripts = includeIgScripts;
         IncludeStructurePages = includeStructurePages;
-        Construction = configuration is null ? null : new(
-            configuration.OutputDirectory, configuration.CrossVersionMapSourcePath, configuration.XverArtifactVersion,
-            configuration.ExportR2, configuration.ExportR3, configuration.ExportR4, configuration.ExportR4B,
-            configuration.ExportR5, configuration.ExportR6);
+        Construction = configuration is null ? null : XVerConstructionConfiguration.Capture(configuration);
     }
 
     internal XVerPreparationKind Kind { get; }
@@ -73,12 +70,13 @@ internal sealed record XVerConstructionConfiguration(
     bool ExportR4,
     bool ExportR4B,
     bool ExportR5,
-    bool ExportR6)
+    bool ExportR6,
+    bool ReportOmissions)
 {
     internal static XVerConstructionConfiguration Capture(ConfigXVer configuration) => new(
         configuration.OutputDirectory, configuration.CrossVersionMapSourcePath, configuration.XverArtifactVersion,
         configuration.ExportR2, configuration.ExportR3, configuration.ExportR4, configuration.ExportR4B,
-        configuration.ExportR5, configuration.ExportR6);
+        configuration.ExportR5, configuration.ExportR6, configuration.ReportOmissions);
 }
 
 internal enum XVerProfileInterpretation

@@ -256,8 +256,9 @@ Only exact contributing annotation keys are selected through the original
 input snapshot, positional group/source/target provenance, owner and actual
 mapping-edge association. Passive annotations remain evidence without becoming
 authority; an applicable ambiguous/unresolved authority fails rather than bleeding
-across shared element IDs. Transitive contexts retain only contributing owners
-and edges, with primary authority before fallback.
+across shared element IDs. A mapping key cannot authorize an annotation whose
+authored endpoints disagree with its retained owner record. Transitive contexts
+retain only contributing owners and edges, with primary authority before fallback.
 
 An element map may name a descendant that has no row in the target snapshot
 (for example, R3 `ClaimResponse.item.detail.adjudication.category` below a
@@ -267,6 +268,15 @@ cannot supply the descendant's annotation or target binding, and a transitive
 chain with only such a link at any step cannot carry annotations. Independent
 source-code rules still apply. A different target key, owner, or unrelated
 path remains a provenance error.
+
+A comparison can also retain its authored map key but have **no** target
+element. For example, the R3→R4 map names `Resource.id`, but the R4 element
+is excluded by the comparison's base-path filter. This is a source-only
+context, not an authored `noMap` or authority for a target annotation.
+For a keyed target the package, owner, key and ID must identify an excluded
+element. For an unkeyed descendant the same lookup used by comparison must
+find no comparable element or ancestor. Dropping an eligible target is still
+a provenance error.
 
 Profile-use traversal resolves a FHIRPath storage type through its validated
 FHIR primitive declaration. For example, `System.String` with a FHIR type of

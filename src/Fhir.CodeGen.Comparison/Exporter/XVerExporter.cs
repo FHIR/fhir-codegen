@@ -41,6 +41,7 @@ public class XVerExporter
 
     internal string _crossDefinitionVersion;
     internal readonly DateTimeOffset _runTime = DateTimeOffset.UtcNow;
+    internal bool ReportOmissions => _config.ReportOmissions;
 
     internal VersionSpecificExtensionBehaviorCodes _versionSpecificExtBehavior = VersionSpecificExtensionBehaviorCodes.ShortVersion;
     internal VersionSpecificExportCodes _versionSpecificExport = VersionSpecificExportCodes.TargetVersion;
@@ -97,6 +98,7 @@ public class XVerExporter
             IReadOnlyList<FhirPackageComparisonPair> verified = UnsafeCodeInputStore.RequireExportReady(_db, schedule.PackagePairs, operation);
             if (verified.Count != schedule.PackagePairs.Count)
             {
+                if (ReportOmissions) throw new InvalidOperationException("Cannot export WIP IGs with missing or stale profile decisions.");
                 if (verified.Count == 0) return;
                 schedule = schedule with { PackagePairs = verified, ValidationPackages = [.. schedule.ValidationPackages.Where(
                     package => verified.Any(pair => pair.TargetPackageKey == package.Key))] };
@@ -107,14 +109,14 @@ public class XVerExporter
         VocabularyFhirExporter vocabularyExporter = new(this, _db, _loggerFactory);
         IReadOnlyList<VocabularyFhirExporter.BuiltFile> vocabulary = processVocabulary ? vocabularyExporter.Build(tr) : [];
         StructureFhirExporter? structureExporter = null;
-        List<(IgExporter.XVerIgExportTrackingRecord Tracking, StructureFhirExporter.BuiltDefinitions Definitions)> structures = [];
+        List<(IgExporter.XVerIgExportTrackingRecord Tracking, StructureFhirExporter.EmissionPlan Definitions)> structures = [];
         StructurePageExporter? structurePageExporter = null;
         if (processStructures)
         {
             structureExporter = new(this, _db, _loggerFactory);
             foreach (IgExporter.XVerIgExportTrackingRecord igTr in tr.XVerIgs)
             {
-                structures.Add((igTr, structureExporter.BuildDefinitions(igTr, operation)));
+                structures.Add((igTr, structureExporter.BuildDefinitions(igTr, operation).ForEmission()));
             }
             structurePageExporter = new(this, _db, _loggerFactory, operation);
         }
@@ -123,6 +125,7 @@ public class XVerExporter
         if (processStructures && audited.Count != schedule.PackagePairs.Count)
         {
             // The schedule changed after construction; do not publish its stale artifacts.
+            if (ReportOmissions) throw new InvalidOperationException("WIP export inputs changed during construction.");
             return;
         }
         igExporter.MaterializeXVerIgs(tr, includeIgScripts);
@@ -142,7 +145,7 @@ public class XVerExporter
         // export structures (if requested)
         if (structureExporter is not null)
         {
-            foreach ((IgExporter.XVerIgExportTrackingRecord igTr, StructureFhirExporter.BuiltDefinitions definitions) in structures)
+            foreach ((IgExporter.XVerIgExportTrackingRecord igTr, StructureFhirExporter.EmissionPlan definitions) in structures)
             {
                 structureExporter.Emit(igTr, definitions, operation);
             }

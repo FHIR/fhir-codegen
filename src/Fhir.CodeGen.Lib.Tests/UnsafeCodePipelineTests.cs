@@ -153,6 +153,7 @@ public class UnsafeCodePipelineTests
             }
         }
         fixture.AddOutcome(pair, fixture.Structure(pair.SourcePackage), fixture.Structure(pair.TargetPackage));
+        fixture.AddRepresentationOutcome(pair, source!, "ValueSet");
         fixture.CompleteAuthoredArrangement(pair);
         fixture.GenerateSafety(pair);
         fixture.ReopenPersistedDatabase();
@@ -171,6 +172,22 @@ public class UnsafeCodePipelineTests
             restriction.Kind == ProfileRestrictionKind.Fixed).Select(restriction => restriction.Value.GetString()))
             .Order().ShouldBe(["b", "c"]);
         DbUnsafeCodeTrigger.SelectList(fixture.Connection).ShouldBeEmpty();
+        outcome.RequiresExtensionDefinition.ShouldBeTrue();
+        outcome.ExtensionDefinitionIsProhibited.ShouldBeTrue();
+        ConfigXVer config = ExportConfig(fixture, 0, "prohibited-choice");
+        StructureFhirExporter structures = new(new XVerExporter(fixture.Connection, config), fixture.Connection, NullLoggerFactory.Instance);
+        structures.BuildExtensions(new() { PackagePair = pair, PackageId = "hl7.fhir.uv.xver-r5.r4" })
+            .Definitions.ShouldNotContain(item => item.OutcomeKey == outcome.Key);
+        DbOutcomeClasses.CreateTables(fixture.Connection, forStructures: false);
+        config.ReportOmissions = true;
+        new XVerExporter(fixture.Connection, config).Export(
+            includeIgScripts: false, processVocabulary: false, specificPairs: [pair.SequencePair]);
+        string ig = Path.Combine(config.OutputDirectory, "hl7.fhir.uv.xver-r5.r4");
+        JsonArray omissions = JsonNode.Parse(File.ReadAllText(Path.Combine(ig, "xver-omissions.json")))!["Omissions"]!.AsArray();
+        omissions.ShouldContain(item => (string?)item!["Kind"] == "Extension" && (string?)item["Source"] == source.Id);
+        omissions.ShouldContain(item => (string?)item!["Kind"] == "Profile" && (string?)item["Source"] == "ValueSet");
+        Directory.GetFiles(ig, "StructureDefinition-*.json", SearchOption.AllDirectories).ShouldBeEmpty();
+        Directory.GetFiles(ig, "*resource-map*.json", SearchOption.AllDirectories).ShouldNotBeEmpty();
     }
 
     [Fact]

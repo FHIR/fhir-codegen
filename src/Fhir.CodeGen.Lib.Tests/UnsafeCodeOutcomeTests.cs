@@ -926,6 +926,60 @@ public class UnsafeCodeOutcomeTests
     }
 
     [Theory]
+    [InlineData("Element.id", null, true)]
+    [InlineData("Resource.id", null, true)]
+    [InlineData(null, "ValueSet.absent.child", true)]
+    [InlineData(null, null, false)]
+    [InlineData(null, "ValueSet.op.child", false)]
+    [InlineData(null, "Other.absent.child", false)]
+    public void OmittedAuthoredTargetRequiresNoComparableDestination(string? basePath, string? unkeyedTargetId, bool valid)
+    {
+        using UnsafeCodeTestFixture fixture = new();
+        FhirPackageComparisonPair pair = fixture.PreparePair();
+        (DbStructureOutcome outcome, DbElement source, DbElement target) = BoundElements(fixture, pair);
+        target.BasePath = basePath;
+        DbElement.Update(fixture.Connection, target);
+        fixture.Connect(pair, outcome, source, target);
+        if (unkeyedTargetId is null)
+        {
+            fixture.AddAnnotation(pair, source, target);
+            fixture.AddEvidence(pair);
+        }
+        else
+        {
+            DbElementMapping mapping = DbElementMapping.SelectList(fixture.Connection).ShouldHaveSingleItem();
+            mapping.TargetElementKey = null;
+            mapping.TargetElementId = unkeyedTargetId;
+            DbElementMapping.Update(fixture.Connection, mapping);
+        }
+        DbElementComparison comparison = DbElementComparison.SelectList(fixture.Connection).ShouldHaveSingleItem();
+        comparison.NotMapped = true;
+        comparison.TargetElementKey = null;
+        comparison.TargetElementId = null;
+        DbElementComparison.Update(fixture.Connection, comparison);
+        DbElementOutcomeTarget edge = DbElementOutcomeTarget.SelectList(fixture.Connection).ShouldHaveSingleItem();
+        edge.TargetElementKey = null;
+        edge.TargetElementId = null;
+        DbElementOutcomeTarget.Update(fixture.Connection, edge);
+        fixture.AddRule();
+        fixture.CompleteAuthoredArrangement(pair);
+
+        if (!valid)
+        {
+            Should.Throw<InvalidOperationException>(() => Generate(fixture, pair)).Message.ShouldContain("provenance");
+            fixture.PairState(pair).OutcomeComparisonRevision.ShouldBeNull();
+            return;
+        }
+        Generate(fixture, pair);
+        DbUnsafeCodeTrigger trigger = Triggers(fixture).ShouldHaveSingleItem();
+        trigger.SourceElementId.ShouldBe(source.Id);
+        trigger.TargetElementId.ShouldBeEmpty();
+        JsonSerializer.Deserialize<int[]>(trigger.AnnotationKeysJson)!.ShouldBeEmpty();
+        JsonSerializer.Deserialize<int[]>(trigger.RuleKeysJson)!.ShouldHaveSingleItem();
+        AssertCompleted(fixture, pair);
+    }
+
+    [Theory]
     [InlineData("no-annotation")]
     [InlineData("no-evidence")]
     [InlineData("inferred-no-map")]

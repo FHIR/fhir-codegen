@@ -593,6 +593,7 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db, ILogger? logg
                         linkedAnnotations.Contains(row.Key))))
                 {
                     DbProfileMapOwnerFacts[] owners = [.. _annotationOwners.Where(owner => owner.AnnotationKey == row.Key &&
+                        owner.SourceElementId == row.SourceElementId && owner.TargetElementId == row.TargetElementId &&
                         (owner.SourceStructureKey is null || owner.SourceStructureKey == authority.Source.StructureKey) &&
                         (owner.TargetStructureKey is null || owner.TargetStructureKey == authority.Target?.StructureKey))];
                     if (!_annotationOwners.Any(owner => owner.AnnotationKey == row.Key) ||
@@ -785,20 +786,41 @@ internal sealed class UnsafeCodeOutcomeGenerator(IDbConnection db, ILogger? logg
                 mapping.SourceFhirPackageKey == comparison.SourceFhirPackageKey && mapping.TargetFhirPackageKey == comparison.TargetFhirPackageKey &&
                 mapping.SourceStructureKey == comparison.SourceStructureKey && mapping.TargetStructureKey == comparison.TargetStructureKey &&
                 mapping.SourceElementId == comparison.SourceElementId &&
-                (mapping.SourceElementKey is null || mapping.SourceElementKey == comparison.SourceElementKey) &&
-                (mapping.TargetElementKey is null || mapping.TargetElementKey == comparison.TargetElementKey))
+                (mapping.SourceElementKey is null || mapping.SourceElementKey == comparison.SourceElementKey))
             {
-                if (mapping.TargetElementId == comparison.TargetElementId) return true;
-                // ElementComparer can compare to an ancestor when the authored descendant has no row.
-                if (!mapping.ExplicitNoMap && mapping.TargetElementKey is null && comparison.TargetElementId is string ancestor &&
-                    mapping.TargetElementId is string descendant && descendant.StartsWith(ancestor + ".", StringComparison.Ordinal) &&
-                    comparison.TargetStructureKey is int owner && comparison.TargetElementKey is int key &&
-                    ElementComparer.ResolveUnkeyedTarget(_catalog, _catalog.GetStructure(owner), descendant)?.Key == key)
+                if (mapping.TargetElementId == comparison.TargetElementId &&
+                    (mapping.TargetElementKey is null || mapping.TargetElementKey == comparison.TargetElementKey))
+                {
+                    return true;
+                }
+                if (!mapping.ExplicitNoMap && mapping.TargetElementId is string authoredId && comparison.TargetStructureKey is int owner &&
+                    MatchesInexactTarget(comparison, owner, mapping.TargetElementKey, authoredId))
                 {
                     return false;
                 }
             }
             throw new InvalidOperationException($"Unsafe-code comparison provenance is inconsistent for {comparison.SourceElementId}->{comparison.TargetElementId}, mapping {mappingKey}, pair {comparison.SourceFhirPackageKey}->{comparison.TargetFhirPackageKey}. Rerun comparisons and outcomes.");
+        }
+
+        private bool MatchesInexactTarget(DbElementComparison comparison, int owner, int? authoredKey, string authoredId)
+        {
+            bool absent = comparison.NotMapped && comparison.TargetElementKey is null && comparison.TargetElementId is null;
+            if (authoredKey is int key)
+            {
+                // The comparer filters keyed targets but never substitutes an ancestor for one.
+                return absent && _allElements.TryGetValue(key, out DbElement? element) &&
+                    element.FhirPackageKey == comparison.TargetFhirPackageKey && element.StructureKey == owner &&
+                    element.Id == authoredId && !ElementComparer.IsComparableElement(element);
+            }
+
+            DbStructureDefinition structure = _catalog.GetStructure(owner);
+            DbElement? resolved = ElementComparer.ResolveUnkeyedTarget(_catalog, structure, authoredId);
+            if (resolved is null)
+            {
+                return absent && authoredId.StartsWith(_catalog.ResolveRoot(structure).Id + ".", StringComparison.Ordinal);
+            }
+            return !comparison.NotMapped && resolved.Key == comparison.TargetElementKey &&
+                resolved.Id == comparison.TargetElementId && authoredId.StartsWith(resolved.Id + ".", StringComparison.Ordinal);
         }
 
         internal bool IsResource(int key)
