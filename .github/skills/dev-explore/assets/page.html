@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en" data-palette="green" data-theme-key="{TBD: unique site key}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{TBD: document description}">
+  <meta name="referrer" content="no-referrer">
+  <title>{TBD: document title}</title>
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <aside class="sidebar" aria-label="Documentation navigation">
+    <a class="brand" href="#main">
+      <span class="brand-mark" aria-hidden="true">e</span>
+      <span><strong>{TBD: short title}</strong><small>Exploration</small></span>
+    </a>
+    <p class="rail-label">In this document</p>
+    <nav class="nav" aria-label="Sections">
+      <a href="#summary">Overview</a>
+      <a href="#findings">Findings</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#limitations">Limitations</a>
+      <a href="#sources">Sources</a>
+    </nav>
+    <p class="sidebar-note">Questions first.<br>Evidence alongside answers.</p>
+  </aside>
+
+  <div class="shell">
+    <header class="topbar">
+      <span class="eyebrow">Research briefing</span>
+      <div class="theme-control" id="theme-control" hidden>
+        <label for="theme-choice">Appearance</label>
+        <select id="theme-choice">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+    </header>
+    <p class="theme-status" id="theme-status" role="status" hidden></p>
+    <noscript>
+      <p class="notice">
+        Appearance follows your system preference. Enable scripting to
+        choose light or dark manually; all documentation remains readable.
+      </p>
+    </noscript>
+
+    <main id="main" tabindex="-1">
+      <section class="hero" id="summary" aria-labelledby="document-title">
+        <div>
+          <p class="eyebrow">{TBD: audience and scope}</p>
+          <h1 id="document-title">
+            {TBD: document title}<br>
+            <em>{TBD: short supporting line}</em>
+          </h1>
+          <p>{TBD: concise answer to the central question}</p>
+          <a class="button" href="#findings">Read the findings</a>
+        </div>
+        <div class="hero-aside">
+          <span class="eyebrow">The question</span>
+          <p>{TBD: the question this document answers}</p>
+          <small>{TBD: source snapshot or retrieval date}</small>
+        </div>
+      </section>
+
+      <section class="section" id="findings" aria-labelledby="findings-title">
+        <div class="section-heading">
+          <p class="eyebrow">Start here</p>
+          <h2 id="findings-title">What the evidence supports</h2>
+          <p>{TBD: introduction to the findings}</p>
+        </div>
+        <div class="card-grid">
+          <article class="card">
+            <span class="badge">Observed</span>
+            <h3>{TBD: finding heading}</h3>
+            <p>{TBD: supported finding, with a citation}</p>
+            <a href="#source-1">Source 1</a>
+          </article>
+          <article class="card">
+            <span class="badge">Interpretation</span>
+            <h3>{TBD: inference heading}</h3>
+            <p>{TBD: inference and its limits, distinguished from fact}</p>
+            <a href="#source-1">Supporting evidence</a>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="evidence" aria-labelledby="evidence-title">
+        <div class="section-heading">
+          <p class="eyebrow">Show the reasoning</p>
+          <h2 id="evidence-title">Evidence in context</h2>
+        </div>
+        <article class="card prose">
+          <h3>{TBD: explanation heading}</h3>
+          <p>{TBD: explanation with inline source references}</p>
+          <div class="table-scroll" role="region" aria-label="Evidence table"
+               tabindex="0">
+            <table>
+              <caption>{TBD: what this table establishes}</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Question</th>
+                  <th scope="col">Answer</th>
+                  <th scope="col">Evidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">{TBD: question}</th>
+                  <td>{TBD: supported answer}</td>
+                  <td><a href="#source-1">Source 1</a></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="section" id="limitations"
+               aria-labelledby="limitations-title">
+        <h2 id="limitations-title">Scope and limitations</h2>
+        <div class="notice warning">
+          <strong>What remains uncertain</strong>
+          <p>{TBD: unanswered questions and evidence limitations}</p>
+        </div>
+      </section>
+
+      <section class="section" id="sources" aria-labelledby="sources-title">
+        <h2 id="sources-title">Sources and provenance</h2>
+        <ol class="sources">
+          <li id="source-1">
+            {TBD: source title, safe link or repo-relative path, location,
+            revision or retrieval date, and what it supports}
+          </li>
+        </ol>
+      </section>
+    </main>
+    <footer>
+      <p>{TBD: scope and freshness note}. Facts and interpretations are
+        distinguished throughout.</p>
+    </footer>
+  </div>
+</body>
+</html>

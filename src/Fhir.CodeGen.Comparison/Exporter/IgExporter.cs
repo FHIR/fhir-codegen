@@ -19,12 +19,15 @@ using Hl7.Fhir.Serialization;
 using Hl7.Fhir.Utility;
 using Microsoft.Extensions.Logging;
 using Octokit;
-using static Fhir.CodeGen.Packages.Models.PackageIndex;
 
 namespace Fhir.CodeGen.Comparison.Exporter;
 
 public class IgExporter
 {
+    internal sealed record ExportSchedule(
+        IReadOnlyList<FhirPackageComparisonPair> PackagePairs,
+        IReadOnlyList<DbFhirPackage> ValidationPackages);
+
     public class XVerExportTrackingRecord
     {
         public List<XVerIgExportTrackingRecord> XVerIgs { get; set; } = [];
@@ -33,6 +36,8 @@ public class IgExporter
 
     public record struct EdOutcomeMapTargetRecord(
         string sdCanonical, string elementPath);
+
+    internal sealed record DefinitionOmission(string Kind, string Source, string? Canonical, string Reason);
 
     public class XVerIgExportTrackingRecord
     {
@@ -63,6 +68,8 @@ public class IgExporter
         public List<XVerIgFileRecord> ExtensionFiles { get; set; } = [];
 
         public Dictionary<int, List<EdOutcomeMapTargetRecord>> EdOutcomeMapTargets { get; set;} = [];
+        internal Dictionary<int, DefinitionOmission> OmittedExtensions { get; } = [];
+        internal Dictionary<int, DefinitionOmission> OmittedProfiles { get; } = [];
 
         public string? ProfileDir { get; set; } = null;
         public List<XVerIgFileRecord> ProfileFiles { get; set; } = [];
@@ -429,8 +436,6 @@ public class IgExporter
     private ILoggerFactory _loggerFactory;
     private ILogger _logger;
 
-    private List<DbFhirPackage> _packages = [];
-
     private string _outputPath;
     private string? _crossVersionSourcePath;
 
@@ -453,10 +458,6 @@ public class IgExporter
 
         _crossVersionSourcePath = crossVersionSourcePath;
         _outputPath = outputPath;
-        if (!Directory.Exists(_outputPath))
-        {
-            Directory.CreateDirectory(_outputPath);
-        }
 
         _exporter = exporter;
 
@@ -613,23 +614,26 @@ public class IgExporter
     public XVerExportTrackingRecord CreateInitialXVerIgs(
         bool includeScripts = true,
         int? maxStepSize = null,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null) =>
+        CreateInitialXVerIgs(BuildExportSchedule(maxStepSize, specificPairs), includeScripts);
+
+    internal ExportSchedule BuildExportSchedule(
+        int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
-        XVerExportTrackingRecord tr = new();
-        
         // get the list of packages
-        _packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
+        List<DbFhirPackage> packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
 
         List<FhirPackageComparisonPair> packagePairs = [];
-        maxStepSize ??= _packages.Count - 1;
+        maxStepSize ??= packages.Count - 1;
 
         // we want to process closer versions first, so we do a stepped approach
         for (int stepSize = 1; stepSize <= maxStepSize; stepSize++)
         {
-            for (int i = 0; i < _packages.Count - stepSize; i++)
+            for (int i = 0; i < packages.Count - stepSize; i++)
             {
-                DbFhirPackage sourcePackage = _packages[i];
-                DbFhirPackage targetPackage = _packages[i + stepSize];
+                DbFhirPackage sourcePackage = packages[i];
+                DbFhirPackage targetPackage = packages[i + stepSize];
 
                 if (_allowedExportVersions.Contains(targetPackage.DefinitionFhirSequence) &&
                     ((specificPairs is null) ||
@@ -647,12 +651,6 @@ public class IgExporter
             }
         }
 
-        // iterate over our pairs in the order we built them
-        foreach (FhirPackageComparisonPair packagePair in packagePairs)
-        {
-            tr.XVerIgs.Add(createInitialXVerIg(packagePair, includeScripts));
-        }
-
         HashSet<FhirReleases.FhirSequenceCodes>? targetFhirVersions = null;
         if (specificPairs is not null)
         {
@@ -666,8 +664,8 @@ public class IgExporter
             }
         }
 
-        // iterate over our packages for validation Igs
-        foreach (DbFhirPackage package in _packages)
+        List<DbFhirPackage> validationPackages = [];
+        foreach (DbFhirPackage package in packages)
         {
             if ((targetFhirVersions is not null) &&
                 !targetFhirVersions.Contains(package.DefinitionFhirSequence))
@@ -680,10 +678,67 @@ public class IgExporter
                 continue;
             }
 
-            tr.ValidationIgs.Add(createInitialValidationIg(package, includeScripts));
+            validationPackages.Add(package);
+        }
+
+        return new(packagePairs.AsReadOnly(), validationPackages.AsReadOnly());
+    }
+
+    internal XVerExportTrackingRecord CreateInitialXVerIgs(ExportSchedule schedule, bool includeScripts = true)
+    {
+        XVerExportTrackingRecord tr = PrepareXVerIgs(schedule);
+        MaterializeXVerIgs(tr, includeScripts);
+        return tr;
+    }
+
+    internal XVerExportTrackingRecord PrepareXVerIgs(ExportSchedule schedule)
+    {
+        XVerExportTrackingRecord tr = new();
+        foreach (FhirPackageComparisonPair packagePair in schedule.PackagePairs)
+        {
+            tr.XVerIgs.Add(prepareXVerIg(packagePair));
+        }
+
+        foreach (DbFhirPackage package in schedule.ValidationPackages)
+        {
+            tr.ValidationIgs.Add(prepareValidationIg(package));
         }
 
         return tr;
+    }
+
+    internal void MaterializeXVerIgs(XVerExportTrackingRecord tr, bool includeScripts = true)
+    {
+        Directory.CreateDirectory(_outputPath);
+        foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
+        {
+            createXVerIgDirectories(igTr);
+            igTr.XVerSourcePageContentFiles = copyIgSourceContent(igTr.InputDir!, igTr.PageContentDir!);
+            if (includeScripts)
+            {
+                writeScriptFiles(igTr.IgRootDir!);
+            }
+
+            if (!string.IsNullOrEmpty(_crossVersionSourcePath))
+            {
+                string sourceFile = Path.Combine(_crossVersionSourcePath, "input", "ig-support", "gitignore.txt");
+                string targetFile = Path.Combine(igTr.IgRootDir!, ".gitignore");
+                if (File.Exists(sourceFile) && !File.Exists(targetFile))
+                {
+                    File.Copy(sourceFile, targetFile);
+                }
+            }
+        }
+
+        foreach (ValidationIgExportTrackingRecord vTr in tr.ValidationIgs)
+        {
+            createValidationIgDirectories(vTr);
+            vTr.XVerSourcePageContentFiles = copyIgSourceContent(vTr.InputDir!, vTr.PageContentDir!);
+            if (includeScripts)
+            {
+                writeScriptFiles(vTr.IgRootDir!);
+            }
+        }
     }
 
     public void FinalizeXVerIgs(XVerExportTrackingRecord tr)
@@ -1831,9 +1886,7 @@ public class IgExporter
     private static string getValidationPackageId(DbFhirPackage package) =>
         $"hl7.fhir.uv.xver.{package.ShortName.ToLowerInvariant()}";
 
-    private XVerIgExportTrackingRecord createInitialXVerIg(
-        FhirPackageComparisonPair packagePair,
-        bool includeScripts = true)
+    private XVerIgExportTrackingRecord prepareXVerIg(FhirPackageComparisonPair packagePair)
     {
         string packageId = getXVerPackageId(packagePair);
 
@@ -1859,36 +1912,21 @@ public class IgExporter
             Description = $"Extensions for Using Data Elements from FHIR {igTr.PackagePair.SourceFhirSequence} in FHIR {igTr.PackagePair.TargetFhirSequence}",
         };
 
-        _logger.LogInformation($"Creating XVer IG Directories, output path: {_outputPath}...");
-
-        createXVerIgDirectories(igTr);
-        igTr.XVerSourcePageContentFiles = copyIgSourceContent(igTr.InputDir!, igTr.PageContentDir!);
-
-        if (includeScripts &&
-            (igTr.IgRootDir is not null))
-        {
-            writeScriptFiles(igTr.IgRootDir);
-        }
-
-        // write a .gitignore file if there is not one there already
-        if (!string.IsNullOrEmpty(_crossVersionSourcePath) &&
-            (igTr.IgRootDir is not null))
-        {
-            string sourceFile = Path.Combine(_crossVersionSourcePath, "input", "ig-support", "gitignore.txt");
-            string targetFile = Path.Combine(igTr.IgRootDir, ".gitignore");
-            if (File.Exists(sourceFile) &&
-                !File.Exists(targetFile))
-            {
-                File.Copy(sourceFile, targetFile);
-            }
-        }
+        igTr.IgRootDir = Path.Combine(_outputPath, igTr.PackageId);
+        igTr.InputDir = Path.Combine(igTr.IgRootDir, "input");
+        igTr.IncludesDir = Path.Combine(igTr.InputDir, "includes");
+        igTr.PageContentDir = Path.Combine(igTr.InputDir, "pagecontent");
+        igTr.VocabularyDir = Path.Combine(igTr.InputDir, "vocabulary");
+        igTr.VocabMapDir = igTr.VocabularyDir;
+        igTr.ExtensionDir = Path.Combine(igTr.InputDir, "resources");
+        igTr.ProfileDir = igTr.ExtensionDir;
+        igTr.ResourceMapDir = igTr.ExtensionDir;
+        igTr.ElementMapDir = igTr.ExtensionDir;
 
         return igTr;
     }
 
-    private ValidationIgExportTrackingRecord createInitialValidationIg(
-        DbFhirPackage package,
-        bool includeScripts = true)
+    private ValidationIgExportTrackingRecord prepareValidationIg(DbFhirPackage package)
     {
         string packageId = getValidationPackageId(package);
 
@@ -1911,14 +1949,10 @@ public class IgExporter
             Description = $"Extensions for Using Data Elements from any FHIR version in FHIR {package.DefinitionFhirSequence}",
         };
 
-        createValidationIgDirectories(vTr);
-        vTr.XVerSourcePageContentFiles = copyIgSourceContent(vTr.InputDir!, vTr.PageContentDir!);
-
-        if (includeScripts &&
-            (vTr.IgRootDir is not null))
-        {
-            writeScriptFiles(vTr.IgRootDir);
-        }
+        vTr.IgRootDir = Path.Combine(_outputPath, vTr.PackageId);
+        vTr.InputDir = Path.Combine(vTr.IgRootDir, "input");
+        vTr.IncludesDir = Path.Combine(vTr.InputDir, "includes");
+        vTr.PageContentDir = Path.Combine(vTr.InputDir, "pagecontent");
 
         return vTr;
     }

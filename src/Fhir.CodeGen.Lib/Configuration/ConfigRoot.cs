@@ -742,7 +742,7 @@ public class ConfigRoot : ICodeGenConfig
                         if (string.IsNullOrEmpty(dir))
                         {
                             // Default to the user's FHIR cache. Do NOT require it to exist;
-                            // DiskCacheClient creates it on first use, and commands like
+                            // the package source creates it on first use, and commands like
                             // `docs cli` never read it at all.
                             dir = Path.Combine(GetUserProfileDirectory(), ".fhir", "packages");
                         }

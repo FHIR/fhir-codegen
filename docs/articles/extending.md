@@ -45,23 +45,28 @@ discovers it via reflection, and the CLI surfaces it as a
        Name = "MyFlag",
        EnvVarName = "My_Flag",
        DefaultValue = false,
-       CliOption = new System.CommandLine.Option<bool>(
-           "--my-flag", "Toggle the thing.")
+       CliOption = new System.CommandLine.Option<bool>("--my-flag")
        {
+           Description = "Toggle the thing.",
            Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
-           IsRequired = false,
+           Required = false,
        },
    };
    ```
 
    ### Why two?
 
-   The `[ConfigOption]` attribute is consumed by helper code that
-   binds parsed arguments back onto the strongly-typed properties of
-   the options class. The `ConfigurationOption` static is what
-   `LaunchUtils.BuildCliOptions` (in the `fhir-codegen-shared` shared
-   project) walks to build the actual `System.CommandLine.Option<T>`
-   tree handed to the parser.
+   Keep the `[ConfigOption]` metadata aligned with the
+   `ConfigurationOption` definition. `LaunchUtils.BuildCliOptions`
+   (in the `fhir-codegen-shared` shared project) enumerates
+   `GetOptions()` to obtain the actual `System.CommandLine.Option<T>`
+   tree handed to the parser. Include your option in the options class's
+   `GetOptions()` result alongside `base.GetOptions()`, and bind its value
+   in `Parse(ParseResult)` using `GetOpt`, as `ConfigGenerate` does.
+
+   With System.CommandLine 2.x, descriptions are set through
+   `Description`; additional constructor strings are aliases, not help
+   text. The required-option property is `Required`, not `IsRequired`.
 
    The two-surface pattern is **deliberate** today, but it is also a
    known drift risk: if you add a new flag and forget to define its

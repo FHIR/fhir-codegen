@@ -97,6 +97,8 @@ public class ElementComparer
 
     private List<DbFhirPackage> _packages = [];
     private ElementTypeComparer _elementTypeComparer;
+    private XVerPreparedOperation? _operation;
+    private XVerProfileWorkPacket? _packet;
 
     public ElementComparer(
         IDbConnection db,
@@ -117,20 +119,78 @@ public class ElementComparer
             elementTypeComparisonCache);
     }
 
-    private bool skipElement(
-        DbElement ed,
-        bool skipFirstElement = true,
-        bool skipIds = true,
-        bool skipExtensions = true,
-        bool skipModifierExtenions = true) =>
-        (skipFirstElement && (ed.ResourceFieldOrder == 0)) ||
-        (skipIds && ((ed.BasePath == "id") || (ed.BasePath == "Element.id") || (ed.BasePath == "Resource.id"))) ||
-        (skipExtensions && ((ed.Name == "extension") || (ed.FullCollatedTypeLiteral == "Extension"))) ||
-        (skipModifierExtenions &&
-            ((ed.Name == "modifierExtension") || (ed.BasePath == "DomainResource.modifierExtension") || (ed.BasePath == "BackboneElement.modifierExtension")));
+    internal ElementComparer(
+        IDbConnection db,
+        ILoggerFactory loggerFactory,
+        DbComparisonCache<DbElementComparison> elementComparisonCache,
+        DbComparisonCache<DbElementTypeComparison> elementTypeComparisonCache,
+        List<DbFhirPackage> packages,
+        XVerPreparedOperation operation,
+        XVerProfileWorkPacket packet)
+        : this(db, loggerFactory, elementComparisonCache, elementTypeComparisonCache, packages)
+    {
+        operation.RequireConnection(db);
+        _operation = operation;
+        _packet = packet;
+    }
 
+    private List<DbElementComparison> WithinPair(StructureComparisonTrackingRecord trackingRecord, bool transitive)
+    {
+        XVerPreparedOperation? owned = null;
+        try
+        {
+            if (_operation is null)
+            {
+                owned = XVerPreparedOperation.Prepare(_db, new(XVerPreparationKind.TypeComparison));
+                _operation = owned;
+                _packet = owned.GetComparisonPacket(trackingRecord.PackagePair.SourcePackageKey, trackingRecord.PackagePair.TargetPackageKey);
+            }
+            List<DbElementComparison> result = transitive
+                ? DoTransitiveElementComparisonsCore(trackingRecord)
+                : DoElementComparisonsCore(trackingRecord);
+            if (owned is not null)
+            {
+                owned.Audit();
+            }
+            return result;
+        }
+        finally
+        {
+            if (owned is not null)
+            {
+                _packet = null;
+                _operation = null;
+                owned.Dispose();
+            }
+        }
+    }
+
+    private ElementTypeComparer.ElementTypeComparisonTrackingRecord DoTypeComparisons(
+        FhirPackageComparisonPair pair, DbElement source, DbElement? target, int comparisonKey) =>
+        _elementTypeComparer.DoTypeComparisons(pair, source, target, comparisonKey, _operation!, _packet!);
+
+    internal static bool IsComparableElement(DbElement ed) =>
+        ed.BasePath is not ("id" or "Element.id" or "Resource.id" or "DomainResource.modifierExtension" or "BackboneElement.modifierExtension") &&
+        ed.Name is not ("extension" or "modifierExtension") && ed.FullCollatedTypeLiteral != "Extension";
+
+    internal static DbElement? ResolveUnkeyedTarget(XVerStructureCatalog catalog, DbStructureDefinition owner, string targetId)
+    {
+        for (int dot = targetId.LastIndexOf('.'); dot >= 0; dot = targetId.LastIndexOf('.'))
+        {
+            DbElement? candidate = catalog.ResolveOwnedElement(owner, targetId, required: false);
+            if (candidate is not null && IsComparableElement(candidate))
+            {
+                return candidate;
+            }
+            targetId = targetId[..dot];
+        }
+        return null;
+    }
 
     internal List<DbElementComparison> DoTransitiveElementComparisons(StructureComparisonTrackingRecord sdTr)
+        => WithinPair(sdTr, transitive: true);
+
+    private List<DbElementComparison> DoTransitiveElementComparisonsCore(StructureComparisonTrackingRecord sdTr)
     {
         if (sdTr.ComparisonSteps.Count == 0)
         {
@@ -144,20 +204,20 @@ public class ElementComparer
         int increment = sourceIndex < targetIndex ? 1 : -1;
 
         // get element comparisons for each step, keyed by StructureComparisonKey
-        Dictionary<int, List<DbElementComparison>> stepElementComparisons = [];
+        Dictionary<int, ILookup<int, DbElementComparison>> stepElementComparisons = [];
         foreach (DbStructureComparison sdCompStep in sdTr.ComparisonSteps)
         {
             List<DbElementComparison> currentStepComparisons = DbElementComparison.SelectList(
                 _db,
                 StructureComparisonKey: sdCompStep.Key);
-            stepElementComparisons[sdCompStep.Key] = currentStepComparisons;
+            stepElementComparisons[sdCompStep.Key] = currentStepComparisons.ToLookup(ec => ec.SourceElementKey);
         }
 
         // get the initial source elements that are not extension or id elements
         List<DbElement> sourceElements = DbElement.SelectList(
             _db,
             StructureKey: sdTr.SourceStructure.Key)
-            .Where(ed => !skipElement(ed, skipFirstElement: false))
+            .Where(IsComparableElement)
             //.Where(e => e.FullCollatedTypeLiteral?.Equals("Extension", StringComparison.Ordinal) == false)
             //.Where(e => (e.Name.Equals("id", StringComparison.Ordinal) == false) &&
             //    (e.FullCollatedTypeLiteral?.Equals("id", StringComparison.Ordinal) == false))
@@ -167,15 +227,14 @@ public class ElementComparer
         Dictionary<int, DbElement> targetElements = sdTr.TargetStructure is null
             ? []
             : DbElement.SelectList(_db, StructureKey: sdTr.TargetStructure.Key)
-                .Where(ed => !skipElement(ed, skipFirstElement: false))
+                .Where(IsComparableElement)
                 //.Where(e => e.FullCollatedTypeLiteral?.Equals("Extension", StringComparison.Ordinal) == false)
                 //.Where(e => (e.Name.Equals("id", StringComparison.Ordinal) == false) &&
                 //    (e.FullCollatedTypeLiteral?.Equals("id", StringComparison.Ordinal) == false))
                 .ToDictionary(e => e.Key);
 
         // build a lookup from source element key to the first step's element comparisons
-        ILookup<int, DbElementComparison> firstStepBySourceElement = stepElementComparisons[sdTr.ComparisonSteps[0].Key]
-            .ToLookup(ec => ec.SourceElementKey);
+        ILookup<int, DbElementComparison> firstStepBySourceElement = stepElementComparisons[sdTr.ComparisonSteps[0].Key];
 
         // iterate over each source element and follow it through the transitive steps
         foreach (DbElement sourceElement in sourceElements.OrderBy(ed => ed.ResourceFieldOrder))
@@ -251,8 +310,7 @@ public class ElementComparer
             for (int step = 1; step < sdTr.ComparisonSteps.Count; step++)
             {
                 DbStructureComparison stepComparison = sdTr.ComparisonSteps[step];
-                List<DbElementComparison> stepElements = stepElementComparisons[stepComparison.Key];
-                ILookup<int, DbElementComparison> stepBySourceElement = stepElements.ToLookup(ec => ec.SourceElementKey);
+                ILookup<int, DbElementComparison> stepBySourceElement = stepElementComparisons[stepComparison.Key];
 
                 int stepTargetIndex = sourceIndex + (increment * (step + 1));
 
@@ -332,7 +390,7 @@ public class ElementComparer
 
                 int elementComparisonKey = DbElementComparison.GetIndex();
 
-                ElementTypeComparer.ElementTypeComparisonTrackingRecord etr =  _elementTypeComparer.DoTypeComparisons(
+                ElementTypeComparer.ElementTypeComparisonTrackingRecord etr = DoTypeComparisons(
                     sdTr.PackagePair,
                     sourceElement,
                     targetElement,
@@ -363,6 +421,9 @@ public class ElementComparer
 
     internal List<DbElementComparison> DoElementComparisons(
         StructureComparisonTrackingRecord trackingRecord)
+        => WithinPair(trackingRecord, transitive: false);
+
+    private List<DbElementComparison> DoElementComparisonsCore(StructureComparisonTrackingRecord trackingRecord)
     {
         List<DbElementComparison> elementComparisons = [];
 
@@ -373,7 +434,7 @@ public class ElementComparer
         List<DbElement> sourceElements = DbElement.SelectList(
             _db,
             StructureKey: trackingRecord.SourceStructure.Key)
-            .Where(ed => !skipElement(ed, skipFirstElement: false))
+            .Where(IsComparableElement)
             //.Where(e => e.FullCollatedTypeLiteral?.Equals("Extension", StringComparison.Ordinal) == false)
             //.Where(e => (e.Name.Equals("id", StringComparison.Ordinal) == false) &&
             //    (e.FullCollatedTypeLiteral?.Equals("id", StringComparison.Ordinal) == false))
@@ -411,7 +472,7 @@ public class ElementComparer
         Dictionary<int, DbElement> targetElements = DbElement.SelectList(
             _db,
             StructureKey: targetSd.Key)
-            .Where(ed => !skipElement(ed, skipFirstElement: false))
+            .Where(IsComparableElement)
             //.Where(e => e.FullCollatedTypeLiteral?.Equals("Extension", StringComparison.Ordinal) == false)
             //.Where(e => (e.Name.Equals("id", StringComparison.Ordinal) == false) &&
             //    (e.FullCollatedTypeLiteral?.Equals("id", StringComparison.Ordinal) == false))
@@ -432,6 +493,8 @@ public class ElementComparer
         Dictionary<int, List<DbElementComparison>> comparisonsByParentKey = [];
         Dictionary<int, List<DbElementComparison>> comparisonsBySourceKey = [];
         Dictionary<int, List<int>> sourceKeysByDepth = [];
+        DbElement? sourceRoot = null;
+        DbElement? targetRoot = null;
 
         // iterate over each source element
         foreach (DbElement sourceElement in sourceElements)
@@ -498,19 +561,8 @@ public class ElementComparer
                 if ((explicitMapping.TargetElementId is not null) &&
                     (explicitMapping.TargetElementKey is null))
                 {
-                    int dotCount = explicitMapping.TargetElementId.Count(c => c == '.');
-                    string[] components = explicitMapping.TargetElementId.Split('.');
-                    while (dotCount >= 1)
-                    {
-                        string testId = string.Join('.', components.Take(dotCount + 1));
-                        targetElement = targetElements.Values.FirstOrDefault(e => e.Id == testId);
-                        if (targetElement is not null)
-                        {
-                            targetIsHigherLevelThanExplicit = true;
-                            break;
-                        }
-                        dotCount--;
-                    }
+                    targetElement = ResolveUnkeyedTarget(_operation!.Catalog, targetSd, explicitMapping.TargetElementId);
+                    targetIsHigherLevelThanExplicit = targetElement is not null && targetElement.Id != explicitMapping.TargetElementId;
                 }
 
                 // use the explicit relationship
@@ -539,7 +591,7 @@ public class ElementComparer
                 }
 
                 // still need to build the type comparisons, even if we are mapped
-                ElementTypeComparer.ElementTypeComparisonTrackingRecord mappedTypeComparison = _elementTypeComparer.DoTypeComparisons(
+                ElementTypeComparer.ElementTypeComparisonTrackingRecord mappedTypeComparison = DoTypeComparisons(
                     trackingRecord.PackagePair,
                     sourceElement,
                     targetElement,
@@ -562,7 +614,8 @@ public class ElementComparer
                         trackingRecord.SourcePackage,
                         sourceElement.Key,
                         trackingRecord.TargetPackage,
-                        targetElement?.Key));
+                        targetElement?.Key),
+                    elementMappingKey: explicitMapping.Key);
 
                 _elementComparisonCache.CacheAdd(elementComparison);
                 elementComparisons.Add(elementComparison);
@@ -575,7 +628,18 @@ public class ElementComparer
                 continue;
             }
 
-            string targetPath = targetSd.Name + sourceElement.Id[sourceSd.Name.Length..]; 
+            sourceRoot ??= _operation!.Catalog.ResolveRoot(sourceSd);
+            targetRoot ??= _operation!.Catalog.ResolveRoot(targetSd);
+            if (sourceElement.Id != sourceRoot.Id &&
+                !sourceElement.Id.StartsWith(sourceRoot.Id + ".", StringComparison.Ordinal) &&
+                !sourceElement.Id.StartsWith(sourceRoot.Id + ":", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Cannot compare element `{sourceElement.Id}` ({sourceElement.Key}) in owner `{sourceSd.VersionedUrl}` ({sourceSd.Key})" +
+                    $" to `{targetSd.VersionedUrl}` ({targetSd.Key}), pair {trackingRecord.SourcePackage.Key}->{trackingRecord.TargetPackage.Key}:" +
+                    $" source element does not have owning root `{sourceRoot.Id}` ({sourceRoot.Key}) as an exact prefix.");
+            }
+            string targetPath = targetRoot.Path + sourceElement.Id[sourceRoot.Id.Length..];
 
             // no explicit explicitMapping, try to find by path
             List<DbElement> possibleTargets = targetElementsByPath[targetPath].ToList();
@@ -634,7 +698,7 @@ public class ElementComparer
                 bool vsIsEquivalent = (boundVsComparison is null) || (boundVsComparison.Relationship == CMR.Equivalent);
 
                 // still need to build the type comparisons, even if we are mapped
-                ElementTypeComparer.ElementTypeComparisonTrackingRecord typeComparison = _elementTypeComparer.DoTypeComparisons(
+                ElementTypeComparer.ElementTypeComparisonTrackingRecord typeComparison = DoTypeComparisons(
                     trackingRecord.PackagePair,
                     sourceElement,
                     targetElement,
@@ -1433,7 +1497,8 @@ public class ElementComparer
         string? technicalMessage,
         string? userMessage,
         int?[] contentStepKeys,
-        bool applyRelatedRelationships = true)
+        bool applyRelatedRelationships = true,
+        int? elementMappingKey = null)
     {
         sdTrackingRecord.ComparisonRecordKey ??= DbStructureComparison.GetIndex();
 
@@ -1541,7 +1606,7 @@ public class ElementComparer
         {
             Key = elementComparisonKey,
             StructureComparisonKey = sdTrackingRecord.ComparisonRecordKey.Value,
-            ElementMappingKey = sdTrackingRecord.ExplicitMapping?.Key,
+            ElementMappingKey = elementMappingKey,
 
             Steps = Math.Abs(sdTrackingRecord.SourcePackage.DefinitionFhirSequence - sdTrackingRecord.TargetPackage.DefinitionFhirSequence),
 

@@ -32,8 +32,10 @@ produce on disk.
   specificPairs: specificPairs)` call (`XVerProcessor.cs:303`);
   treat this as not part of the documented pipeline.
 
-The `export` subcommand runs the four `Load*` methods first only when
-`_config.ReloadDatabase == true` (`XVerProcessor.cs:410-416`). The
+The `export` subcommand runs the four `Load*` methods, then comparison
+and outcome generation, when `_config.ReloadDatabase == true`
+(`XVerProcessor.ExecuteOutcomeCommand`). Without reload it only exports
+and never silently repairs stale state. The
 default full-pipeline branch always runs `LoadDatabase` →
 `LoadFhirCrossVersionMaps` → `LoadExtensionSubstitutions` →
 `LoadFhirTypeValueSets` → `CompareInDatabase` → `GenerateOutcomes`
@@ -43,14 +45,55 @@ before `ExportOutcomes`.
 
 - A loaded DB. `ExportOutcomes` calls `LoadDatabase(false)` implicitly
   when `_db is null` (`XVerProcessor.cs:563-566`).
-- The outcome tables (`DbStructureOutcome`, `DbValueSetOutcome`, etc.)
-  populated by a prior `GenerateOutcomes` run. `ExportOutcomes`
-  does **not** validate this; on an empty outcomes DB the exporters
-  silently produce empty IG packages.
+- Outcome tables populated by a prior `GenerateOutcomes` run. For structure
+  export, the completed input, comparison, and safety-outcome revisions
+  must be compatible and current for **every actually scheduled pair**.
+  Successfully evaluated zero-trigger results are allowed; missing
+  metadata is not interpreted as evaluated-empty.
 - The IG-support directory at
   `<CrossVersionMapSourcePath>/input/ig-support/` is consulted by
   `IgExporter` for `igParameters.json` and `xver-package-config.json`;
   missing files are silently ignored (defaults are used).
+
+### Persisted policy and recovery
+
+Unsafe-code configuration is captured only when maps load. Neither
+`ExportOutcomes` nor profile construction rereads
+`input/ig-support/unsafe-code-mappings.json`; editing, invalidating, or
+removing that file alone deliberately leaves the persisted policy in force.
+To change it, reload maps → compare structures → generate outcomes →
+export. Removing the optional file then clears old rules. With no source
+configured, the loader explicitly completes an empty safety snapshot;
+absence of state is never a substitute.
+
+Reload-enabled command order is:
+
+| Command | Order after the four load steps |
+|-|-|
+| `outcomes` | compare both families → outcomes both families |
+| `outcomes-sd` | compare structures → structure outcomes |
+| `outcomes-vs` | compare vocabulary → vocabulary outcomes |
+| `export` | compare both → outcomes both → export both |
+
+`ProcessCommand` and its `ExecuteOutcomeCommand` seam share this routing.
+Failures stop subsequent steps. Without reload, `outcomes*` uses persisted
+inputs/comparisons and `export` uses persisted outcomes.
+
+`XVerExporter` computes the shared, side-effect-free IG schedule, checks
+all scheduled structure pairs, and only then creates/deletes IG roots or
+writes skeletons (before vocabulary writes in a combined export). Version
+flags, directed pair filters, and the step window are the same ones used
+for materialization. A later invalid pair protects earlier existing IGs
+as well as fresh output paths. Vocabulary-only export bypasses structure
+safety checks and does not create missing safety state.
+
+Old/missing schema, never-completed/failed input or outcomes, stale
+input/comparison revisions, and incompatible formats produce actionable
+load/compare/outcomes/export recovery diagnostics. Preflight is read-only;
+there is no automatic migration or fallback completion. Unrelated database
+errors retain their cause. After the explicit-primary-key insertion fix,
+regenerate the database from content and maps: existing detached row
+references are not repaired by exporting or rerunning outcomes alone.
 
 ## Inputs
 
@@ -99,7 +142,7 @@ public void ExportOutcomes(
 `XVerExporter.Export` and its component exporters. The shape of that
 output is documented in
 [`xver-exporter-export.md`](./xver-exporter-export.md). At a
-glance, each invocation produces, under `_config.OutputDirectory/fhir/`:
+glance, each invocation produces, under `_config.OutputDirectory/`:
 
 - One cross-version IG per `(source, target)` package pair allowed by
   `_allowedExportVersions` × `specificPairs` × `maxStepSize` —
@@ -275,11 +318,10 @@ internals; this spec does not repeat them.
   `_db`, the method throws
   `"Cannot export outcomes without a loaded database!"`
   (`XVerProcessor.cs:568-571`).
-- **Silent empty-outcomes export.** If `GenerateOutcomes` was not run
-  (or produced no rows), the exporters iterate zero outcomes per pair
-  and emit empty IGs without warning. Each IG still gets its
-  `ig.ini` / `ig.json` / `menu.xml` skeleton via
-  `IgExporter.FinalizeXVerIgs`; downstream IG publishers may flag this.
+- **Never evaluated versus completed-empty.** Structure export rejects
+  missing completion before any IG writes, even when there are no trigger
+  rows. A completed zero-trigger safety evaluation is valid. Vocabulary-only
+  output remains independent of this structure prerequisite.
 - **Missing IG-support config files.** If
   `<CrossVersionMapSourcePath>/input/ig-support/igParameters.json` or
   `xver-package-config.json` is missing, `IgExporter` silently uses
@@ -292,11 +334,10 @@ internals; this spec does not repeat them.
   `<CrossVersionMapSourcePath>/input/ig-support/gitignore.txt` when that file
   is present and the destination has none — see
   [`xver-exporter-export.md`](./xver-exporter-export.md) for details.
-- **Filter mismatch with prior pipeline run.** If `GenerateOutcomes`
-  ran with `artifactFilter: ValueSet` and `ExportOutcomes` is then
-  invoked with `artifactFilter: Resource`, the export step will find
-  no `DbStructureOutcome` rows for the pair and silently emit empty
-  structure content. No diagnostic warns about the mismatch.
+- **Filter mismatch with prior pipeline run.** Vocabulary-only generation
+  cannot certify missing structure safety outcomes. Structure export
+  rejects an uncertified scheduled pair instead of silently emitting empty
+  structure content.
 - **Re-running `export` is idempotent within a pair.** `IgExporter`
   builds tracking records fresh each run; existing files on disk are
   overwritten without consulting timestamps. There is no incremental
@@ -367,8 +408,8 @@ internals; this spec does not repeat them.
 - `XverIncludeScripts` — default value when `includeIgScripts == null`.
 - `ExportR2`, `ExportR3`, `ExportR4`, `ExportR4B`, `ExportR5`,
   `ExportR6` — per-FHIR-version export gates.
-- `ReloadDatabase` — when true, the `export` subcommand re-runs the
-  four `Load*` steps before exporting.
+- `ReloadDatabase` — when true, `export` runs the four `Load*` steps,
+  comparison, and outcomes before exporting.
 
 ---
-*Verified against commit `e36315a1c9d16450ba81457e4f888eff78d4ae42` on `2026-06-12`.*
+*Legacy export references verified at `e36315a1c9d16450ba81457e4f888eff78d4ae42`; persisted-policy recovery and routing rechecked at `88af2c4e4fb0f6f770297f0e1209efc212317af6` on `2026-11-05`.*

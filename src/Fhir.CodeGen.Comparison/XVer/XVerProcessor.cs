@@ -272,8 +272,8 @@ public partial class XVerProcessor
 
                 //LoadFhirCrossVersionMaps();
 
-                //LoadExtensionSubstitutions();
-                //LoadFhirTypeValueSets();
+                // LoadExtensionSubstitutions();
+                // LoadFhirTypeValueSets();
 
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.ValueSet, maxStepSize: 1);
                 //CompareInDatabase(artifactFilter: FhirArtifactClassEnum.ValueSet);
@@ -290,7 +290,7 @@ public partial class XVerProcessor
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource, specificPairs: specificPairs);
                 //GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource);
                 //GenerateOutcomes(specificPairs: specificPairs);
-                //GenerateOutcomes();
+                GenerateOutcomes();
 
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, maxStepSize: 1, includeIgScripts: false);
                 //ExportOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet, includeIgScripts: false);
@@ -366,56 +366,34 @@ public partial class XVerProcessor
                 break;
 
             case "outcomes":
-                if (_config.ReloadDatabase)
-                {
-                    LoadDatabase(_config.ReloadDatabase);
-                    LoadFhirCrossVersionMaps();
-                    LoadExtensionSubstitutions();
-                    LoadFhirTypeValueSets();
-                }
-
-                GenerateOutcomes();
-                break;
-
             case "outcomes-vs":
-                if (_config.ReloadDatabase)
-                {
-                    LoadDatabase(_config.ReloadDatabase);
-                    LoadFhirCrossVersionMaps();
-                    LoadExtensionSubstitutions();
-                    LoadFhirTypeValueSets();
-                }
-
-                GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.ValueSet);
-                break;
-
             case "outcomes-sd":
-                if (_config.ReloadDatabase)
-                {
-                    LoadDatabase(_config.ReloadDatabase);
-                    LoadFhirCrossVersionMaps();
-                    LoadExtensionSubstitutions();
-                    LoadFhirTypeValueSets();
-                }
-
-                GenerateOutcomes(artifactFilter: FhirArtifactClassEnum.Resource);
+                ExecuteOutcomeCommand(
+                    command, _config.ReloadDatabase,
+                    () => LoadDatabase(true),
+                    LoadFhirCrossVersionMaps,
+                    LoadExtensionSubstitutions,
+                    LoadFhirTypeValueSets,
+                    family => CompareInDatabase(family),
+                    family => GenerateOutcomes(family));
                 break;
 
 
             case "export":
-                if (_config.ReloadDatabase)
-                {
-                    LoadDatabase(_config.ReloadDatabase);
-                    LoadFhirCrossVersionMaps();
-                    LoadExtensionSubstitutions();
-                    LoadFhirTypeValueSets();
-                }
-
-                ExportOutcomes();
+                ExecuteOutcomeCommand(
+                    command, _config.ReloadDatabase,
+                    () => LoadDatabase(true),
+                    LoadFhirCrossVersionMaps,
+                    LoadExtensionSubstitutions,
+                    LoadFhirTypeValueSets,
+                    family => CompareInDatabase(family),
+                    family => GenerateOutcomes(family),
+                    () => ExportOutcomes());
                 break;
 
             default:
-                LoadDatabase(_config.ReloadDatabase);
+                LoadDatabase(_config.ReloadDatabase ||
+                    (!string.IsNullOrEmpty(_dbName) && !File.Exists(Path.Combine(_dbPath, _dbName))));
                 LoadFhirCrossVersionMaps();
                 LoadExtensionSubstitutions();
                 LoadFhirTypeValueSets();
@@ -423,6 +401,44 @@ public partial class XVerProcessor
                 GenerateOutcomes();
                 ExportOutcomes();
                 break;
+        }
+    }
+
+    internal static void ExecuteOutcomeCommand(
+        string command,
+        bool reload,
+        Action loadDatabase,
+        Action loadMaps,
+        Action loadSubstitutions,
+        Action loadTypeValueSets,
+        Action<FhirArtifactClassEnum?> compare,
+        Action<FhirArtifactClassEnum?> outcomes,
+        Action? export = null)
+    {
+        FhirArtifactClassEnum? family = command switch
+        {
+            "outcomes" or "export" => null,
+            "outcomes-vs" => FhirArtifactClassEnum.ValueSet,
+            "outcomes-sd" => FhirArtifactClassEnum.Resource,
+            _ => throw new ArgumentOutOfRangeException(nameof(command)),
+        };
+        if (reload)
+        {
+            loadDatabase();
+            loadMaps();
+            loadSubstitutions();
+            loadTypeValueSets();
+            compare(family);
+        }
+
+        if (command != "export" || reload)
+        {
+            outcomes(family);
+        }
+
+        if (command == "export")
+        {
+            (export ?? throw new ArgumentNullException(nameof(export)))();
         }
     }
 
@@ -507,11 +523,8 @@ public partial class XVerProcessor
             !string.IsNullOrEmpty(_dbName))
         {
             // try loading an existing database
-            _db = new(_dbPath, _dbName);
-            if (_db != null)
-            {
-                return;
-            }
+            _db = new(_dbPath, _dbName, _config.LogFactory);
+            return;
         }
 
         // load definitions if we have not done so
@@ -797,10 +810,17 @@ public partial class XVerProcessor
         MappingLoader mappingLoader = new(_db.DbConnection, _loggerFactory);
         if (!string.IsNullOrEmpty(_config.CrossVersionMapSourcePath))
         {
-            _ = mappingLoader.TryLoadCrossVersionSourceMaps(
+            if (!mappingLoader.TryLoadCrossVersionSourceMaps(
                 _config.CrossVersionMapSourcePath,
-                _config.UseInternalTypeMaps);
+                _config.UseInternalTypeMaps))
+            {
+                throw new InvalidOperationException($"Failed to load cross-version maps from configured source '{_config.CrossVersionMapSourcePath}'.");
+            }
             //_ = _db.TryLoadFhirCrossVersionMaps(_config.CrossVersionMapSourcePath);
+        }
+        else
+        {
+            UnsafeCodeInputStore.ReplaceWithEmptyInputs(_db.DbConnection, DbFhirPackage.SelectList(_db.DbConnection));
         }
     }
 

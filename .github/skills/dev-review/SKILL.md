@@ -53,6 +53,21 @@ Your concerns:
   transaction scoping, swallowed exceptions, and behavior that
   conflicts with the runtime/compatibility constraints documented in
   `AGENTS.md`.
+- **Provenance** — what the changed lines were before, and why they were
+  written that way. `git log -L`, `git blame`, and `git show` on the
+  commits that last touched them. This lane buys the finding no diff can
+  show on its own: a change that silently undoes a deliberate earlier
+  fix, reopens a bug a prior commit closed, or restores a special case
+  someone removed on purpose. Cite the commit you are contradicting.
+- **Prior review context** — what has already been said about this code.
+  The comments in the files themselves are always in scope. When the
+  repository's `AGENTS.md` carries a `## GitHub Integration` section
+  whose `Enabled` row says `yes`, so are the review comments on the
+  merged pull requests that last touched these files. A concern a
+  reviewer already raised here, or a rule a code comment states
+  outright, is a finding when this change walks back into it. Where the
+  integration is off, use the in-file comments alone and say so —
+  do not guess at review history you cannot read.
 
 ### Role 2 — Staff-level QA Lead (test & verifiability review)
 
@@ -88,6 +103,13 @@ engineer writing the analysis the team will actually read. You:
 - **Rank.** Order findings by severity (Blocker → High → Medium → Low
   → Nit). Severity is *your* judgment, not a copy of either reviewer's
   framing.
+- **Score confidence.** Every finding carries a confidence from 0 to 100
+  beside its severity. Severity says what it costs if the finding is
+  real; confidence says how sure the reviewer is that it is. The two are
+  independent, and the pair is what makes the report auditable — a
+  Blocker at 40 and a Low at 95 are different problems for the reader.
+  Re-score a confidence you disagree with exactly as you re-rank a
+  severity, and say in the finding when you did.
 - **Cite.** Every finding names a file and a line range (or a symbol).
   No "somewhere in the auth module".
 - **Recommend.** Each finding ends with a concrete next step
@@ -97,6 +119,44 @@ engineer writing the analysis the team will actually read. You:
   catch, "consider renaming this variable", restating what the code
   obviously does. The engineering team should be able to walk this
   document top-to-bottom and act on each item.
+
+### The confidence scale
+
+Reviewers score every finding from 0 to 100 on this scale, and the
+synthesizer re-scores any it disagrees with:
+
+- **0** — false positive. It does not survive light scrutiny, or the
+  problem is pre-existing and this change did not introduce it.
+- **25** — might be real. The reviewer could not verify it.
+- **50** — verified real, but marginal: rare in practice, or minor next
+  to the rest of the change.
+- **75** — verified real, will be hit in practice, and the change's
+  current approach is insufficient. A violation of a rule `AGENTS.md`
+  states outright starts here.
+- **100** — certain. Evidence inside the reviewed scope confirms it
+  directly.
+
+Score the values between the anchors too — they are calibration, not a
+five-item enum.
+
+Confidence gates **promotion, not inclusion**. This is a report a team
+reads once, not a comment stream that can afford a guess: an unverified
+finding is worth recording as unverified and worth nothing as a Blocker.
+
+- **Below 50 — no finding number.** Record it in one line under
+  *Out of Scope / Deferred*, marked unverified, or drop it. A finding
+  the reviewer could not verify does not become verified by being
+  numbered.
+- **Blocker or High needs 75 or more.** Demote a finding that does not
+  clear it by one level, and say inside the finding that you did and
+  why. A Blocker nobody could confirm costs the report its credibility,
+  which is the one thing every other finding is spending.
+- **50 to 74 is a normal Medium or Low.** Name what would settle it in
+  the recommendation, so the next reader can raise the score instead of
+  re-deriving the doubt.
+
+Confidence is never a substitute for severity, and a high score is not a
+promotion: a verified nit at 100 is still a nit.
 
 ## Inputs
 
@@ -141,7 +201,9 @@ engineer writing the analysis the team will actually read. You:
    ceiling — you may launch more than `max_subagents` sub-agents over
    the life of the task (e.g., when partitioning a large `full` scope)
    as long as no more than `max_subagents` are running at the same
-   time.
+   time. The cap never decides **whether** to fan out at all — the
+   measured-scope threshold in the Workflow's step 4 does, and it applies
+   before the cap is consulted.
 
 ## Scope Resolution (when `Scope` is not supplied)
 
@@ -195,26 +257,84 @@ mis-scoping before any expensive work happens.
      must be real. Never invent one.
    - Identify the affected project(s) so the commands you cite are
      correctly scoped.
-4. **Run the two review passes.** Prefer running them in parallel as
-   sub-agents (one `general-purpose` or `code-review` agent per role)
-   so they can't anchor on each other. Each sub-agent:
-   - Receives the **same** resolved scope and focus text.
-   - Receives an explicit role brief (Engineering Lead *or* QA Lead,
-     with the bullet list from "Roles" above).
-   - Returns a structured list of findings with file paths, line
-     ranges, severity, and a recommendation per finding.
-   - Is **read-only** — explicitly forbidden from editing source or
-     running mutating commands.
+4. **Measure the scope, then decide whether to fan out.** Count the
+   changed files and changed lines **in the resolved scope**, using the
+   form that scope actually needs:
+   - `working-tree` → `git diff --stat HEAD` (bare `git diff --stat`
+     omits staged changes, and a fully-staged change would measure zero).
+   - A commit range, `last-commit`, or `since-push` → `git diff --stat`
+     against that range.
+   - `plan-slot` → `git show --stat` over **each** commit the slot
+     produced, unioning the file set. The Scope Resolution rules below
+     forbid collapsing that commit set into a range unless contiguity is
+     verified, so there is often no range to measure; a bare
+     `git diff --stat` here measures a working tree `dev-do` has just
+     left clean and returns zero.
+   - A file list → the list itself, with `git diff --stat HEAD` over
+     those paths.
+   - `full` → always above the threshold; do not measure.
+
+   Then take one of two branches. **Both dispatch a sub-agent; neither
+   reviews in-process.** What the threshold buys is one review context
+   instead of two, never a review done by whoever is holding the skill:
+   you may be running on a model chosen for orchestration, you carry an
+   edit tool the reviewer roles deliberately lack, and — on the
+   `plan-slot` scope — you may be the same context that just wrote the
+   code, which is the one reader whose independence cannot be recovered.
+
+   - **Below the threshold — fewer than 5 changed files *and* fewer than
+     200 changed lines — dispatch a single `dev-change-reviewer`**, which
+     carries both role briefs and runs the engineering pass then the QA
+     pass in one context. Two sub-agents that each re-read a 60-line diff
+     cost more than the findings the split buys, and the isolation is
+     worth little when the whole scope fits on one screen. A scope that
+     is small by files but large by lines — three files, nine hundred
+     lines — is **above** the threshold, not below it: the conjunction is
+     on the low side, and either count alone is enough to fan out.
+   - **At or above the threshold, run the two passes in parallel
+     sub-agents** — the `dev-eng-reviewer` and `dev-qa-reviewer` agents,
+     one per role. Both are read-only by definition: they carry no edit
+     tool, so the read-only guarantee below is enforced by the harness
+     rather than by prose. Where they are not loaded, fall back to
+     `code-review` for the engineering pass and `general-purpose` for the
+     QA pass, and in that case state the role brief and the read-only
+     constraint explicitly in the prompt. They must not see each other's
+     findings until synthesis. Each sub-agent:
+     - Receives the **same** resolved scope and focus text.
+     - Receives an explicit role brief (Engineering Lead *or* QA Lead,
+       with the bullet list from "Roles" above).
+     - Returns a structured list of findings with file paths, line
+       ranges, severity, confidence, and a recommendation per finding.
+     - Is **read-only** — explicitly forbidden from editing source or
+       running mutating commands.
+
+   Where `dev-change-reviewer` is not loaded, take the fan-out branch
+   rather than reviewing in-process: two agents cost more than one, and
+   nothing costs more than a review written by the context under review.
+
+   State which branch you took and the measured counts that decided it.
+   A `full` scope is always above the threshold. When the user supplies
+   a focus that narrows the scope to a handful of files, measure the
+   **narrowed** set — that is what will actually be read. **A measurement
+   of zero on a non-empty scope is a bug, not a small scope**: say so and
+   fan out rather than reporting a review of nothing.
 5. **Synthesize.** Put on the synthesizer hat. Merge duplicates,
-   re-rank by severity, drop noise, write the final report using
-   the format below.
+   re-rank by severity, re-score the confidences you disagree with,
+   apply the promotion gate in § *The confidence scale*, drop noise,
+   write the final report using the format below.
 6. **Sanity-check** a report containing any Blocker, High, or
    architecture-level recommendation with a registered review
-   specialist when available. Otherwise use a fresh `general-purpose`
-   sub-agent explicitly prompted to act as an adversarial/rubber-duck
-   reviewer. Adopt critique findings that prevent miscommunication;
-   set aside findings that bloat the report. Briefly note in your reply
-   what (if anything) changed.
+   specialist when available. Otherwise use a `rubber-duck` agent, or a
+   fresh `general-purpose` sub-agent explicitly prompted to act as an
+   adversarial reviewer where `rubber-duck` is unavailable. A report with
+   **no Blocker, no High, and no architecture-level recommendation**
+   skips this step — there is no finding whose cost of being wrong
+   justifies the pass. An architecture-level recommendation triggers it
+   at any severity. Where several findings qualify, hand the checker the
+   lowest-confidence ones first — a Blocker at 100 is not what this pass
+   is for. Adopt critique findings that prevent miscommunication; set
+   aside findings that bloat the report. Briefly note in your reply what
+   (if anything) changed.
 7. **Write `analysis.md`.** Overwrite if present.
 8. **Report back** with: the resolved analysis path, the resolved
    scope, finding counts by severity, and the top 3 findings (one
@@ -250,7 +370,11 @@ thing the team should do next.}
 ## Findings
 
 Findings are **synthesized** from both reviews and ranked by severity.
-Each finding is independently actionable.
+Each finding is independently actionable, and each carries a
+**confidence** from 0 to 100 beside its severity: severity is what it
+costs if it is real, confidence is how sure the review is that it is.
+Nothing below 50 is numbered here, and nothing below 75 is a Blocker or
+a High.
 
 ### Blocker
 
@@ -258,6 +382,9 @@ Each finding is independently actionable.
 
 - **Where:** `<path/to/source-file>:120-138` (or symbol name)
 - **Source:** Engineering / QA / Both
+- **Confidence:** {0–100} — {one clause on what earns that score, e.g.
+  "reproduced in the diff", "inferred from the call site, not run",
+  "contradicts commit `abc1234`"}
 - **What:** {1–3 sentences. The problem, in observable terms.}
 - **Why it matters:** {1–2 sentences. Concrete risk if shipped as-is.}
 - **Recommendation:** {Concrete next step. "Add test for X.",
@@ -302,6 +429,8 @@ Each finding is independently actionable.
 
 - {Things the reviewers noticed but consciously did not chase, with
   why. Useful follow-ups go here.}
+- {Findings that scored below 50 on confidence: one line each, marked
+  unverified, with what would settle them.}
 
 ## Next Steps
 
@@ -333,15 +462,32 @@ How these findings re-enter the loop:
 
 ## Sub-Agent Use
 
-- The two role passes (Engineering Lead, QA Lead) **should** run in
-  parallel sub-agents. They must not see each other's findings until
-  the synthesizer step. This is the whole point of doing two passes —
-  if they collapse into one, you get one set of findings with the
-  illusion of two reviewers.
+- The two role passes (Engineering Lead, QA Lead) run in parallel
+  sub-agents **once the scope is at or above the threshold in step 4**,
+  and in a single `dev-change-reviewer` sub-agent below it. They must not
+  see each other's findings until the synthesizer step. This is the whole
+  point of doing two passes — if they collapse into one, you get one set
+  of findings with the illusion of two reviewers. The single-agent branch
+  keeps that property by ordering rather than isolation: it completes the
+  engineering findings before it starts the QA pass, and does not revise
+  the first list once the second is underway.
+- **You never review in-process, on either branch.** The passes belong in
+  a reviewer role or nowhere. Three things are lost when the skill's own
+  context does the reading: the role brief that makes the pass a pass,
+  the missing edit tool that makes read-only a guarantee rather than a
+  promise, and — on a `plan-slot` scope reached through `dev-complete` —
+  independence from the context that wrote the code. The first two you
+  could restate in prose; the third you cannot recover at all.
 - Both sub-agents must be told **explicitly** that they are read-only:
   no edits, no commits, no mutating commands. They may run `git diff`,
-  `git log`, `git show`, `view`, `grep`, `glob`, `lsp`, and similar
-  read-only inspections.
+  `git log`, `git blame`, `git show`, read-only `gh` queries such as
+  `gh pr list` and `gh pr view`, `view`, `grep`, `glob`, `lsp`, and
+  similar read-only inspections. A `gh` command that writes is a
+  mutating command like any other, and is forbidden here for the same
+  reason the rest are. The `dev-eng-reviewer` and `dev-qa-reviewer`
+  agents already encode this and carry no edit tool, which closes the
+  file-writing path outright; say it anyway, because their shell access
+  cannot distinguish `git diff` from a mutating command.
 - The synthesizer step is **always** done in-process, not delegated.
   You own the final ranking and recommendations.
 - For very large scopes (`full` or a multi-hundred-file diff), you
@@ -353,6 +499,38 @@ How these findings re-enter the loop:
   Engineering and QA passes one after the other rather than in
   parallel; they must still be **independent** invocations that do
   not see each other's output until synthesis.
+
+## Sub-Agent Model Tier
+
+Resolve each role against the **subagent model policy** in the
+repository's `AGENTS.md` (`## Agent guardrails`). An absent or
+unreadable policy means `uniform`, and every role below runs the
+spawning agent's model.
+
+| Role | Tier | Agent |
+|-|-|-|
+| Engineering Lead pass | reasoning | `dev-eng-reviewer` |
+| QA Lead pass | reasoning | `dev-qa-reviewer` |
+| Both passes over a below-threshold scope | reasoning | `dev-change-reviewer` |
+| Adversarial sanity check | reasoning | `rubber-duck` |
+| Partition slice of a `full` scope | reasoning | `dev-eng-reviewer` / `dev-qa-reviewer` |
+| Locating the affected projects, or resolving a scope to a file list | mechanical | `explore` |
+
+**Prefer the named agent over a general-purpose one.** Each carries its
+own role brief and its own tool restrictions, so dispatching it is
+shorter *and* safer than prompting a general-purpose agent into the same
+shape. When one is not loaded, fall back as step 4 describes and supply
+the brief yourself.
+
+**Every reviewing role is reasoning, without exception.** A review is
+judgment end to end, and the cost of a missed Blocker is the whole cost
+this skill exists to avoid. The only mechanical work here is finding out
+*what* to review; deciding what is wrong with it never is. Do not
+reclassify a pass because the diff looks small — a small diff takes the
+single-agent branch in step 4 and spawns one reviewer instead of two,
+which is the saving that scope buys. Scope decides **how many** reviewers
+run, never **which model** reviews and never **whether** a reviewer runs
+at all.
 
 ## Iteration Mode
 
@@ -405,14 +583,31 @@ against a slot whose `analysis.md` already exists:
   Medium finding unless explicitly justified. A change that merely
   differs from your personal preference is **not a finding at all** —
   do not import conventions from other repositories.
-- **Severity is the synthesizer's call.** Do not pass through the
-  reviewers' severities verbatim if you disagree. The team reads
-  *your* synthesized ranking.
+- **Severity and confidence are both the synthesizer's call.** Do not
+  pass either through verbatim if you disagree. The team reads *your*
+  synthesized ranking.
+- **Confidence gates promotion, not inclusion.** A finding below 50 does
+  not get a number, and a Blocker or High needs 75 or more. Demote
+  rather than drop when a real finding is merely unconfirmed, and name
+  what would settle it. See § *The confidence scale*.
+- **Provenance is part of the engineering pass.** A change that undoes a
+  deliberate earlier fix, or walks back into a concern a reviewer
+  already raised on these files, is a finding the diff alone cannot
+  produce. Cite the commit or the comment you are contradicting; an
+  uncited provenance claim is an unverified finding and scores as one.
 - **Stay in scope.** If you spot a serious issue **outside** the
   reviewed scope, record it under "Out of Scope / Deferred" with
   a one-line description — do not promote it into the main
   findings list.
 - **Concurrency cap is a hard ceiling.** Do not spin up more than
   `max_subagents` sub-agents in parallel.
+- **Fan-out is earned by scope, not assumed.** Below the step-4
+  threshold, one reviewer runs both passes instead of two running one
+  each. Report the measured counts either way, so the choice is auditable
+  rather than a mood.
+- **Never review in-process.** The threshold changes the number of
+  reviewers, never whether a reviewer is used. A pass done by the
+  skill's own context has no role brief, holds an edit tool, and may be
+  the context that wrote the code.
 - **Do not commit.** Files under `scratch/` are gitignored on
   purpose.

@@ -2,13 +2,13 @@
   <Import Project="..\..\fhir-codegen.props" />
 
   <PropertyGroup>
-    <TargetFrameworks>net9.0</TargetFrameworks>
+    <TargetFrameworks>net11.0</TargetFrameworks>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Antlr4.Runtime.Standard" Version="4.13.1" />
-    <PackageReference Include="Hl7.Fhir.R5" Version="5.13.3" />
-    <PackageReference Include="brianpos.Fhir.Base.FhirPath.Validator" Version="5.12.2-rc2" />
+    <PackageReference Include="Hl7.Fhir.R5" Version="5.13.4" />
+    <PackageReference Include="brianpos.Fhir.Base.FhirPath.Validator" Version="5.13.4-rc2" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
@@ -16,7 +16,7 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="System.Text.Json" Version="9.0.6" />
+    <PackageReference Include="System.Text.Json" Version="10.0.11" />
   </ItemGroup>
 
   <ItemGroup>

@@ -26,6 +26,7 @@ public static class DbContentClasses
         try { DbExternalInclusion.LoadMaxKey(db); } catch { }
         try { DbExtensionSubstitution.LoadMaxKey(db); } catch { }
         try { DbFhirTypeValueSet.LoadMaxKey(db); } catch { }
+        StructureDefinitionFactsStore.LoadContentIndices(db);
     }
 
     public static void DropTables(
@@ -35,6 +36,12 @@ public static class DbContentClasses
         bool forStructures = true,
         bool forSupport = true)
     {
+        if (forPackages || forTerminologies || forStructures || forSupport)
+        {
+            DefinitionInventoryStore.InvalidateCompletion(db);
+            UnsafeCodeInputStore.InvalidateInputs(db);
+        }
+
         if (forPackages)
         {
             DbFhirPackage.DropTable(db);
@@ -54,6 +61,8 @@ public static class DbContentClasses
 
         if (forStructures)
         {
+            DbStructureDefinitionFacts.DropTable(db);
+            DbDefinitionInventoryState.DropTable(db);
             DbStructureDefinition.DropTable(db);
             DbElement.DropTable(db);
             DbElementAdditionalBinding.DropTable(db);
@@ -98,6 +107,8 @@ public static class DbContentClasses
             DbElement.CreateTable(db);
             DbElementAdditionalBinding.CreateTable(db);
             DbElementType.CreateTable(db);
+            DbStructureDefinitionFacts.CreateTable(db);
+            DbDefinitionInventoryState.CreateTable(db);
         }
 
         if (forSupport)
@@ -274,6 +285,8 @@ public partial class DbValueSet : DbMetadataResource, IDbContentWithId
 [CgSQLiteTable(tableName: "ValueSetConcepts")]
 [CgSQLiteIndex(nameof(ValueSetKey), nameof(Inactive), nameof(Abstract))]
 [CgSQLiteIndex(nameof(ValueSetKey), nameof(System), nameof(Code))]
+[CgSQLiteIndex(nameof(ValueSetKey), nameof(Code))]
+[CgSQLiteIndex(nameof(FhirPackageKey))]
 public partial class DbValueSetConcept : DbPackageContent, IEquatable<DbValueSetConcept>
 {
     [CgSQLiteForeignKey(referenceTable: "ValueSets", referenceColumn: nameof(DbValueSet.Key))]
@@ -647,6 +660,7 @@ public partial class DbElementAdditionalBinding : DbPackageContent
 [CgSQLiteIndex(nameof(ElementKey), nameof(TypeName), nameof(TypeProfile), nameof(TargetProfile))]
 [CgSQLiteIndex(nameof(TypeName))]
 [CgSQLiteIndex(nameof(TypeName), nameof(TypeProfile), nameof(TargetProfile))]
+[CgSQLiteIndex(nameof(FhirPackageKey))]
 public partial class DbElementType : DbPackageContent
 {
     private static readonly string[] _quantityTypes = [
@@ -736,6 +750,7 @@ public partial class DbCodeSystem : DbMetadataResource, IDbContentWithId
 [CgSQLiteTable(tableName: "CodeSystemConcepts")]
 [CgSQLiteIndex(nameof(CodeSystemKey))]
 [CgSQLiteIndex(nameof(CodeSystemKey), nameof(FlatOrder))]
+[CgSQLiteIndex(nameof(CodeSystemKey), nameof(Code))]
 public partial class DbCodeSystemConcept : DbPackageContent
 {
     [CgSQLiteForeignKey(referenceTable: "CodeSystems", referenceColumn: nameof(DbCodeSystem.Key))]

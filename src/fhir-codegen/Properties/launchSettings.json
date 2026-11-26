@@ -182,7 +182,7 @@
         },
         "XVer wip": {
             "commandName": "Project",
-            "commandLineArgs": "xver wip --use-internal-type-maps true --max-expansion-size 8000 --resolve-dependencies false -c hl7.fhir.r2.core@1.0.2 -c hl7.fhir.r3.core@3.0.2  -c hl7.fhir.r4.core@4.0.1 -c hl7.fhir.r4b.core@4.3.0 -c hl7.fhir.r5.core@5.0.0 --auto-load-expansions",
+            "commandLineArgs": "xver wip --report-omissions true --use-internal-type-maps true --max-expansion-size 8000 --resolve-dependencies false -c hl7.fhir.r2.core@1.0.2 -c hl7.fhir.r3.core@3.0.2  -c hl7.fhir.r4.core@4.0.1 -c hl7.fhir.r4b.core@4.3.0 -c hl7.fhir.r5.core@5.0.0 --auto-load-expansions",
             "workingDirectory": "$(MSBuildProjectDirectory)"
         },
         "CQL R4": {

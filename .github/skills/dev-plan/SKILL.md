@@ -147,11 +147,14 @@ degraded one.
 7. **Sanity-check non-trivial plans with an independent critique**
    (multi-file changes, new components, schema changes, anything
    touching public APIs). Use the `rubber-duck` agent, or a registered
-   review specialist when one is available; otherwise use a
+   review specialist when one is available; fall back to a
    `general-purpose` sub-agent explicitly prompted to act as an
-   adversarial reviewer. Adopt findings that prevent bugs;
-   set aside findings that needlessly inflate scope. Briefly summarize
-   what changed as a result.
+   adversarial reviewer only where neither exists. A single-file plan
+   with no new component, no schema change, and no public-API change is
+   **trivial** and skips this step — say that you skipped it and why.
+   Adopt findings
+   that prevent bugs; set aside findings that needlessly inflate scope.
+   Briefly summarize what changed as a result.
 8. **Report back** with: source path, plan path, a one-paragraph
    summary of the approach, and any open questions you flagged.
 9. **Offer the open-questions walkthrough** whenever the plan's *Open
@@ -311,6 +314,25 @@ this section. Never delete or rewrite an existing `COMMIT` or `NOTE` entry.}
 
 {Free-form. Links to docs, prior art, related plans.}
 ```
+
+## Sub-Agent Model Tier
+
+Resolve each role against the **subagent model policy** in the
+repository's `AGENTS.md` (`## Agent guardrails`). An absent or
+unreadable policy means `uniform`, and every role below runs the
+spawning agent's model.
+
+| Role | Tier | Agent |
+|-|-|-|
+| Adversarial critique of a plan | reasoning | `rubber-duck` |
+| Surveying an unfamiliar area the plan will touch | mechanical | `explore` |
+| Confirming a command or path the plan cites actually exists | mechanical | `explore` |
+
+Planning is the skill that fans out least, and it should stay that way:
+you author the plan yourself. The critique in the Workflow's step 7 is
+the one dispatch that earns its keep, and a trivial plan skips even
+that. Everything else here is discovery, which the built-in `explore`
+agent already runs on a lightweight model.
 
 ## Iteration Mode
 

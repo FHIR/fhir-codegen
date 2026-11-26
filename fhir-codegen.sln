@@ -69,10 +69,6 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "commands", "commands", "{81
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fhir.CodeGen.LangSQLite", "src\Fhir.CodeGen.LangSQLite\Fhir.CodeGen.LangSQLite.csproj", "{9E7D3F81-3930-4663-8770-32BAE4EB3828}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fhir.CodeGen.Packages", "src\Fhir.CodeGen.Packages\Fhir.CodeGen.Packages.csproj", "{2BD398B7-C441-46DC-BD57-DEC173889479}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fhir.CodeGen.Packages.Tests", "src\Fhir.CodeGen.Packages.Tests\Fhir.CodeGen.Packages.Tests.csproj", "{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fhir.CodeGen.CrossVersionExporter", "src\Fhir.CodeGen.CrossVersionExporter\Fhir.CodeGen.CrossVersionExporter.csproj", "{07198F60-02E3-4332-B352-3B479AF51B73}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
@@ -221,30 +217,6 @@ Global
 		{9E7D3F81-3930-4663-8770-32BAE4EB3828}.Release|x64.Build.0 = Release|Any CPU
 		{9E7D3F81-3930-4663-8770-32BAE4EB3828}.Release|x86.ActiveCfg = Release|Any CPU
 		{9E7D3F81-3930-4663-8770-32BAE4EB3828}.Release|x86.Build.0 = Release|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Debug|x64.Build.0 = Debug|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Debug|x86.Build.0 = Debug|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Release|Any CPU.Build.0 = Release|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Release|x64.ActiveCfg = Release|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Release|x64.Build.0 = Release|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Release|x86.ActiveCfg = Release|Any CPU
-		{2BD398B7-C441-46DC-BD57-DEC173889479}.Release|x86.Build.0 = Release|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Debug|x64.Build.0 = Debug|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Debug|x86.Build.0 = Debug|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Release|Any CPU.Build.0 = Release|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Release|x64.ActiveCfg = Release|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Release|x64.Build.0 = Release|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Release|x86.ActiveCfg = Release|Any CPU
-		{ADE90431-3242-4A51-BC2D-2431CA2A6DCA}.Release|x86.Build.0 = Release|Any CPU
 		{07198F60-02E3-4332-B352-3B479AF51B73}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{07198F60-02E3-4332-B352-3B479AF51B73}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{07198F60-02E3-4332-B352-3B479AF51B73}.Debug|x64.ActiveCfg = Debug|Any CPU

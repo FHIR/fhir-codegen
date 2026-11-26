@@ -1,4 +1,9 @@
-﻿using System;
+﻿// <copyright file="ComparisonDatabase.cs" company="Microsoft Corporation">
+//     Copyright (c) Microsoft Corporation. All rights reserved.
+//     Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
+// </copyright>
+
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
@@ -152,6 +157,7 @@ public class ComparisonDatabase : IDisposable
 
         _db = new SqliteConnection(connectionString);
         _db.Open();
+        EnableMappedReads(_db);
 
         _logger.LogInformation($"Opened database: `{connectionString}`");
 
@@ -169,24 +175,59 @@ public class ComparisonDatabase : IDisposable
             ?? NullLoggerFactory.Instance.CreateLogger(nameof(ComparisonDatabase));
 
         _dbPath = dbPath;
-        if (!Directory.Exists(_dbPath))
+        _dbName = dbName;
+        string dbFilePath = Path.Combine(_dbPath, _dbName);
+        if (!File.Exists(dbFilePath))
         {
-            Directory.CreateDirectory(_dbPath);
+            throw new FileNotFoundException(
+                $"Comparison database '{dbFilePath}' does not exist. Initialize with 'xver load' or '--reload-db true'; reloading is destructive and replaces existing content.",
+                dbFilePath);
         }
 
-        _dbName = dbName;
         string connectionString = new SqliteConnectionStringBuilder()
         {
-            DataSource = Path.Combine(_dbPath, _dbName),
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            DataSource = dbFilePath,
+            Mode = SqliteOpenMode.ReadWrite,
         }.ToString();
 
-        _logger.LogInformation($"Opened database: `{connectionString}`");
-
         _db = new SqliteConnection(connectionString);
-        _db.Open();
+        try
+        {
+            _db.Open();
+            EnableMappedReads(_db);
+            _logger.LogInformation($"Opened database: `{connectionString}`");
 
-        DbContentClasses.LoadIndices(_db);
+            using IDbCommand command = _db.CreateCommand();
+            command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $tableName";
+            IDbDataParameter tableName = command.CreateParameter();
+            tableName.ParameterName = "$tableName";
+            tableName.Value = DbFhirPackage.DefaultTableName;
+            command.Parameters.Add(tableName);
+            if (command.ExecuteScalar() is null)
+            {
+                throw new InvalidDataException(
+                    $"Comparison database '{dbFilePath}' is missing table '{DbFhirPackage.DefaultTableName}'. Rebuild with 'xver load' or '--reload-db true'; rebuilding is destructive and replaces existing content.");
+            }
+
+            DbContentClasses.LoadIndices(_db);
+        }
+        catch
+        {
+            _db.Dispose();
+            throw;
+        }
+    }
+
+    private static void EnableMappedReads(IDbConnection db)
+    {
+        if (Environment.Is64BitProcess)
+        {
+            // The verification passes revisit the same file pages. This is an
+            // address-space limit, not a heap allocation or a persistent DB setting.
+            using IDbCommand command = db.CreateCommand();
+            command.CommandText = "PRAGMA main.mmap_size = 2147483648";
+            command.ExecuteScalar();
+        }
     }
 
     public bool IsCoreComparison => _isCoreComparison;
@@ -623,8 +664,8 @@ public class ComparisonDatabase : IDisposable
             }
 
             List<string> deps = dc.Manifests.Keys
-                .Where(key => !key.id.StartsWith(dc.MainPackageId, StringComparison.OrdinalIgnoreCase))
-                .Select(key => key.id + "@" + key.version)
+                .Where(key => !key.Id.StartsWith(dc.MainPackageId, StringComparison.OrdinalIgnoreCase))
+                .Select(key => key.Id + "@" + key.Version)
                 .ToList();
 
             // add data about our packages
@@ -659,14 +700,15 @@ public class ComparisonDatabase : IDisposable
             return false;
         }
 
-        List<DbFhirPackage> r2Packages = [];
+        DefinitionInventoryStore.InvalidateCompletion(_db);
+        List<(DefinitionCollection dc, DbFhirPackage package)> packages = [.. _definitions.Select(entry =>
+            (entry.dc, DbFhirPackage.SelectSingle(_db, PackageId: entry.dc.MainPackageId, PackageVersion: entry.dc.MainPackageVersion)
+                ?? throw new InvalidOperationException($"Package {entry.dc.MainPackageId}@{entry.dc.MainPackageVersion} was not found in the database!")))];
+        string revision = DefinitionInventoryStore.BeginInventory(_db, [.. packages.Select(entry =>
+            ExpectedStructureCounts(entry.package.Key, entry.dc, _exclusionSet))]);
 
-        foreach ((DefinitionCollection dc, DcInfoRec _) in _definitions)
+        foreach ((DefinitionCollection dc, DbFhirPackage pm) in packages)
         {
-            // get the package metadata for this definition collection
-            DbFhirPackage pm = DbFhirPackage.SelectSingle(_db, PackageId: dc.MainPackageId, PackageVersion: dc.MainPackageVersion)
-                    ?? throw new Exception($"Package {dc.MainPackageId}@{dc.MainPackageVersion} was not found in the database!");
-
             // load our code systems
             addCodeSystemsToDb(pm, dc, _exclusionSet);
 
@@ -675,28 +717,156 @@ public class ComparisonDatabase : IDisposable
 
             // load our structures
             addStructuresToDb(pm, dc, _exclusionSet);
-
-            if (dc.FhirSequence == FhirReleases.FhirSequenceCodes.DSTU2)
-            {
-                r2Packages.Add(pm);
-            }
         }
 
         // do value set post-processing
         doValueSetPostProcessing(_escapeValveCodes);
 
         // do element post-processing
-        findInheritedElements(r2Packages);
-        fixContentReferences();
+        XVerStructureCatalog catalog = new(_db, _exclusionSet);
+        catalog.ResolveImportLinks(_db, validateProcessedRoots: true);
+        foreach (string diagnostic in catalog.Diagnostics)
+        {
+            _logger.LogWarning("{CatalogDiagnostic}", diagnostic);
+        }
         //expandContentReferenceElements();
 
         // do code-system post-processing
-        doCodeSystemPostProcessing();
+        doCodeSystemPostProcessing(catalog);
+
+        DefinitionInventoryStore.CompleteInventory(_db, revision);
 
         return true;
     }
 
-    private void doCodeSystemPostProcessing()
+    private static IEnumerable<(IEnumerable<StructureDefinition> structures, FhirArtifactClassEnum cgClass)> GetStructureInventories(
+        DefinitionCollection dc)
+    {
+        yield return (dc.PrimitiveTypesByName.Values, FhirArtifactClassEnum.PrimitiveType);
+        yield return (dc.ComplexTypesByName.Values, FhirArtifactClassEnum.ComplexType);
+        yield return (dc.ResourcesByName.Values, FhirArtifactClassEnum.Resource);
+        yield return (dc.ProfilesByUrl.Values, FhirArtifactClassEnum.Profile);
+    }
+
+    private static IReadOnlyList<ElementDefinition> GetAvailableProjection(StructureDefinition definition) =>
+        definition.Snapshot?.Element.Count > 0 ? definition.Snapshot.Element : definition.Differential?.Element ?? [];
+
+    private static DefinitionInventoryPackageCounts ExpectedStructureCounts(
+        int packageKey, DefinitionCollection dc, HashSet<string> exclusions)
+    {
+        int elementCount = 0;
+        int typeCount = 0;
+        int bindingCount = 0;
+        foreach ((IEnumerable<StructureDefinition> definitions, FhirArtifactClassEnum artifactClass) in GetStructureInventories(dc))
+        {
+            foreach (StructureDefinition definition in definitions)
+            {
+                if (artifactClass != FhirArtifactClassEnum.Profile && exclusions.Contains(definition.Url))
+                {
+                    continue;
+                }
+
+                IReadOnlyList<ElementDefinition> projection = GetAvailableProjection(definition);
+                elementCount += projection.Count;
+                foreach (ElementDefinition element in projection)
+                {
+                    typeCount += element.Type.Sum(type => Math.Max(1, type.ProfileElement.Count) * Math.Max(1, type.TargetProfileElement.Count));
+                    if (element.Type.Count == 0 && definition.Snapshot?.Element.Count > 0 &&
+                        element.cgFieldOrder() == 0 && !string.IsNullOrEmpty(definition.Type))
+                    {
+                        typeCount++;
+                    }
+
+                    bindingCount += element.Binding?.Additional.Count ?? 0;
+                }
+            }
+        }
+
+        return new(packageKey, dc.PrimitiveTypesByName.Count, dc.ComplexTypesByName.Count, dc.ResourcesByName.Count,
+            dc.ProfilesByUrl.Count, elementCount, typeCount, bindingCount);
+    }
+
+    private IReadOnlySet<int> GetTerminologyOwnerClosure(XVerStructureCatalog catalog, int packageKey)
+    {
+        HashSet<int> owners = [.. catalog.GetProcessedStructures(packageKey).Select(owner => owner.Key)];
+        Queue<int> pending = new(owners);
+        while (pending.TryDequeue(out int key))
+        {
+            DbStructureDefinition owner = catalog.GetStructure(key);
+            foreach (DbStructureDefinition ancestor in catalog.GetAncestors(owner))
+            {
+                AddOwner(ancestor);
+            }
+
+            foreach (DbElement element in catalog.GetOwnedElements(owner))
+            {
+                if (element.BaseElementKey is not null || element.BaseStructureKey is not null)
+                {
+                    DbElement inherited = catalog.ResolveBaseElement(element)!;
+                    AddOwner(catalog.GetOwner(inherited));
+                }
+
+                if (element.ContentReferenceSourceKey is int sourceKey)
+                {
+                    DbElement source = catalog.ResolveContentReference(element);
+                    AddOwner(catalog.GetOwner(source));
+                    DbElement immediate = DbElement.SelectSingle(_db, Key: sourceKey)
+                        ?? throw new InvalidOperationException($"Terminology dependency contentReference element {sourceKey} is missing.");
+                    AddOwner(catalog.GetOwner(immediate));
+                }
+
+                foreach (DbElementType type in catalog.GetTypeUses(element))
+                {
+                    foreach ((string? canonical, int? existingKey) in new[]
+                    {
+                        (type.TypeProfile, type.TypeProfileStructureKey), (type.TargetProfile, type.TargetProfileStructureKey),
+                    })
+                    {
+                        if (canonical is null && existingKey is null)
+                        {
+                            continue;
+                        }
+
+                        DbStructureDefinition? referenced = catalog.ResolveDefinition(packageKey, canonical, existingKey,
+                            required: false, context: owner.VersionedUrl + "#" + element.Id);
+                        if (referenced is not null)
+                        {
+                            AddOwner(referenced);
+                        }
+                    }
+                }
+            }
+        }
+
+        return owners;
+
+        void AddOwner(DbStructureDefinition owner)
+        {
+            if (owner.FhirPackageKey != packageKey)
+            {
+                throw new InvalidOperationException($"Terminology dependency '{owner.VersionedUrl}' belongs to a different package than {packageKey}.");
+            }
+            if (owners.Add(owner.Key))
+            {
+                pending.Enqueue(owner.Key);
+            }
+        }
+    }
+
+    private static int? ResolveBindingValueSetKey(IReadOnlyList<DbValueSet> valueSets, string? canonical)
+    {
+        UnsafeCodeCanonical identity = UnsafeCodeCanonical.Parse(canonical);
+        if (string.IsNullOrEmpty(identity.Url) || identity.Version == "")
+        {
+            return null;
+        }
+
+        DbValueSet[] matches = [.. valueSets.Where(row => row.UnversionedUrl == identity.Url &&
+            (identity.Version is null || row.Version == identity.Version))];
+        return matches.Length == 1 ? matches[0].Key : null;
+    }
+
+    private void doCodeSystemPostProcessing(XVerStructureCatalog catalog)
     {
         DbFhirPackage? r5 = DbFhirPackage.SelectSingle(
             _db,
@@ -704,6 +874,8 @@ public class ComparisonDatabase : IDisposable
         
         if (r5 != null)
         {
+            IReadOnlySet<int> owners = GetTerminologyOwnerClosure(catalog, r5.Key);
+            string ownerKeys = owners.Count == 0 ? "NULL" : string.Join(", ", owners.Order());
             IDbCommand command = _db.CreateCommand();
             command.CommandText = $"""
                 delete from {DbCodeSystem.DefaultTableName}
@@ -717,7 +889,14 @@ public class ComparisonDatabase : IDisposable
                         select distinct {nameof(DbElement.BindingValueSetKey)}
                         from {DbElement.DefaultTableName}
                         where {nameof(DbElement.FhirPackageKey)} = {r5.Key}
+                        and {nameof(DbElement.StructureKey)} in ({ownerKeys})
                         and {nameof(DbElement.BindingValueSetKey)} is not null
+                        union
+                        select distinct {nameof(DbElementAdditionalBinding.BindingValueSetKey)}
+                        from {DbElementAdditionalBinding.DefaultTableName}
+                        where {nameof(DbElementAdditionalBinding.FhirPackageKey)} = {r5.Key}
+                        and {nameof(DbElementAdditionalBinding.StructureKey)} in ({ownerKeys})
+                        and {nameof(DbElementAdditionalBinding.BindingValueSetKey)} is not null
                     )
                     and {nameof(DbValueSetConcept.System)} is not null
                 )
@@ -751,142 +930,6 @@ public class ComparisonDatabase : IDisposable
         }
 
         return;
-    }
-
-    private void findInheritedElements(List<DbFhirPackage> r2Packages)
-    {
-        foreach (DbFhirPackage package in r2Packages)
-        {
-            // resolve the 'Element.id' element
-            DbElement? idElement = DbElement.SelectSingle(
-                _db,
-                FhirPackageKey: package.Key,
-                Id: "Element.id");
-
-            if (idElement is not null)
-            {
-                // get elements with matching definition
-                List<DbElement> elements = DbElement.SelectList(
-                    _db,
-                    FhirPackageKey: package.Key,
-                    Short: idElement.Short,
-                    FullCollatedTypeLiteral: idElement.FullCollatedTypeLiteral);
-
-                elements.RemoveAll(e => e.Key == idElement.Key);
-
-                // update element information
-                foreach (DbElement ed in elements)
-                {
-                    ed.BasePath = idElement.Path;
-                    ed.BaseElementKey = idElement.Key;
-                    ed.BaseStructureKey = idElement.StructureKey;
-                    ed.IsSimpleType = true;
-                }
-
-                elements.Update(_db);
-            }
-
-            // resolve the 'Extension' element
-            DbElement? extElement = DbElement.SelectSingle(
-                _db,
-                FhirPackageKey: package.Key,
-                Id: "Element.extension");
-
-            if (extElement is not null)
-            {
-                // get elements with matching definition
-                List<DbElement> elements = DbElement.SelectList(
-                    _db,
-                    FhirPackageKey: package.Key,
-                    Short: extElement.Short,
-                    FullCollatedTypeLiteral: extElement.FullCollatedTypeLiteral);
-
-                elements.RemoveAll(e => e.Key == extElement.Key);
-
-                // update element information
-                foreach (DbElement ed in elements)
-                {
-                    ed.BasePath = extElement.Path;
-                    ed.BaseElementKey = extElement.Key;
-                    ed.BaseStructureKey = extElement.StructureKey;
-                }
-
-                elements.Update(_db);
-            }
-        }
-    }
-
-    private void fixContentReferences()
-    {
-        DbContentWithIdCache<DbElement> edCache = new();
-
-        // iterate over resources (need to handle individually since we are inserting elements and need to update the resource field order)
-        List<DbStructureDefinition> structures = DbStructureDefinition.SelectList(
-            _db,
-            ArtifactClass: FhirArtifactClassEnum.Resource);
-        foreach (DbStructureDefinition dbSd in structures)
-        {
-            // get the elements for this structure
-            List<DbElement> elements = DbElement.SelectList(
-                _db,
-                StructureKey: dbSd.Key,
-                orderByProperties: [nameof(DbElement.ResourceFieldOrder)]);
-
-            // build a lookup for the elements by id
-            ILookup<string, DbElement> elementsById = elements.ToLookup(e => e.Id);
-
-            foreach (DbElement dbEd in elements)
-            {
-                // if this is not a content reference, we are done
-                if (!dbEd.DefinedAsContentReference)
-                {
-                    continue;
-                }
-
-                // resolve the content reference to the root element it references (the one with the same id as the full collated type literal)
-                DbElement? crElement = elementsById[dbEd.FullCollatedTypeLiteral].FirstOrDefault();
-
-                if (crElement is null)
-                {
-                    // get the root cr element
-                    crElement = DbElement.SelectSingle(
-                        _db,
-                        FhirPackageKey: dbEd.FhirPackageKey,
-                        Id: dbEd.FullCollatedTypeLiteral);
-                }
-
-                if (crElement is not null)
-                {
-                    dbEd.ContentReferenceSourceKey = crElement.Key;
-                    dbEd.ContentReferenceSourceId = crElement.Id;
-                    edCache.CacheUpdate(dbEd);
-
-                    if (crElement.UsedAsContentReference != true)
-                    {
-                        crElement.UsedAsContentReference = true;
-                        edCache.CacheUpdate(crElement);
-                    }
-                }
-
-                if (crElement is null)
-                {
-                    throw new Exception($"Could not find content reference base element for {dbEd.Id} in structure {dbSd.Name} ({dbSd.VersionedUrl})!");
-                }
-            }
-        }
-
-        // commit our changes
-        if (edCache.ToUpdateCount > 0)
-        {
-            DbElement.Update(_db, edCache.ToUpdate);
-            _logger.LogInformation($"Expanded content reference elements updated {edCache.ToUpdateCount} existing elements.");
-        }
-
-        if (edCache.ToAddCount > 0)
-        {
-            DbElement.Insert(_db, edCache.ToAdd, ignoreDuplicates: true, insertPrimaryKey: true);
-            _logger.LogInformation($"Expanded content reference elements with {edCache.ToAddCount} new elements.");
-        }
     }
 
     private void expandContentReferenceElements()
@@ -1772,22 +1815,24 @@ public class ComparisonDatabase : IDisposable
         DefinitionCollection dc,
         HashSet<string> _exclusionSet)
     {
-        Dictionary<string, DbStructureDefinition> dbStructures = [];
-        Dictionary<string, DbElement> dbElements = [];
+        Dictionary<(int packageKey, string url, string? version), DbStructureDefinition> dbStructures = [];
+        Dictionary<(int packageKey, int structureKey, string id), DbElement> dbElements = [];
         List<DbElementType> dbElementTypes = [];
         List<DbElementAdditionalBinding> dbAdditionalBindings = [];
+        List<DbStructureDefinitionFacts> dbFacts = [];
+        List<DbValueSet> valueSets = DbValueSet.SelectList(_db, FhirPackageKey: pm.Key);
 
         string fhirVersionLiteral = pm.DefinitionFhirSequence.ToString();
 
         // iterate over the types of structures
-        foreach ((IEnumerable<StructureDefinition> structures, FhirArtifactClassEnum cgClass) in getStructures(dc))
+        foreach ((IEnumerable<StructureDefinition> structures, FhirArtifactClassEnum cgClass) in GetStructureInventories(dc))
         {
             foreach (StructureDefinition sd in structures)
             {
                 string? sdImplements = sd.cgImplementsJoined();
 
                 // will not further process value sets we know we will not process
-                if (_exclusionSet.Contains(sd.Url))
+                if (_exclusionSet.Contains(sd.Url) && cgClass != FhirArtifactClassEnum.Profile)
                 {
                     // still add a metadata record
                     DbStructureDefinition sdmExcluded = new()
@@ -1837,7 +1882,12 @@ public class ComparisonDatabase : IDisposable
                         Implements = sdImplements,
                     };
 
-                    dbStructures.Add(sd.Id, sdmExcluded);
+                    if (!dbStructures.TryAdd((pm.Key, sd.Url, sd.Version), sdmExcluded))
+                    {
+                        throw new InvalidOperationException($"Conflicting retained definition identity in package {pm.Key}: '{sd.Url}|{sd.Version}'.");
+                    }
+                    dbFacts.Add(StructureDefinitionFactsStore.CreateFacts(
+                        DbStructureDefinitionFacts.GetIndex(), pm.Key, sdmExcluded.Key, sd));
 
                     continue;
                 }
@@ -1884,19 +1934,38 @@ public class ComparisonDatabase : IDisposable
                     RootExtensions = sd.Extension,
                     Comment = (sd.Snapshot?.Element.FirstOrDefault()?.Comment).ProcessCoreTextForLinks(fhirVersionLiteral),
                     ArtifactClass = cgClass,
-                    Message = string.Empty,
+                    Message = _exclusionSet.Contains(sd.Url) ? "Manually excluded" : string.Empty,
                     SnapshotCount = sd.Snapshot?.Element.Count ?? 0,
                     DifferentialCount = sd.Differential?.Element.Count ?? 0,
                     Implements = sdImplements,
                 };
 
-                dbStructures.Add(sd.Id, dbStructure);
-
-                // iterate over all the elements of the structure
-                foreach (ElementDefinition ed in sd.cgElements(skipSlices: false))
+                if (!dbStructures.TryAdd((pm.Key, sd.Url, sd.Version), dbStructure))
                 {
-                    addElementAndTypes(dbStructure, sd, ed);
+                    throw new InvalidOperationException($"Conflicting retained definition identity in package {pm.Key}: '{sd.Url}|{sd.Version}'.");
                 }
+                dbFacts.Add(StructureDefinitionFactsStore.CreateFacts(
+                    DbStructureDefinitionFacts.GetIndex(), pm.Key, dbStructure.Key, sd));
+
+                IReadOnlyList<ElementDefinition> projection = GetAvailableProjection(sd);
+                ElementDefinition[] roots = sd.Snapshot?.Element.Count > 0
+                    ? [.. projection.Where(element => element.cgFieldOrder() == 0)] : [];
+                ElementDefinition? root = roots.Length == 1 ? roots[0] : null;
+                foreach (ElementDefinition ed in projection)
+                {
+                    addElementAndTypes(dbStructure, sd, ed, root);
+                }
+            }
+        }
+
+        foreach (DbElement element in dbElements.Values)
+        {
+            int separator = element.Id.LastIndexOf('.');
+            if (separator >= 0 && dbElements.TryGetValue(
+                (element.FhirPackageKey, element.StructureKey, element.Id[..separator]), out DbElement? parent))
+            {
+                element.ParentElementKey = parent.Key;
+                parent.ChildElementCount++;
             }
         }
 
@@ -1914,6 +1983,7 @@ public class ComparisonDatabase : IDisposable
 
         _db.Insert(dbAdditionalBindings, insertPrimaryKey: true);
         _logger.LogInformation($" <<< added {dbAdditionalBindings.Count} Additional Bindings");
+        DbStructureDefinitionFacts.Insert(_db, dbFacts, insertPrimaryKey: true);
 
         int affectedRows;
 
@@ -1930,42 +2000,20 @@ public class ComparisonDatabase : IDisposable
         affectedRows = _db.UpdateElementTargetProfileStructureKeys(pm.Key);
         _logger.LogInformation($" <<< updated {affectedRows} Element Target Profile Structure Keys");
 
-        affectedRows = _db.UpdateElementBaseKeys(pm.Key);
-        _logger.LogInformation($" <<< updated {affectedRows} Element Base Keys");
-
         return;
 
-        // TODO(ginoc): For now, exclude extensions, profiles, and logical models - we will want them for generic packages, but do not care for core
-        (IEnumerable<StructureDefinition> structures, FhirArtifactClassEnum cgClass)[] getStructures(DefinitionCollection dc) => [
-            (dc.PrimitiveTypesByName.Values, FhirArtifactClassEnum.PrimitiveType),
-            (dc.ComplexTypesByName.Values, FhirArtifactClassEnum.ComplexType),
-            (dc.ResourcesByName.Values, FhirArtifactClassEnum.Resource),
-            //(dc.ExtensionsByUrl.Values, FhirArtifactClassEnum.Extension),
-            //(dc.ProfilesByUrl.Values, FhirArtifactClassEnum.Profile),
-            //(dc.LogicalModelsByUrl.Values, FhirArtifactClassEnum.LogicalModel),
-            ];
-        
         void addElementAndTypes(
             DbStructureDefinition dbStructure,
             StructureDefinition sd,
-            ElementDefinition ed)
+            ElementDefinition ed,
+            ElementDefinition? root)
         {
             int elementKey = DbElement.GetIndex();
-
-            // check for children
-            int childCount = sd.cgElements(
-                ed.Path,
-                topLevelOnly: true,
-                includeRoot: false,
-                skipSlices: true).Count();
 
             List<DbElementType> currentElementTypes = [];
             Dictionary<string, (List<string> targetProfiles, List<string> typeProfiles)> literalAccumulator = [];
 
-            int? bindingVsKey = ed.Binding?.ValueSet == null
-                ? null
-                : (DbValueSet.SelectSingle(_db, FhirPackageKey: pm.Key, UnversionedUrl: ed.Binding?.ValueSet)?.Key
-                  ?? DbValueSet.SelectSingle(_db, FhirPackageKey: pm.Key, VersionedUrl: ed.Binding?.ValueSet)?.Key);
+            int? bindingVsKey = ResolveBindingValueSetKey(valueSets, ed.Binding?.ValueSet);
 
             IEnumerable<ElementDefinition.TypeRefComponent> elementTypes = ed.Type.Select(tr => tr.cgAsR5());
             foreach (ElementDefinition.TypeRefComponent tr in elementTypes)
@@ -2081,52 +2129,24 @@ public class ComparisonDatabase : IDisposable
                 }
             }
 
-            if (currentElementTypes.Count == 0)
+            if (currentElementTypes.Count == 0 && ReferenceEquals(ed, root) && !string.IsNullOrEmpty(sd.Type))
             {
-                string resolvedTypeName;
-
-                if (ed.ElementId == sd.Id)
+                string resolvedTypeName = sd.Type;
+                DbElementType et = new()
                 {
-                    resolvedTypeName = sd.Id;
-                    //string tl = literalForType(sd.Id, null, null);
-                    DbElementType et = new()
-                    {
-                        Key = DbElementType.GetIndex(),
-                        FhirPackageKey = dbStructure.FhirPackageKey,
-                        StructureKey = dbStructure.Key,
-                        ElementKey = elementKey,
-                        TypeName = sd.Id,
-                        TypeStructureKey = null,
-                        TypeProfile = null,
-                        TypeProfileStructureKey = null,
-                        TargetProfile = null,
-                        TargetProfileStructureKey = null,
-                    };
-                    currentElementTypes.Add(et);
-                    dbElementTypes.Add(et);
-                }
-                else
-                {
-                    string btn = ed.cgBaseTypeName(dc, true);
-                    resolvedTypeName = btn;
-                    //string tl = literalForType(btn, null, null);
-
-                    DbElementType et = new()
-                    {
-                        Key = DbElementType.GetIndex(),
-                        FhirPackageKey = dbStructure.FhirPackageKey,
-                        StructureKey = dbStructure.Key,
-                        ElementKey = elementKey,
-                        TypeName = btn,
-                        TypeStructureKey = null,
-                        TypeProfile = null,
-                        TypeProfileStructureKey = null,
-                        TargetProfile = null,
-                        TargetProfileStructureKey = null,
-                    };
-                    currentElementTypes.Add(et);
-                    dbElementTypes.Add(et);
-                }
+                    Key = DbElementType.GetIndex(),
+                    FhirPackageKey = dbStructure.FhirPackageKey,
+                    StructureKey = dbStructure.Key,
+                    ElementKey = elementKey,
+                    TypeName = resolvedTypeName,
+                    TypeStructureKey = null,
+                    TypeProfile = null,
+                    TypeProfileStructureKey = null,
+                    TargetProfile = null,
+                    TargetProfileStructureKey = null,
+                };
+                currentElementTypes.Add(et);
+                dbElementTypes.Add(et);
 
                 if (!literalAccumulator.TryGetValue(resolvedTypeName, out (List<string> targetProfiles, List<string> typeProfiles) accumulator))
                 {
@@ -2151,7 +2171,7 @@ public class ComparisonDatabase : IDisposable
                         FhirKey = null,     // TODO: R6 added additional.Key
                         Purpose = additional.Purpose,
                         BindingValueSet = additional.ValueSet,
-                        BindingValueSetKey = string.IsNullOrEmpty(additional.ValueSet) ? null : DbValueSet.SelectSingle(_db, FhirPackageKey: pm.Key, UnversionedUrl: additional.ValueSet)?.Key,
+                        BindingValueSetKey = ResolveBindingValueSetKey(valueSets, additional.ValueSet),
                         Documentation = additional.Documentation.ProcessCoreTextForLinks(fhirVersionLiteral),
                         ShortDocumentation = additional.ShortDoco.ProcessCoreTextForLinks(fhirVersionLiteral),
                         CollatedUsageContexts = additional.Usage.Count == 0
@@ -2165,8 +2185,8 @@ public class ComparisonDatabase : IDisposable
             }
 
             HashSet<string> typeNames = [];
-            bool isInherited = ed.cgIsInherited(sd);
-            string basePath = ed.Base?.Path ?? ed.Path;
+            bool isInherited = ed.Base?.Path is string inheritedPath && inheritedPath != ed.Path;
+            string? basePath = ed.Base?.Path;
 
             List<string> completeLiteralComponents = [];
             foreach ((string typeName, (List<string> targetProfiles, List<string> typeProfiles)) in literalAccumulator)
@@ -2190,43 +2210,19 @@ public class ComparisonDatabase : IDisposable
             string fullTypeLiteral = string.Join(", ", completeLiteralComponents.Order());
 
             int resourceFieldOrder = ed.cgFieldOrder();
-            int? parentElementDbKey = null;
-
-            if (resourceFieldOrder != 0)
-            {
-                string parentKey = dbStructure.Key.ToString() + ":" + ed.ElementId.Substring(0, ed.ElementId.LastIndexOf('.'));
-                if (dbElements.TryGetValue(parentKey, out DbElement? parentElement))
-                {
-                    parentElementDbKey = parentElement.Key;
-                }
-            }
-
             bool definedAsContentReference = !string.IsNullOrEmpty(ed.ContentReference);
-            DbElement? crEd = null;
-            if (definedAsContentReference)
-            {
-                if (ed.ContentReference.StartsWith('#') &&
-                    dbElements.TryGetValue(ed.ContentReference[1..], out crEd))
-                {
-                    crEd.UsedAsContentReference = true;
-                }
-                else if (dbElements.TryGetValue(ed.ContentReference, out crEd))
-                {
-                    crEd.UsedAsContentReference = true;
-                }
-            }
 
             DbElement dbElement = new()
             {
                 Key = elementKey,
                 FhirPackageKey = pm.Key,
                 StructureKey = dbStructure.Key,
-                ParentElementKey = parentElementDbKey,
+                ParentElementKey = null,
                 ResourceFieldOrder = resourceFieldOrder,
                 ComponentFieldOrder = ed.cgComponentFieldOrder(),
                 Id = ed.ElementId,
                 Path = ed.Path,
-                ChildElementCount = childCount,
+                ChildElementCount = 0,
                 Name = ed.cgName(),
                 Short = ed.Short.ProcessCoreTextForLinks(fhirVersionLiteral),
                 Definition = ed.Definition.ProcessCoreTextForLinks(fhirVersionLiteral),
@@ -2241,7 +2237,7 @@ public class ComparisonDatabase : IDisposable
                 BindingValueSetKey = bindingVsKey,
                 BindingDescription = ed.Binding?.Description,
                 AdditionalBindingCount = additionalBindingCount,
-                FullCollatedTypeLiteral = fullTypeLiteral,
+                FullCollatedTypeLiteral = definedAsContentReference ? ed.ContentReference : fullTypeLiteral,
                 DistinctTypeCount = typeNames.Count,
                 DistinctTypeLiterals = string.Join(',', typeNames.Order()),
                 IsInherited = isInherited,
@@ -2249,8 +2245,8 @@ public class ComparisonDatabase : IDisposable
                 BaseElementKey = null,
                 BaseStructureKey = null,
                 DefinedAsContentReference = !string.IsNullOrEmpty(ed.ContentReference),
-                ContentReferenceSourceKey = crEd?.Key,
-                ContentReferenceSourceId = crEd?.Id,
+                ContentReferenceSourceKey = null,
+                ContentReferenceSourceId = definedAsContentReference ? ed.ContentReference : null,
                 UsedAsContentReference = null,
                 IsSimpleType = ed.cgIsSimple(),
                 IsChoiceType = typeNames.Count > 1,
@@ -2259,7 +2255,10 @@ public class ComparisonDatabase : IDisposable
                 IsDeprecated = ed.cgStandardStatus()?.Equals("deprecated", StringComparison.OrdinalIgnoreCase) == true,
             };
 
-            dbElements.Add(dbStructure.Key.ToString() + ":" + ed.ElementId, dbElement);
+            if (!dbElements.TryAdd((pm.Key, dbStructure.Key, ed.ElementId), dbElement))
+            {
+                throw new InvalidOperationException($"Duplicate exact element Id '{ed.ElementId}' in package {pm.Key}, owner '{sd.Url}|{sd.Version}'.");
+            }
         }
     }
 

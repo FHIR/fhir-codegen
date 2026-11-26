@@ -152,6 +152,7 @@ public static class DbOutcomeClasses
         try { DbStructureOutcome.LoadMaxKey(db); } catch { }
         try { DbElementOutcome.LoadMaxKey(db); } catch { }
         try { DbElementOutcomeTarget.LoadMaxKey(db); } catch { }
+        try { DbUnsafeCodeTrigger.LoadMaxKey(db); } catch { }
     }
 
     public static void DropTables(
@@ -159,6 +160,11 @@ public static class DbOutcomeClasses
         bool forValueSets = true,
         bool forStructures = true)
     {
+        if (forStructures)
+        {
+            UnsafeCodeInputStore.InvalidateOutcomes(db);
+        }
+
         if (forValueSets)
         {
             DbValueSetOutcome.DropTable(db);
@@ -167,6 +173,7 @@ public static class DbOutcomeClasses
 
         if (forStructures)
         {
+            DbUnsafeCodeTrigger.DropTable(db);
             DbStructureOutcome.DropTable(db);
             DbElementOutcome.DropTable(db);
             DbElementOutcomeTarget.DropTable(db);
@@ -186,6 +193,7 @@ public static class DbOutcomeClasses
 
         if (forStructures)
         {
+            DbUnsafeCodeTrigger.CreateTable(db);
             DbStructureOutcome.CreateTable(db);
             DbElementOutcome.CreateTable(db);
             DbElementOutcomeTarget.CreateTable(db);
@@ -364,6 +372,7 @@ public partial class DbValueSetConceptOutcome : DbOutcomeBase
 
 [CgSQLiteTable(tableName: "StructureOutcomes")]
 [CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(SourceStructureKey), nameof(TargetFhirPackageKey), nameof(TargetStructureKey))]
+[CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(TargetFhirPackageKey))]
 [CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(SourceStructureKey), nameof(TargetFhirPackageKey), nameof(RequiresXVerDefinition))]
 [CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(SourceName), nameof(TargetFhirPackageKey), nameof(TargetName))]
 public partial class DbStructureOutcome : DbArtifactOutcomeWithTargetBase
@@ -778,6 +787,7 @@ public partial class DbElementOutcome : DbArtifactOutcomeBase
 [CgSQLiteIndex(nameof(ElementOutcomeKey), nameof(StructureOutcomeKey))]
 [CgSQLiteIndex(nameof(ElementOutcomeKey), nameof(TargetStructureKey), nameof(TargetElementId))]
 [CgSQLiteIndex(nameof(ElementOutcomeKey), nameof(TargetElementId), nameof(ContextElementId))]
+[CgSQLiteIndex(nameof(SourceFhirPackageKey), nameof(TargetFhirPackageKey))]
 public partial class DbElementOutcomeTarget : DbRecordBase
 {
     [CgSQLiteForeignKey(referenceTable: "ElementOutcomes", referenceColumn: nameof(DbElementOutcome.Key), modelTypeName: nameof(DbElementOutcome))]
@@ -830,4 +840,3 @@ public partial class DbElementOutcomeTarget : DbRecordBase
 
     public required string? Comments { get; set; }
 }
-

@@ -6,7 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
-using Fhir.CodeGen.Packages.Models;
+using Fhir.CodeGen.Lib.Packaging;
 using Hl7.Fhir.Model;
 using Fhir.CodeGen.Lib.FhirExtensions;
 using Fhir.CodeGen.Lib.Models;
@@ -145,8 +145,8 @@ public class ShorthandIG : ILanguage
         }
 
         // check to see if there are multiple versions of FHIR loaded - IG generation can only work with a single one
-        (string id, FhirSemVer version)[] fhirCorePackageIds = info.Manifests.Keys
-            .Where(key => FhirPackageUtils.PackageIsFhirRelease(key.id))
+        PackageIdentity[] fhirCorePackageIds = info.Manifests.Keys
+            .Where(key => FhirPackageUtils.PackageIsFhirRelease(key.Id))
             .ToArray();
         int fhirCoreVersionCount = fhirCorePackageIds
             .Select(d => info.Manifests[d].Version.ToString())

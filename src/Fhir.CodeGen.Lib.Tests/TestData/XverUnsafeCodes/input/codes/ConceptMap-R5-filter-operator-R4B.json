@@ -1,0 +1,20 @@
+{
+  "resourceType": "ConceptMap",
+  "id": "filter-operator-5to4B",
+  "url": "http://example.org/ConceptMap/filter-operator-5to4B",
+  "status": "active",
+  "sourceScopeCanonical": "http://hl7.org/fhir/ValueSet/filter-operator|source-vs",
+  "targetScopeCanonical": "http://hl7.org/fhir/ValueSet/filter-operator|target-vs-r4b",
+  "group": [
+    {
+      "source": "http://hl7.org/fhir/filter-operator|source-system,version",
+      "target": "http://hl7.org/fhir/filter-operator|target-system-r4b",
+      "element": [
+        { "code": "unsafe-demo", "noMap": true },
+        { "code": "=", "target": [ { "code": "=", "relationship": "equivalent" } ] },
+        { "code": "unresolved", "noMap": true },
+        { "code": "no-target" }
+      ]
+    }
+  ]
+}

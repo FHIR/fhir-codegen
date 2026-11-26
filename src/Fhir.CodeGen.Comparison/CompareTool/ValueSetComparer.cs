@@ -83,6 +83,7 @@ public class ValueSetComparer
     private List<DbFhirPackage> _packages = [];
 
     private HashSet<string> _fhirTypeValueSetUrls = [];
+    private XVerPreparedOperation? _operation;
 
     public ValueSetComparer(
         IDbConnection db,
@@ -100,7 +101,34 @@ public class ValueSetComparer
     public void CompareValueSets(
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
+        => CompareValueSets(null, maxStepSize, specificPairs);
+
+    internal void CompareValueSets(XVerPreparedOperation? operation,
+        int? maxStepSize = null,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
+        _operation = operation;
+        try
+        {
+            operation?.RequireConnection(_db);
+            CompareValueSetsCore(maxStepSize, specificPairs);
+        }
+        finally
+        {
+            _operation = null;
+            _vsComparisonCache.Clear();
+            _conceptComparisonCache.Clear();
+        }
+    }
+
+    private void CompareValueSetsCore(int? maxStepSize,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs)
+    {
+        if (_operation is not null)
+        {
+            maxStepSize = _operation.Evidence.Options.MaxStepSize;
+            specificPairs = _operation.Evidence.Options.SpecificPairs?.ToHashSet();
+        }
         // get the list of value sets that contain FHIR types
         _fhirTypeValueSetUrls = DbFhirTypeValueSet.SelectList(_db).Select(o => o.UnversionedUrl).ToHashSet();
 
@@ -164,7 +192,7 @@ public class ValueSetComparer
                     )
                 """;
 
-            command.ExecuteNonQuery();
+            ApplyRelationshipPass(command, CMR.SourceIsNarrowerThanTarget);
         }
 
         {
@@ -186,12 +214,58 @@ public class ValueSetComparer
                     )
                 """;
 
-            command.ExecuteNonQuery();
+            ApplyRelationshipPass(command, CMR.SourceIsBroaderThanTarget);
         }
 
+        void ApplyRelationshipPass(IDbCommand command, CMR relationship)
+        {
+            using (command)
+            {
+                if (_operation is null)
+                {
+                    command.ExecuteNonQuery();
+                    return;
+                }
+                _operation.Audit();
+                List<(DbValueSetConceptComparison Row, string? Relationship)> rows =
+                    _operation.Evidence.ConceptRelationshipRows(sourcePackage.Key, targetPackage.Key);
+                HashSet<int> keys;
+                if (relationship == CMR.SourceIsNarrowerThanTarget)
+                {
+                    HashSet<int> sources = [.. rows.GroupBy(entry => (entry.Row.SourceConceptKey, entry.Row.TargetValueSetKey))
+                        .Where(group => group.Count(entry => entry.Row.TargetConceptKey is not null) > 1)
+                        .Select(group => group.Key.SourceConceptKey)];
+                    keys = [.. rows.Where(entry => entry.Relationship == CMR.Equivalent.ToString() &&
+                        sources.Contains(entry.Row.SourceConceptKey)).Select(entry => entry.Row.Key)];
+                }
+                else
+                {
+                    HashSet<int?> targets = [.. rows.GroupBy(entry => (entry.Row.SourceValueSetKey, entry.Row.TargetConceptKey))
+                        .Where(group => group.Count() > 1).Select(group => group.Key.TargetConceptKey)];
+                    keys = [.. rows.Where(entry => entry.Relationship == CMR.Equivalent.ToString() &&
+                        entry.Row.TargetConceptKey is not null && targets.Contains(entry.Row.TargetConceptKey)).Select(entry => entry.Row.Key)];
+                }
+                _operation.Evidence.ApplyConceptRelationships(sourcePackage.Key, targetPackage.Key, keys, relationship,
+                    () => command.ExecuteNonQuery());
+            }
+        }
     }
 
     private void applyCachedChanges(DbFhirPackage sourcePackage, DbFhirPackage targetPackage)
+    {
+        if (_operation is null)
+        {
+            flushCachedChanges(sourcePackage, targetPackage);
+            return;
+        }
+        _operation.Evidence.ApplyComparisonWrites(
+            new(XVerOperandFamily.VocabularyComparisons, XVerOutputTransitionKind.PairFlush, sourcePackage.Key, targetPackage.Key),
+            _vsComparisonCache.ToAdd.Cast<DbRecordBase>().Concat(_conceptComparisonCache.ToAdd),
+            _vsComparisonCache.ToUpdate.Cast<DbRecordBase>().Concat(_conceptComparisonCache.ToUpdate),
+            () => flushCachedChanges(sourcePackage, targetPackage));
+    }
+
+    private void flushCachedChanges(DbFhirPackage sourcePackage, DbFhirPackage targetPackage)
     {
         if (_vsComparisonCache.ToAddCount > 0)
         {
@@ -220,6 +294,10 @@ public class ValueSetComparer
         _vsComparisonCache.Clear();
         _conceptComparisonCache.Clear();
     }
+
+    private bool IsEscapeValve(string code) => _operation is null
+        ? XVerProcessor._escapeValveCodes.Contains(code)
+        : _operation.Evidence.Options.EscapeValveCodes.Contains(code);
 
     private PackagePairTypeMappings getTypeMappings(DbFhirPackage sourcePackage, DbFhirPackage targetPackage)
     {
@@ -331,7 +409,8 @@ public class ValueSetComparer
         foreach (DbValueSet sourceVs in sourceValueSets)
         {
             // skip value sets we know we will not process
-            if (XVerProcessor._exclusionSet.Contains(sourceVs.UnversionedUrl))
+            if (_operation is null ? XVerProcessor._exclusionSet.Contains(sourceVs.UnversionedUrl) :
+                _operation.Evidence.Options.Exclusions.Contains(sourceVs.UnversionedUrl))
             {
                 continue;
             }
@@ -488,7 +567,7 @@ public class ValueSetComparer
         // iterate over each source concept and follow it through the transitive steps
         foreach (DbValueSetConcept sourceConcept in sourceConcepts)
         {
-            bool sourceConceptIsEscape = XVerProcessor._escapeValveCodes.Contains(sourceConcept.Code);
+            bool sourceConceptIsEscape = IsEscapeValve(sourceConcept.Code);
 
             // get the initial concept comparisons for this source concept
             List<DbValueSetConceptComparison> initialComparisons = firstStepBySourceConcept[sourceConcept.Key].ToList();
@@ -598,7 +677,7 @@ public class ValueSetComparer
                     targetConcepts.TryGetValue(path.CurrentConceptKey.Value, out targetConcept);
                     targetConceptIsEscape = targetConcept is null
                         ? null
-                        : XVerProcessor._escapeValveCodes.Contains(targetConcept.Code);
+                        : IsEscapeValve(targetConcept.Code);
                 }
 
                 // check for explicit mapping
@@ -733,7 +812,7 @@ public class ValueSetComparer
                     sourceConcept,
                     targetConcept: null,
                     relationship: null,
-                    sourceConceptIsEscape: XVerProcessor._escapeValveCodes.Contains(sourceConcept.Code),
+                    sourceConceptIsEscape: IsEscapeValve(sourceConcept.Code),
                     targetConceptIsEscape: null,
                     technicalMessage: null,
                     userMessage: null,
@@ -786,7 +865,7 @@ public class ValueSetComparer
             string? technicalMessage = null;
             string? userMessage = null;
 
-            bool sourceConceptIsEscape = XVerProcessor._escapeValveCodes.Contains(sourceConcept.Code);
+            bool sourceConceptIsEscape = IsEscapeValve(sourceConcept.Code);
 
             // check for explicit mappings first
             List<DbValueSetConceptMapping> explicitMappings = conceptMappingsBySourceKey[sourceConcept.Key].ToList();
@@ -812,7 +891,7 @@ public class ValueSetComparer
 
                     bool? targetConceptIsEscape = targetConcept is null
                         ? null
-                        : XVerProcessor._escapeValveCodes.Contains(targetConcept.Code);
+                        : IsEscapeValve(targetConcept.Code);
 
                     // check for escape-valve tracking
                     if (sourceConceptIsEscape)
@@ -955,7 +1034,7 @@ public class ValueSetComparer
                 //bool conceptIsBroaderThanTarget = possibleTargetsInValueSetCount > 1;
                 //bool? conceptIsNarrowerThanTarget = null;
 
-                bool targetConceptIsEscape = XVerProcessor._escapeValveCodes.Contains(targetConcept.Code);
+                bool targetConceptIsEscape = IsEscapeValve(targetConcept.Code);
 
                 // if this is an escape-valve code, we need to compare the counts of concepts too
                 if (sourceConceptIsEscape)

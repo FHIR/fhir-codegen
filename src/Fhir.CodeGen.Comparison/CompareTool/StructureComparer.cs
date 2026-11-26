@@ -67,6 +67,8 @@ public class StructureComparer
     private List<DbFhirPackage> _packages = [];
 
     private ElementComparer? _elementComparer = null;
+    private XVerStructureCatalog _catalog = null!;
+    private XVerPreparedOperation? _operation;
 
     public StructureComparer(
         IDbConnection db,
@@ -86,6 +88,39 @@ public class StructureComparer
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
+            new(XVerPreparationKind.Comparison, XVerProcessor._exclusionSet, maxStepSize: maxStepSize,
+                specificPairs: specificPairs, processVocabulary: false));
+        CompareStructures(operation, maxStepSize, specificPairs);
+    }
+
+    internal void CompareStructures(XVerPreparedOperation operation,
+        int? maxStepSize = null,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
+    {
+        _operation = operation;
+        try
+        {
+            CompareStructuresCore(operation, maxStepSize, specificPairs);
+        }
+        finally
+        {
+            _sdComparisonCache.Clear();
+            _elementComparisonCache.Clear();
+            _elementTypeComparisonCache.Clear();
+            _elementComparer = null;
+            _catalog = null!;
+            _operation = null;
+        }
+    }
+
+    private void CompareStructuresCore(XVerPreparedOperation operation, int? maxStepSize,
+        HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs)
+    {
+        UnsafeCodeInputStore.RequireInputs(_db, operation);
+        _catalog = operation.Catalog;
+        maxStepSize = operation.Evidence.Options.MaxStepSize;
+        specificPairs = operation.Evidence.Options.SpecificPairs?.ToHashSet();
         // get the list of packages
         _packages = DbFhirPackage.SelectList(_db, orderByProperties: [nameof(DbFhirPackage.PackageVersion)]);
 
@@ -114,23 +149,37 @@ public class StructureComparer
             }
         }
 
-        _elementComparer = new(
-            _db,
-            _loggerFactory,
-            _elementComparisonCache,
-            _elementTypeComparisonCache,
-            _packages);
-
         // iterate over our pairs in the order we built them
         foreach (FhirPackageComparisonPair packagePair in packagePairs)
         {
             _logger.LogInformation($"Processing {packagePair.SourcePackageShortName} -> {packagePair.TargetPackageShortName}");
-            doComparison(packagePair);
-            applyCachedChanges(packagePair);
+            string inputRevision = UnsafeCodeInputStore.BeginComparison(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey, operation);
+            _elementComparer = new(_db, _loggerFactory, _elementComparisonCache, _elementTypeComparisonCache, _packages,
+                operation, operation.GetComparisonPacket(packagePair.SourcePackageKey, packagePair.TargetPackageKey));
+            try
+            {
+                doComparison(packagePair);
+                applyCachedChanges(packagePair);
+                operation.ComparisonFlushed(packagePair.SourcePackageKey, packagePair.TargetPackageKey);
+                UnsafeCodeInputStore.CompleteComparison(_db, packagePair.SourcePackageKey, packagePair.TargetPackageKey, inputRevision, operation);
+            }
+            finally
+            {
+                operation.ReleasePairWorkingFacts(packagePair.SourcePackageKey, packagePair.TargetPackageKey);
+            }
         }
     }
 
     private void applyCachedChanges(FhirPackageComparisonPair packagePair)
+    {
+        _operation!.Evidence.ApplyComparisonWrites(
+            new(XVerOperandFamily.StructureComparisons, XVerOutputTransitionKind.PairFlush, packagePair.SourcePackageKey, packagePair.TargetPackageKey),
+            _sdComparisonCache.ToAdd.Cast<DbRecordBase>().Concat(_elementComparisonCache.ToAdd).Concat(_elementTypeComparisonCache.ToAdd),
+            _sdComparisonCache.ToUpdate.Cast<DbRecordBase>().Concat(_elementComparisonCache.ToUpdate).Concat(_elementTypeComparisonCache.ToUpdate),
+            () => flushCachedChanges(packagePair));
+    }
+
+    private void flushCachedChanges(FhirPackageComparisonPair packagePair)
     {
         DbFhirPackage sourcePackage = packagePair.SourcePackage;
         DbFhirPackage targetPackage = packagePair.TargetPackage;
@@ -189,17 +238,15 @@ public class StructureComparer
 
         foreach (FhirArtifactClassEnum artifactClass in getOrderedArtifactClasses())
         {
-            List<DbStructureDefinition> sourceStructures = DbStructureDefinition.SelectList(
-                _db,
-                FhirPackageKey: sourcePackage.Key,
-                ArtifactClass: artifactClass);
+            List<DbStructureDefinition> sourceStructures = [.. _catalog.GetProcessedStructures(sourcePackage.Key)
+                .Where(owner => owner.ArtifactClass == artifactClass)];
             _logger.LogInformation($" <<< processing {sourcePackage.ShortName} {artifactClass}s, count: {sourceStructures.Count}");
 
             // iterate over each structure in the source package
             foreach (DbStructureDefinition sourceSd in sourceStructures)
             {
                 // skip structures we know we will not process
-                if (XVerProcessor._exclusionSet.Contains(sourceSd.UnversionedUrl))
+                if (_operation!.Evidence.Options.Exclusions.Contains(sourceSd.UnversionedUrl))
                 {
                     continue;
                 }
@@ -487,6 +534,8 @@ public class StructureComparer
                 SourceFhirPackageKey: fromPackage.Key,
                 TargetFhirPackageKey: toPackage.Key,
                 SourceStructureKeyValues: currentStructureKeys);
+            currentComparisons.RemoveAll(comparison => !_catalog.IsProcessed(comparison.SourceStructureKey) ||
+                comparison.TargetStructureKey is int targetKey && !_catalog.IsProcessed(targetKey));
 
             // add our current records to our dictionary to reconcile later
             stepComparisons[step] = currentComparisons;
@@ -640,6 +689,10 @@ public class StructureComparer
 
             if (targetSd is not null)
             {
+                if (!_catalog.IsProcessed(targetSd))
+                {
+                    continue;
+                }
                 targetIds.Add(targetSd.Id);
                 targetUrls.Add(targetSd.UnversionedUrl);
                 if (!targetKeys.Add(targetSd.Key))
@@ -670,10 +723,8 @@ public class StructureComparer
         }
 
         // check if there is a structure in the target package with the same ID
-        DbStructureDefinition? possibleTargetSd = DbStructureDefinition.SelectSingle(
-            _db,
-            FhirPackageKey: targetPackage.Key,
-            Id: sourceSd.Id);
+        DbStructureDefinition? possibleTargetSd = _catalog.GetProcessedStructures(targetPackage.Key)
+            .SingleOrDefault(owner => owner.Id == sourceSd.Id);
         if ((possibleTargetSd is not null) &&
             targetKeys.Add(possibleTargetSd.Key))
         {
@@ -698,10 +749,8 @@ public class StructureComparer
         }
 
         // check if there is a structure in the target package with the same URL
-        possibleTargetSd = DbStructureDefinition.SelectSingle(
-            _db,
-            FhirPackageKey: targetPackage.Key,
-            UnversionedUrl: sourceSd.UnversionedUrl);
+        possibleTargetSd = _catalog.GetProcessedStructures(targetPackage.Key)
+            .SingleOrDefault(owner => owner.UnversionedUrl == sourceSd.UnversionedUrl);
         if ((possibleTargetSd is not null) &&
             targetKeys.Add(possibleTargetSd.Key))
         {
@@ -728,10 +777,8 @@ public class StructureComparer
         // if we have no targets, check for a matching name too
         if (trackingRecords.Count == 0)
         {
-            possibleTargetSd = DbStructureDefinition.SelectSingle(
-                _db,
-                FhirPackageKey: targetPackage.Key,
-                Name: sourceSd.Name);
+            possibleTargetSd = _catalog.GetProcessedStructures(targetPackage.Key)
+                .SingleOrDefault(owner => owner.Name == sourceSd.Name);
             if ((possibleTargetSd is not null) &&
                 targetKeys.Add(possibleTargetSd.Key))
             {
@@ -773,6 +820,11 @@ public class StructureComparer
                 if (inverseSourceSd is null)
                 {
                     throw new Exception($"Unable to resolve structure with key {inverseMapping.SourceStructureKey} for mapping {inverseMapping.Key}");
+                }
+
+                if (!_catalog.IsProcessed(inverseSourceSd))
+                {
+                    continue;
                 }
 
                 targetIds.Add(inverseSourceSd.Id);

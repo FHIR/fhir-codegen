@@ -1,6 +1,0 @@
-{
-    "version": "1.2.0-cibuild",
-    "date": "20231130214349",
-    "notForPublication": true,
-    "name": "hl7.fhir.uv.subscriptions-backport.r4b"
-}

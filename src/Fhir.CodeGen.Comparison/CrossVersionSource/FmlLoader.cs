@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using Fhir.CodeGen.Common.FhirExtensions;
+using Fhir.CodeGen.Common.Packaging;
 using Fhir.CodeGen.Common.Utils;
 using Fhir.CodeGen.Comparison.Models;
 using Fhir.CodeGen.Comparison.XVer;
@@ -83,6 +84,47 @@ public class FmlLoader
             return;
         }
 
+        (long Version, XVerStructureCatalog Catalog)? owner = null;
+
+        XVerStructureCatalog getCatalog()
+        {
+            // This traversal has exclusive use of the open connection. Its own map writes
+            // do not change data_version; a commit on another connection does.
+            long version;
+            using (IDbCommand command = _db.CreateCommand())
+            {
+                command.CommandText = "PRAGMA main.data_version";
+                version = (long)command.ExecuteScalar()!;
+            }
+
+            if (owner is { } current)
+            {
+                if (current.Version == version)
+                {
+                    return current.Catalog;
+                }
+
+                owner = null;
+                current.Catalog.Dispose();
+            }
+
+            XVerStructureCatalog catalog = new(_db, XVerProcessor._exclusionSet);
+            owner = (version, catalog);
+            return catalog;
+        }
+
+        try
+        {
+            loadSourceFml(inputPath, getCatalog);
+        }
+        finally
+        {
+            owner?.Catalog.Dispose();
+        }
+    }
+
+    private void loadSourceFml(string inputPath, Func<XVerStructureCatalog> getCatalog)
+    {
         // iterate over the source packages
         for (int sourceIndex = 0; sourceIndex < _packages.Count - 1; sourceIndex++)
         {
@@ -103,7 +145,7 @@ public class FmlLoader
                 string path = Path.Combine(inputPath, relativePath);
                 if (Directory.Exists(path))
                 {
-                    loadSourceFml(sourcePackage, targetPackage, path, inputPath);
+                    loadSourceFml(sourcePackage, targetPackage, path, inputPath, getCatalog);
                 }
 
                 // check the reverse direction
@@ -111,7 +153,7 @@ public class FmlLoader
                 path = Path.Combine(inputPath, relativePath);
                 if (Directory.Exists(path))
                 {
-                    loadSourceFml(targetPackage, sourcePackage, path, inputPath);
+                    loadSourceFml(targetPackage, sourcePackage, path, inputPath, getCatalog);
                 }
 
             }
@@ -123,7 +165,8 @@ public class FmlLoader
         DbFhirPackage sourcePackage,
         DbFhirPackage targetPackage,
         string path,
-        string inputPath)
+        string inputPath,
+        Func<XVerStructureCatalog> getCatalog)
     {
         _logger.LogInformation($"Loading FML maps from: {path}");
 
@@ -177,7 +220,8 @@ public class FmlLoader
                     filename,
                     name,
                     fml,
-                    inputPath);
+                    inputPath,
+                    getCatalog);
             }
             catch (Exception ex)
             {
@@ -190,7 +234,8 @@ public class FmlLoader
         string filename,
         string name,
         FhirStructureMap fml,
-        string inputPath)
+        string inputPath,
+        Func<XVerStructureCatalog> getCatalog)
     {
         if ((_sourcePackage is null) || (_targetPackage is null))
         {
@@ -222,36 +267,28 @@ public class FmlLoader
         // process the initial structure declarations to get the aliases
         foreach ((string url, StructureDeclaration fmlStructure) in _fml.StructuresByUrl)
         {
-            // extract the FHIR structure type from the URL
-            string fhirStructureType = url.Split('/')[^1];
-
-            while (!char.IsAsciiLetter(fhirStructureType[^1]))
+            XVerStructureCatalog catalog = getCatalog();
+            DbFhirPackage declarationPackage = fmlStructure.ModelMode == StructureMap.StructureMapModelMode.Source
+                ? _sourcePackage : _targetPackage;
+            DbStructureDefinition declaredOwner = ResolveDeclaration(catalog, declarationPackage, url, filename);
+            if (!catalog.IsProcessed(declaredOwner))
             {
-                fhirStructureType = fhirStructureType[..^1];
-
-                if (fhirStructureType.Length == 0)
-                {
-                    throw new Exception($"Failed to parse FHIR structure type from URL: {url} in {_name} ({_fmlFilename})");
-                }
+                return;
             }
+            DbElement declaredRoot = catalog.ResolveRoot(declaredOwner);
+            string fhirStructureType = declaredOwner.Id;
 
             // ensure the type exists in the correct package
             if (fmlStructure.ModelMode == StructureMap.StructureMapModelMode.Source)
             {
-                DbStructureDefinition? sd = DbStructureDefinition.SelectSingle(
-                    _db,
-                    FhirPackageKey: _sourcePackage.Key,
-                    Id: fhirStructureType);
+                DbStructureDefinition? sd = declaredOwner;
 
                 if (sd is null)
                 {
                     throw new Exception($"Failed to resolve FML source structure: {fhirStructureType} in {_name} ({_fmlFilename})");
                 }
 
-                DbElement? ed = DbElement.SelectSingle(
-                    _db,
-                    FhirPackageKey: _sourcePackage.Key,
-                    Id: fhirStructureType);
+                DbElement? ed = declaredRoot;
 
                 if (fmlStructure.Alias is not null)
                 {
@@ -260,7 +297,7 @@ public class FmlLoader
                         Identifier = fmlStructure.Alias,
                         Alias = fmlStructure.ModelModeLiteral,
                         TypeIdentifier = fhirStructureType,
-                        ResolvedPath = sd.Id,
+                        ResolvedPath = ed.Id,
                         Structure = sd,
                         Element = ed,
                     };
@@ -271,7 +308,7 @@ public class FmlLoader
                     Identifier = fmlStructure.ModelModeLiteral,
                     Alias = fmlStructure.Alias,
                     TypeIdentifier = fhirStructureType,
-                    ResolvedPath = sd.Id,
+                    ResolvedPath = ed.Id,
                     Structure = sd,
                     Element = ed,
                 };
@@ -279,20 +316,14 @@ public class FmlLoader
 
             if (fmlStructure.ModelMode == StructureMap.StructureMapModelMode.Target)
             {
-                DbStructureDefinition? sd = DbStructureDefinition.SelectSingle(
-                    _db,
-                    FhirPackageKey: _targetPackage.Key,
-                    Id: fhirStructureType);
+                DbStructureDefinition? sd = declaredOwner;
 
                 if (sd is null)
                 {
                     throw new Exception($"Failed to resolve FML target structure: {fhirStructureType} in {_name} ({_fmlFilename})");
                 }
 
-                DbElement? ed = DbElement.SelectSingle(
-                    _db,
-                    FhirPackageKey: _targetPackage.Key,
-                    Id: fhirStructureType);
+                DbElement? ed = declaredRoot;
 
                 if (fmlStructure.Alias is not null)
                 {
@@ -301,7 +332,7 @@ public class FmlLoader
                         Identifier = fmlStructure.Alias,
                         Alias = fmlStructure.ModelModeLiteral,
                         TypeIdentifier = fhirStructureType,
-                        ResolvedPath = sd.Id,
+                        ResolvedPath = ed.Id,
                         Structure = sd,
                         Element = ed,
                     };
@@ -312,7 +343,7 @@ public class FmlLoader
                     Identifier = fmlStructure.ModelModeLiteral,
                     Alias = fmlStructure.Alias,
                     TypeIdentifier = fhirStructureType,
-                    ResolvedPath = sd.Id,
+                    ResolvedPath = ed.Id,
                     Structure = sd,
                     Element = ed,
                 };
@@ -343,7 +374,7 @@ public class FmlLoader
                 {
                     case StructureMap.StructureMapInputMode.Source:
                         {
-                            if (resolveFmlSymbol(gp.Identifier, null, gp.TypeIdentifier, structures, gp.InputMode.Value)
+                            if (resolveFmlSymbol(gp.Identifier, null, gp.TypeIdentifier, structures, gp.InputMode.Value, getCatalog)
                                 is FmlSymbolResolutionRecord r)
                             {
                                 r = r with
@@ -360,7 +391,7 @@ public class FmlLoader
 
                     case StructureMap.StructureMapInputMode.Target:
                         {
-                            if (resolveFmlSymbol(gp.Identifier, null, gp.TypeIdentifier, structures, gp.InputMode.Value)
+                            if (resolveFmlSymbol(gp.Identifier, null, gp.TypeIdentifier, structures, gp.InputMode.Value, getCatalog)
                                 is FmlSymbolResolutionRecord r)
                             {
                                 r = r with
@@ -389,7 +420,8 @@ public class FmlLoader
                 targetSymbols,
                 [],
                 rootSource,
-                rootTarget);
+                rootTarget,
+                getCatalog);
         }
 
         if ((rootSource is null) || (rootTarget is null))
@@ -407,7 +439,8 @@ public class FmlLoader
         string? alias,
         string? typeIdentifier,
         Dictionary<string, FmlSymbolResolutionRecord> symbolTable,
-        StructureMap.StructureMapInputMode mode)
+        StructureMap.StructureMapInputMode mode,
+        Func<XVerStructureCatalog> getCatalog)
     {
         int packageKey = mode == StructureMap.StructureMapInputMode.Source
             ? _sourcePackage!.Key
@@ -422,23 +455,18 @@ public class FmlLoader
             }
 
             // try to resolve the type from the database
-            DbStructureDefinition? sd = DbStructureDefinition.SelectSingle(
-                _db,
-                FhirPackageKey: packageKey,
-                Id: typeIdentifier);
+            XVerStructureCatalog catalog = getCatalog();
+            DbStructureDefinition? sd = catalog.ResolveNativeType(packageKey, typeIdentifier, required: false);
             if (sd is not null)
             {
-                DbElement? ed = DbElement.SelectSingle(
-                    _db,
-                    FhirPackageKey: packageKey,
-                    Id: typeIdentifier);
+                DbElement ed = catalog.ResolveRoot(sd);
 
                 return new()
                 {
                     Identifier = literal,
                     Alias = alias,
                     TypeIdentifier = typeIdentifier,
-                    ResolvedPath = sd.Id,
+                    ResolvedPath = ed.Id,
                     Structure = sd,
                     Element = ed,
                 };
@@ -462,12 +490,14 @@ public class FmlLoader
             DbElement? ed = DbElement.SelectSingle(
                 _db,
                 FhirPackageKey: packageKey,
+                StructureKey: prefixRec.Structure.Key,
                 Id: path);
 
             // if not found, check with the choice type literal appended
             ed ??= DbElement.SelectSingle(
                 _db,
                 FhirPackageKey: packageKey,
+                StructureKey: prefixRec.Structure.Key,
                 Id: path + "[x]");
 
             if (ed is not null)
@@ -483,7 +513,7 @@ public class FmlLoader
                         Identifier = literal,
                         Alias = alias,
                         TypeIdentifier = typeIdentifier,
-                        ResolvedPath = ed.Path,
+                        ResolvedPath = ed.Id,
                         Structure = sd,
                         Element = ed,
                     };
@@ -504,12 +534,14 @@ public class FmlLoader
                 DbElement? prefixEd = DbElement.SelectSingle(
                     _db,
                     FhirPackageKey: packageKey,
+                    StructureKey: prefixRec.Structure.Key,
                     Id: prefixPath);
 
                 // if not found, check with the choice type literal appended
                 prefixEd ??= DbElement.SelectSingle(
                     _db,
                     FhirPackageKey: packageKey,
+                    StructureKey: prefixRec.Structure.Key,
                     Id: prefixPath + "[x]");
 
                 if (prefixEd is null)
@@ -524,28 +556,28 @@ public class FmlLoader
 
                 foreach (DbElementType et in elementTypes)
                 {
-                    DbStructureDefinition? prefixTypeSd = DbStructureDefinition.SelectSingle(
-                        _db,
-                        FhirPackageKey: packageKey,
-                        Id: et.TypeName ?? et.Literal);
+                    XVerStructureCatalog catalog = getCatalog();
+                    DbStructureDefinition? prefixTypeSd = catalog.ResolveTypeUse(et);
                     if (prefixTypeSd is null)
                     {
                         continue;
                     }
 
                     // check to see if we can resolve the rest of the element from this root
-                    string postfixPath = string.Join('.', [prefixTypeSd.Id, ..testComponents[splitIndex..]]);
+                    string postfixPath = string.Join('.', [catalog.ResolveRoot(prefixTypeSd).Id, ..testComponents[splitIndex..]]);
 
                     // try to resolve from the database
                     DbElement? postfixEd = DbElement.SelectSingle(
                         _db,
                         FhirPackageKey: packageKey,
+                        StructureKey: prefixTypeSd.Key,
                         Id: postfixPath);
 
                     // if not found, check with the choice type literal appended
                     postfixEd ??= DbElement.SelectSingle(
                         _db,
                         FhirPackageKey: packageKey,
+                        StructureKey: prefixTypeSd.Key,
                         Id: postfixPath + "[x]");
 
                     if (postfixEd is null)
@@ -579,6 +611,7 @@ public class FmlLoader
         List<FmlSymbolResolutionRecord> parameters,
         FmlSymbolResolutionRecord? rootSource,
         FmlSymbolResolutionRecord? rootTarget,
+        Func<XVerStructureCatalog> getCatalog,
         HashSet<string>? groupCallStack = null)
     {
         groupCallStack ??= [];
@@ -645,7 +678,8 @@ public class FmlLoader
                         group,
                         expression.SimpleCopyExpression,
                         sourceSymbols,
-                        targetSymbols);
+                        targetSymbols,
+                        getCatalog);
                 }
                 catch (Exception ex)
                 {
@@ -665,7 +699,8 @@ public class FmlLoader
                         targetSymbols,
                         groupCallStack,
                         rootSource,
-                        rootTarget);
+                        rootTarget,
+                        getCatalog);
                 }
                 catch (Exception ex)
                 {
@@ -687,7 +722,8 @@ public class FmlLoader
         Dictionary<string, FmlSymbolResolutionRecord> targetSymbols,
         HashSet<string> groupCallStack,
         FmlSymbolResolutionRecord? rootSource,
-        FmlSymbolResolutionRecord? rootTarget)
+        FmlSymbolResolutionRecord? rootTarget,
+        Func<XVerStructureCatalog> getCatalog)
     {
         Dictionary<string, FmlSymbolResolutionRecord> localSourceSymbols = [];
         Dictionary<string, FmlSymbolResolutionRecord> localTargetSymbols = [];
@@ -709,14 +745,16 @@ public class FmlLoader
                 expressionSource.Alias,
                 expressionSource.TypeIdentifier,
                 sourceSymbols,
-                StructureMap.StructureMapInputMode.Source);
+                StructureMap.StructureMapInputMode.Source,
+                getCatalog);
 
             resolved ??= resolveFmlSymbol(
                 expressionSource.Identifier,
                 expressionSource.Alias,
                 expressionSource.TypeIdentifier,
                 localSourceSymbols,
-                StructureMap.StructureMapInputMode.Source);
+                StructureMap.StructureMapInputMode.Source,
+                getCatalog);
 
             if (resolved is null)
             {
@@ -749,14 +787,16 @@ public class FmlLoader
                 expressionTarget.Alias,
                 null,
                 targetSymbols,
-                StructureMap.StructureMapInputMode.Target);
+                StructureMap.StructureMapInputMode.Target,
+                getCatalog);
 
             resolved ??= resolveFmlSymbol(
                 expressionTarget.Identifier,
                 expressionTarget.Alias,
                 null,
                 localTargetSymbols,
-                StructureMap.StructureMapInputMode.Target);
+                StructureMap.StructureMapInputMode.Target,
+                getCatalog);
 
             if (resolved is null)
             {
@@ -852,6 +892,7 @@ public class FmlLoader
                         dependentParams,
                         rootSource,
                         rootTarget,
+                        getCatalog,
                         groupCallStack);
                 }
 
@@ -864,9 +905,10 @@ public class FmlLoader
         GroupDeclaration group,
         MapSimpleCopyExpression expression,
         Dictionary<string, FmlSymbolResolutionRecord> sourceSymbols,
-        Dictionary<string, FmlSymbolResolutionRecord> targetSymbols)
+        Dictionary<string, FmlSymbolResolutionRecord> targetSymbols,
+        Func<XVerStructureCatalog> getCatalog)
     {
-        if (resolveFmlSymbol(expression.Source, null, null, sourceSymbols, StructureMap.StructureMapInputMode.Source)
+        if (resolveFmlSymbol(expression.Source, null, null, sourceSymbols, StructureMap.StructureMapInputMode.Source, getCatalog)
             is not FmlSymbolResolutionRecord sourceResovled)
         {
             _logger.LogInformation(
@@ -875,7 +917,7 @@ public class FmlLoader
             return;
         }
 
-        if (resolveFmlSymbol(expression.Target, null, null, targetSymbols, StructureMap.StructureMapInputMode.Target)
+        if (resolveFmlSymbol(expression.Target, null, null, targetSymbols, StructureMap.StructureMapInputMode.Target, getCatalog)
             is not FmlSymbolResolutionRecord targetResolved)
         {
             _logger.LogInformation(
@@ -1125,6 +1167,39 @@ public class FmlLoader
         }
     }
 
+    private static DbStructureDefinition ResolveDeclaration(XVerStructureCatalog catalog, DbFhirPackage package, string url, string filename)
+    {
+        // Declaration URLs retain their FML string delimiters in the parser model.
+        if (url.Length >= 2 && url[0] is '"' or '\'' && url[^1] == url[0])
+        {
+            url = url[1..^1];
+        }
+        UnsafeCodeCanonical canonical = UnsafeCodeCanonical.Parse(url);
+        const string releaseNamespace = "http://hl7.org/fhir/";
+        if (canonical.Url?.StartsWith(releaseNamespace, StringComparison.Ordinal) == true)
+        {
+            string[] components = canonical.Url[releaseNamespace.Length..].Split('/');
+            string release = components[0];
+            if (release is "1.0" or "3.0" or "4.0" or "4.3" or "5.0" or "6.0")
+            {
+                if (release != package.DefinitionFhirSequence.ToShortVersion() ||
+                    package.PackageId != package.DefinitionFhirSequence.ToCorePackageId() ||
+                    package.CanonicalUrl != "http://hl7.org/fhir" ||
+                    !(components.Length == 2 || components.Length == 3 && components[1] == "StructureDefinition") ||
+                    components[^1].Length == 0 || !components[^1].All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '.'))
+                {
+                    throw new InvalidOperationException($"FHIR release-qualified FML declaration '{url}' does not identify a definition in {package.PackageId}@{package.PackageVersion} at {filename}.");
+                }
+
+                string normalized = releaseNamespace + "StructureDefinition/" + components[^1] +
+                    (canonical.Version is null ? string.Empty : "|" + canonical.Version);
+                return catalog.ResolveDefinition(package.Key, normalized, context: filename)!;
+            }
+        }
+
+        return catalog.ResolveDefinition(package.Key, url, context: filename)!;
+    }
+
     private void reconcileElementMapFmlPathsInDb(
         FmlSymbolResolutionRecord rootSource,
         FmlSymbolResolutionRecord rootTarget)
@@ -1194,8 +1269,8 @@ public class FmlLoader
                 //}
 
                 // try to get a source element
-                DbElement? sourceEd = DbElement.SelectSingle(_db, FhirPackageKey: _sourcePackage.Key, Id: sourcePath);
-                sourceEd ??= DbElement.SelectSingle(_db, FhirPackageKey: _sourcePackage.Key, Id: sourcePath + "[x]");
+                DbElement? sourceEd = DbElement.SelectSingle(_db, FhirPackageKey: _sourcePackage.Key, StructureKey: sourceSd.Key, Id: sourcePath);
+                sourceEd ??= DbElement.SelectSingle(_db, FhirPackageKey: _sourcePackage.Key, StructureKey: sourceSd.Key, Id: sourcePath + "[x]");
 
                 //// make sure the source element exists
                 //if (sourceEd is null)
@@ -1210,8 +1285,8 @@ public class FmlLoader
                 //}
 
                 // try to get a target element
-                DbElement? targetEd = DbElement.SelectSingle(_db, FhirPackageKey: _targetPackage.Key, Id: targetPath);
-                targetEd ??= DbElement.SelectSingle(_db, FhirPackageKey: _targetPackage.Key, Id: targetPath + "[x]");
+                DbElement? targetEd = DbElement.SelectSingle(_db, FhirPackageKey: _targetPackage.Key, StructureKey: targetSd.Key, Id: targetPath);
+                targetEd ??= DbElement.SelectSingle(_db, FhirPackageKey: _targetPackage.Key, StructureKey: targetSd.Key, Id: targetPath + "[x]");
                 // make sure the target element exists
                 //if (targetEd is null)
                 //{

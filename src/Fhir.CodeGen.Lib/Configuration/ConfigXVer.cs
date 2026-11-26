@@ -84,6 +84,23 @@ public class ConfigXVer : ConfigRoot
         Description = "Set to force reloading of the comparison database from definitions.")]
     public bool ReloadDatabase { get; set; } = false;
 
+    private const string OmissionHelp = "Omit unsupported definitions and report them in each IG instead of failing the export.";
+
+    [ConfigOption(ArgName = "--report-omissions", EnvName = "Xver_Report_Omissions", ArgArity = "0..1", Description = OmissionHelp)]
+    public bool ReportOmissions { get; set; }
+
+    private static ConfigurationOption ReportOmissionsParameter => new()
+    {
+        Name = "Xver_Report_Omissions",
+        EnvVarName = "Xver_Report_Omissions",
+        DefaultValue = false,
+        CliOption = new System.CommandLine.Option<bool>("--report-omissions")
+        {
+            Description = OmissionHelp,
+            Arity = System.CommandLine.ArgumentArity.ZeroOrOne,
+        },
+    };
+
     private static ConfigurationOption ReloadDatabaseParameter => new()
     {
         Name = "Reload_Comparison_Database",
@@ -459,6 +476,7 @@ public class ConfigXVer : ConfigRoot
         ComparePackagesParameter,
         CrossVersionDbPathParameter,
         ReloadDatabaseParameter,
+        ReportOmissionsParameter,
         CrossVersionSourceDbParameter,
         ComparisonPairFilterKeysParameter,
         XverArtifactVersionParameter,
@@ -515,6 +533,9 @@ public class ConfigXVer : ConfigRoot
                     break;
                 case "Reload_Comparison_Database":
                     ReloadDatabase = GetOpt(parseResult, opt, ReloadDatabase);
+                    break;
+                case "Xver_Report_Omissions":
+                    ReportOmissions = GetOpt(parseResult, opt, ReportOmissions);
                     break;
                 case "Comparison_Source_Database":
                     {

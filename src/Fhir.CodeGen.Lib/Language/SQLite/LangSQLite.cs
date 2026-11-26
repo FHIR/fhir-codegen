@@ -4,7 +4,7 @@ using System.Data;
 using System.Data.Common;
 using System.Text;
 using System.Xml.Linq;
-using Fhir.CodeGen.Packages.Models;
+using Fhir.CodeGen.Lib.Packaging;
 using Fhir.CodeGen.LangSQLite.Models;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Utility;
@@ -99,11 +99,11 @@ public class LangSQLite : ILanguage
                 : FhirPackageUtils.GetShortName(dc.MainPackageId, dc.MainPackageVersion);
 
             List<string> deps = dc.Manifests.Keys
-                .Where(key => !key.id.StartsWith(dc.MainPackageId, StringComparison.OrdinalIgnoreCase))
-                .Select(key => key.id + "@" + key.version)
+                .Where(key => !key.Id.StartsWith(dc.MainPackageId, StringComparison.OrdinalIgnoreCase))
+                .Select(key => key.Id + "@" + key.Version)
                 .ToList();
 
-            if (!dc.TryGetManifest(dc.MainPackageId, dc.MainPackageVersion, out PackageManifest? mainManifest))
+            if (!dc.TryGetManifest(dc.MainPackageId, dc.MainPackageVersion, out CodeGenPackageManifest? mainManifest))
             {
                 throw new Exception($"Failed to get main package manifest: {dc.MainPackageId}@{dc.MainPackageVersion}");
             }

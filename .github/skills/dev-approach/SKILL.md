@@ -166,15 +166,16 @@ writes exactly four files and no others.
    slot, stop and follow § *Re-Invocation Modes* before doing anything
    else. Do not overwrite silently.
 4. **Write `approach.md`'s skeleton, then run the triviality check.**
-   Before the triviality proposal is resolved and before any fan-out,
+   Before the triviality decision is stated and before any fan-out,
    write `approach.md` carrying nothing but its metadata table — with
    `| Selected | {TBD: judgment pending} |` — an empty `## Notes`
    section, and the in-progress line § *Judgment File Format*
    prescribes. Record the step-3 re-invocation-mode decision and this
    step's triviality decision into that `## Notes` section as each one
    is made. Then form a view on whether the request warrants three
-   approaches, and follow § *Triviality Check*. That view is a proposal
-   to the user, never a decision you make alone.
+   approaches, and follow § *Triviality Check*. State that view and the
+   alternative you did not take before you act on it, so the user can
+   redirect you.
 
    The skeleton is written here because both decisions this stage makes
    happen at steps 3 and 4, while their designated home is not written
@@ -369,10 +370,15 @@ line above is the half a human sees first.
 ## Sub-Agent Use
 
 - **The three authors run as isolated sub-agents**, in parallel where
-  `max_subagents` allows. Each one is given: the full source text, the
-  conventions and architectural invariants from `AGENTS.md`, the user's
-  focus text if any, its own axis, and its own output path — and
-  nothing else.
+  `max_subagents` allows. Use the `dev-approach-author` agent, which
+  carries the isolation rules and the designer-not-implementer constraint
+  in its own definition; fall back to `general-purpose` where it is not
+  loaded, and state those rules explicitly in the prompt when you do.
+  Each one is given: the **absolute path** of the source, the user's
+  focus text if any, its own axis, and its own output path — and nothing
+  else. It reads the source and `AGENTS.md` itself, as every agent in the
+  loop does; handing three authors the text of both would put the same
+  two files into three contexts to save each of them one read.
 - **Each author is explicitly forbidden** from reading, globbing for,
   listing, or writing any `approach*.md` other than its own. This is
   the whole point of fanning out: if the authors collapse into one, you
@@ -384,10 +390,14 @@ line above is the half a human sees first.
   drafts, and you do not edit an author's file into shape afterwards —
   an orchestrator who rewrites the three has authored a fourth.
 - **The judge is a separate sub-agent in every case**, including when
-  `max_subagents` is `1`. It runs only after all three authors have
-  finished; it reads the three files from disk; it is **not told which
-  axis produced which file**, so it must attack the claims each file
-  makes about itself rather than the label on it.
+  `max_subagents` is `1`. Use the `dev-approach-judge` agent, which
+  carries **no edit tool at all** — the rule below that a judge never
+  writes is enforced by its definition rather than by its willingness to
+  comply. Fall back to `rubber-duck`, or to `general-purpose` prompted
+  adversarially, where it is not loaded. It runs only after all three
+  authors have finished; it reads the three files from disk; it is **not
+  told which axis produced which file**, so it must attack the claims
+  each file makes about itself rather than the label on it.
 - **The judge never writes.** It returns a verdict; you transcribe it
   into `approach.md`. A judge that owns the file is one prompt away
   from editing its own verdict into a fourth design.
@@ -395,20 +405,56 @@ line above is the half a human sees first.
   sub-agents concurrently. Serializing changes the wall clock, never
   the isolation.
 
+## Sub-Agent Model Tier
+
+Resolve each role against the **subagent model policy** in the
+repository's `AGENTS.md` (`## Agent guardrails`). An absent or
+unreadable policy means `uniform`, and every role below runs the
+spawning agent's model.
+
+| Role | Tier | Agent |
+|-|-|-|
+| Approach author | reasoning | `dev-approach-author` |
+| Judge | reasoning | `dev-approach-judge` |
+
+**Every role in this skill is a reasoning role.** Its entire output is
+judgment — three designs and a decision between them — and a cheap design
+is not a cheaper design, it is a worse one that still has to be judged.
+
+There is deliberately **no mechanical row**. An author carries no
+sub-agent tool and is told it is one voice, so it cannot delegate
+discovery; it reads the code it needs itself. You do not survey the
+codebase on an author's behalf either — § *Sub-Agent Use* fixes exactly
+what each author is given, and adding a survey to it would hand all three
+the same starting point and erode the isolation the fan-out exists for.
+
 ## Triviality Check
 
 Before fanning out, read the source and form a view on whether it
 warrants three approaches.
 
-When you judge it trivial, **say so once, with your reason**, and offer
-to produce a single approach instead. This is a **proposal, never a
-decision**: the user accepts or declines, and declining runs the full
-three-way fan-out. Never collapse silently, and never re-offer in the
-same pass.
+**Default to collapsing when the source is trivial**, and to the full
+three-way fan-out otherwise. A source is trivial when it is confined to a
+single file, adds no new component, changes no public interface, and
+implies no choice a reasonable engineer would argue about — a typo, a
+version bump, a documented-constant change, a docs-only edit. Three
+isolated authors designing a one-line change produce three descriptions
+of the same line, and the judge then picks between them on style.
+
+Either way, **say which you chose and why, in one sentence, before you
+act on it**, and offer the other. This is a **statement with an
+opt-out**, not a silent decision: the user can redirect you in their next
+message, and a redirect is honored without argument. Never collapse
+without saying so, and never re-offer in the same pass.
 
 The known cost is that a triviality call made *before* any design work
-is itself a claim about the solution's shape. Keeping the decision with
-the user, and requiring the reason to be stated, is what bounds it.
+is itself a claim about the solution's shape. Requiring the reason to be
+stated, and the alternative to be named, is what bounds it — the user
+sees the claim and can reject it.
+
+When in doubt, **fan out**. The asymmetry is real: an unnecessary
+fan-out costs three sub-agents, while a wrongly collapsed one costs the
+decision this skill exists to make.
 
 A collapsed slot has the **same file shape** as a contested one:
 

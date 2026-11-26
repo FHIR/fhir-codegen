@@ -4,10 +4,11 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 
 ## Toolchain
 
-- **.NET 9 SDK** is required. Despite what `README.md` says, every project targets `net9.0` (see `fhir-codegen.props` and `*.csproj` files). The CI workflow pins `DOTNET_VERSION: '9'`.
+- **.NET 11 SDK** is required. Target frameworks are declared in the `*.csproj` files: all projects target `net11.0` except `Fhir.CodeGen.SQLiteGenerator`, which remains on `netstandard2.0`. There is no `global.json`. Both CI workflows select SDK `11`. The test workflow's `main-disabled` branch filter is intentional and must remain unchanged for now.
 - **C# `<LangVersion>14.0</LangVersion>`**, `Nullable enable`, `ImplicitUsings enable` are set globally in `fhir-codegen.props`.
+- Dependency versions are declared per-project in `*.csproj`. See [AGENTS.md — Toolchain pins](../AGENTS.md#toolchain-pins) for the current package baselines and conditional references; keep that table aligned with the project files rather than duplicating it here.
 - Solution file: `fhir-codegen.sln` at the repo root.
-- Style is enforced via `.editorconfig` and `stylecop.json`. Notable: 4-space indent, CRLF, accessibility modifiers required, copyright header on every `.cs` file:
+- Style follows `.editorconfig` and `stylecop.json`; it is not enforced by the build, and `StyleCop.Analyzers` is not referenced. Notable: 4-space indent, CRLF, accessibility modifiers required, copyright header on every new `.cs` file:
   ```csharp
   // <copyright file="Foo.cs" company="Microsoft Corporation">
   //     Copyright (c) Microsoft Corporation. All rights reserved.
@@ -21,8 +22,8 @@ A .NET solution for ingesting FHIR specification packages and exporting them int
 # Restore & build everything
 dotnet build fhir-codegen.sln -c Release
 
-# Full test suite (matches CI; skips tests that need external FHIR IG repos)
-dotnet test --configuration Release --framework net9.0 --filter "RequiresExternalRepo!=true"
+# Full test suite (skips tests that need external FHIR IG repos)
+dotnet test --configuration Release --framework net11.0 --filter "RequiresExternalRepo!=true"
 
 # Run a single test class or method (xUnit + Shouldly)
 dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "FullyQualifiedName~GenerationTests"
@@ -43,17 +44,16 @@ Projects under `src/` form a layered pipeline:
 | Project | Role |
 |---|---|
 | `Fhir.CodeGen.Common` | Lightweight POCOs / shared models / polyfills. Minimal dependencies — keep it that way; other libs depend on it. |
-| `Fhir.CodeGen.Packages` | FHIR package cache management (download, resolve, registry lookup). |
 | `Fhir.CodeGen.CrossVersionLoader` | Load and reconcile artifacts across FHIR versions (R2/R3/R4/R4B/R5). |
 | `Fhir.CodeGen.MappingLanguage` | FML (FHIR Mapping Language) parser/abstractions. |
 | `Fhir.CodeGen.LangSQLite` / `Fhir.CodeGen.SQLiteGenerator` | SQLite export backend. |
-| `Fhir.CodeGen.Lib` | Core engine: loader → normalized model → language exporters. Depends on Packages, CrossVersionLoader, MappingLanguage, LangSQLite, Common. |
+| `Fhir.CodeGen.Lib` | Core engine: loader → normalized model → language exporters. Depends on CrossVersionLoader, MappingLanguage, LangSQLite, Common, and the `fhir-pkg-lib` NuGet package. |
 | `Fhir.CodeGen.Comparison` | Package/artifact diffing. |
 | `Fhir.CodeGen.CrossVersionExporter` | Produces cross-version artifacts. |
 | `fhir-codegen` | `System.CommandLine`-based CLI. Shares code with `fhir-codegen-shared` (a Shared Project, imported via `.projitems`). |
 | `performance-test-cli` | Standalone tooling. |
 
-Tests live alongside their target: `Fhir.CodeGen.Lib.Tests`, `Fhir.CodeGen.MappingLanguage.Tests`, `Fhir.CodeGen.Packages.Tests`. Test data is under `Fhir.CodeGen.Lib.Tests/TestData/` and copied to output via `<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>`.
+Tests live alongside their target: `Fhir.CodeGen.Lib.Tests`, `Fhir.CodeGen.MappingLanguage.Tests`, `fhir-codegen.Tests`. Test data is under `Fhir.CodeGen.Lib.Tests/TestData/` and copied to output via `<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>`.
 
 ## Key conventions
 
@@ -62,6 +62,12 @@ Tests live alongside their target: `Fhir.CodeGen.Lib.Tests`, `Fhir.CodeGen.Mappi
 - They are auto-discovered by `LanguageManager` via reflection at static-init time — **do not** register them manually; just add the type.
 - Each exporter exposes a nested `*Options : ConfigGenerate` class. Options are surfaced to the CLI via `[ConfigOption(ArgName = "--foo", Description = "...")]` attributes plus a matching `ConfigurationOption` static (with a `System.CommandLine.Option<T>`). Both must stay in sync.
 - See `TypeScript.cs` and `Firely/`, `OpenApi/`, `Info/`, `Ruby/`, `SQLite/`, `Shorthand/`, `Cql/` as canonical examples.
+
+### The package boundary (quarantine seam)
+FHIR package acquisition comes from the `fhir-pkg-lib` NuGet package.
+- `src/Fhir.CodeGen.Lib/Packaging/` is the **only** place permitted to name a `FhirPkg` type. Everything above it works in the codegen-owned types: `PackageIdentity`, `CodeGenPackage`, `CodeGenPackageManifest`, `CodeGenPackageIndex`, `CodeGenPackageDirective`.
+- `PackageSeamTests.PublicSurfaceExposesNoUpstreamPackageTypes` reflects over the exported surface of `Fhir.CodeGen.Lib` and enforces this.
+- `PackageIdentity.ToString()` renders `(Id, Version)` and is interpolated into generated output by four exporters — changing it moves the product's contract.
 
 ### Multi-version FHIR via extern aliases
 Different FHIR major versions ship as separate `Hl7.Fhir.*` assemblies whose types collide. The solution uses MSBuild aliasing so they can coexist:
@@ -72,7 +78,7 @@ Different FHIR major versions ship as separate `Hl7.Fhir.*` assemblies whose typ
 ### Coding style preferences (from custom instructions)
 - Prefer **explicit types** in C#; use `var` only when the type is obvious from the right-hand side.
 - Use **collection expressions `[]`** for empty initializers, not `new List<T>()` / `new()`.
-- Prefer C# 14 / .NET 10 features when adding new code (this repo targets .NET 9 today; don't downgrade to older patterns when newer ones are cleaner).
+- Prefer C# 14 / .NET 11 features when adding new code. The language version remains explicitly set to C# 14; do not assume the .NET 11 SDK's default language version.
 - HTTP services (where present) listen on **HTTP only** — no `UseHttpsRedirection`/`UseHsts`; HTTPS is terminated by a reverse proxy.
 - If adding SQLite interaction code, prefer the `cslightdbgen.sqlitegen` NuGet package over hand-rolled ADO.
 

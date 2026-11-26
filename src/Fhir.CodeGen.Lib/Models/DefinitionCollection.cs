@@ -8,7 +8,7 @@ using System.Collections;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Xml.Linq;
-using Fhir.CodeGen.Packages.Models;
+using Fhir.CodeGen.Lib.Packaging;
 using Fhir.Metrics;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Specification.Terminology;
@@ -70,10 +70,10 @@ public partial class DefinitionCollection
     public string MainPackageVersion { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the index.</summary>
-    public Dictionary<(string id, FhirSemVer version), PackageManifest> Manifests { get; set; } = [];
+    public Dictionary<PackageIdentity, CodeGenPackageManifest> Manifests { get; set; } = [];
 
     /// <summary>Gets or sets the contents.</summary>
-    public Dictionary<(string id, FhirSemVer version), PackageIndex> ContentListings { get; set; } = [];
+    public Dictionary<PackageIdentity, CodeGenPackageIndex> ContentListings { get; set; } = [];
 
     //private readonly Dictionary<ElementDefinition, StructureDefinition> _elementSdLookup = new();
 
@@ -164,73 +164,41 @@ public partial class DefinitionCollection
         _localTx = new CodeGenTerminologyService(valueSetExpanderSettings);
     }
 
-    public void AddManifest(PackageDirective directive, PackageManifest manifest)
+    public void AddManifest(PackageIdentity identity, CodeGenPackageManifest manifest)
     {
-        string packageId = directive.PackageId ?? manifest.Name;
-        
-        // if we have a directive, base off that
-        if (directive.FhirCacheVersion is not null)
-        {
-            Manifests[(packageId, directive.FhirCacheVersion)] = manifest;
-            return;
-        }
-
-        if (directive.RequestedVersionParsed is not null)
-        {
-            Manifests[(packageId, directive.RequestedVersionParsed)] = manifest;
-            return;
-        }
-
-        FhirSemVer v = new(manifest.Version);
-        Manifests[(packageId, v)] = manifest;
+        Manifests[identity] = manifest;
     }
 
-    public void AddContentListing(PackageDirective directive, PackageIndex index)
+    public void AddContentListing(PackageIdentity identity, CodeGenPackageIndex index)
     {
-        if (directive.PackageId is null)
+        if (string.IsNullOrEmpty(identity.Version))
         {
-            throw new ArgumentNullException(nameof(directive.PackageId));
+            throw new Exception($"Cannot track contents for a package with no version!");
         }
 
-        // if we have a directive, base off that
-        if (directive.FhirCacheVersion is not null)
-        {
-            ContentListings[(directive.PackageId, directive.FhirCacheVersion)] = index;
-            return;
-        }
-
-        if (directive.RequestedVersionParsed is not null)
-        {
-            ContentListings[(directive.PackageId, directive.RequestedVersionParsed)] = index;
-            return;
-        }
-
-        throw new Exception($"Cannot track contents for a package with no version!");
+        ContentListings[identity] = index;
     }
 
-    public PackageManifest? GetManifest(string packageId, string version)
+    public CodeGenPackageManifest? GetManifest(string packageId, string version)
     {
-        FhirSemVer requested = new(version);
-
-        if (Manifests.TryGetValue((packageId, requested), out PackageManifest? pm))
+        if (Manifests.TryGetValue(new PackageIdentity(packageId, version), out CodeGenPackageManifest? pm))
         {
             return pm;
         }
 
-        foreach (KeyValuePair<(string id, FhirSemVer version), PackageManifest> kvp in Manifests)
+        foreach (KeyValuePair<PackageIdentity, CodeGenPackageManifest> kvp in Manifests)
         {
-            if (!kvp.Key.id.Equals(packageId, StringComparison.OrdinalIgnoreCase))
+            if (!kvp.Key.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            if (kvp.Key.version.Satisfies(requested))
+            if (PackageVersionMatcher.Satisfies(kvp.Key.Version, version))
             {
                 return kvp.Value;
             }
 
-            FhirSemVer parsed = new(kvp.Value.Version);
-            if (parsed.Satisfies(requested))
+            if (PackageVersionMatcher.Satisfies(kvp.Value.Version, version))
             {
                 return kvp.Value;
             }
@@ -239,57 +207,17 @@ public partial class DefinitionCollection
         return null;
     }
 
-    public PackageManifest? GetManifest(PackageDirective directive)
-    {
-        if (directive.PackageId is null)
-        {
-            return null;
-        }
+    public CodeGenPackageManifest? GetManifest(PackageIdentity identity) => GetManifest(identity.Id, identity.Version);
 
-        if ((directive.FhirCacheVersion is not null) &&
-            Manifests.TryGetValue((directive.PackageId, directive.FhirCacheVersion), out PackageManifest? pm))
-        {
-            return pm;
-        }
-
-        if ((directive.ResolvedVersion is not null) &&
-            Manifests.TryGetValue((directive.PackageId, directive.ResolvedVersion), out pm))
-        {
-            return pm;
-        }
-
-        foreach (KeyValuePair<(string id, FhirSemVer version), PackageManifest> kvp in Manifests)
-        {
-            if (!kvp.Key.id.Equals(directive.PackageId, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            if ((directive.FhirCacheVersion is not null) &&
-                kvp.Key.version.Satisfies(directive.FhirCacheVersion))
-            {
-                return kvp.Value;
-            }
-
-            if ((directive.ResolvedVersion is not null) &&
-                kvp.Key.version.Satisfies(directive.ResolvedVersion))
-            {
-                return kvp.Value;
-            }
-        }
-
-        return null;
-    }
-
-    public bool TryGetManifest(string packageId, string version, [NotNullWhen(true)] out PackageManifest? pm)
+    public bool TryGetManifest(string packageId, string version, [NotNullWhen(true)] out CodeGenPackageManifest? pm)
     {
         pm = GetManifest(packageId, version);
         return pm is not null;
     }
 
-    public bool TryGetManifest(PackageDirective directive, [NotNullWhen(true)] out PackageManifest? pm)
+    public bool TryGetManifest(PackageIdentity identity, [NotNullWhen(true)] out CodeGenPackageManifest? pm)
     {
-        pm = GetManifest(directive);
+        pm = GetManifest(identity);
         return pm is not null;
     }
 

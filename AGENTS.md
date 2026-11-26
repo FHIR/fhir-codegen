@@ -38,12 +38,12 @@ public API changes in `Fhir.CodeGen.*` are breaking changes.
 | `src/fhir-codegen/` | `System.CommandLine`-based CLI (`OutputType=Exe`). |
 | `src/fhir-codegen-shared/` | Shared Project (`.projitems`) imported by the CLI. |
 | `src/Fhir.CodeGen.Common/` | Lightweight POCOs, shared models, polyfills. Dependency-light by design. |
-| `src/Fhir.CodeGen.Packages/` | FHIR package cache management (download, resolve, registry lookup). |
 | `src/Fhir.CodeGen.CrossVersionLoader/` | Load and reconcile artifacts across R2/R3/R4/R4B/R5. |
 | `src/Fhir.CodeGen.MappingLanguage/` | FML (FHIR Mapping Language) parser/abstractions. |
 | `src/Fhir.CodeGen.LangSQLite/`, `src/Fhir.CodeGen.SQLiteGenerator/` | SQLite export backend. |
 | `src/Fhir.CodeGen.Lib/` | Core engine: loader → normalized model → language exporters. |
 | `src/Fhir.CodeGen.Lib/Language/` | **The main extension point** — one `ILanguage` implementation per output format. |
+| `src/Fhir.CodeGen.Lib/Packaging/` | The package boundary — codegen-owned types over `fhir-pkg-lib`. The **only** place permitted to name a `FhirPkg` type. |
 | `src/Fhir.CodeGen.Comparison/` | Package/artifact diffing. |
 | `src/Fhir.CodeGen.CrossVersionExporter/` | Produces cross-version artifacts. |
 | `src/performance-test-cli/` | Standalone perf tooling. |
@@ -61,23 +61,45 @@ public API changes in `Fhir.CodeGen.*` are breaking changes.
 
 ## Toolchain pins
 
-- **.NET 9 targeting pack is required.** There is **no `global.json`**, so
-  the SDK version is a *floor*, not an exact pin — any SDK that can target
-  `net9.0` works. CI pins `DOTNET_VERSION: '9'`
-  (`.github/workflows/build-and-test.yml`); a .NET 10 SDK building `net9.0`
-  is also known-good locally.
-- **Every project targets `net9.0`** except `Fhir.CodeGen.SQLiteGenerator`,
-  which targets **`netstandard2.0`**. Do not "fix" that one to `net9.0`.
+- **.NET 11 SDK is required.** There is **no `global.json`**, so the SDK
+  version is not exactly pinned; use an SDK that supports `net11.0`.
+- **Every project targets `net11.0`** except `Fhir.CodeGen.SQLiteGenerator`,
+  which targets **`netstandard2.0`**. Do not "fix" that one to `net11.0`.
 - `fhir-codegen.props` (imported by the project files) sets
   **`LangVersion 14.0`**, **`Nullable enable`**, **`ImplicitUsings enable`**
   solution-wide. Change these there, not per-project.
 - Versions are declared **per-project** in each `.csproj`. There is no
   central package management and no lock file, so a dependency bump must be
   applied consistently across every project that references the package
-  (the `Hl7.Fhir.*` family is currently `5.13.3` everywhere).
+  (the `Hl7.Fhir.*` family is currently `5.13.4` everywhere).
 - **Warnings are not errors.** No project sets `TreatWarningsAsErrors`,
   `EnforceCodeStyleInBuild`, `AnalysisLevel`, or `AnalysisMode`.
+- Current direct package baselines after the .NET 11 upgrade:
+
+  | Package | Version |
+  |-|-|
+  | `Microsoft.Extensions.*`, `Microsoft.Data.Sqlite` | `11.0.0` |
+  | `System.CommandLine` | `2.0.15` |
+  | `Microsoft.NET.Test.Sdk` | `18.12.0` |
+  | `xunit`, `xunit.runner.visualstudio` | `2.9.3`, `4.0.1` |
+  | `Shouldly`, `coverlet.collector` | `4.3.0`, `10.1.0` |
+  | `Microsoft.CodeAnalysis.Common`, `Microsoft.CodeAnalysis.CSharp` | `5.9.0` |
+  | `fhir-pkg-lib` (only in `Fhir.CodeGen.Lib`) | `2026.1113.1240` |
+  | `Hl7.Fhir.*` | `5.13.4` |
+  | `brianpos.Fhir.Base.FhirPath.Validator` | `5.13.4-rc2` |
+  | `Microsoft.OpenApi` | `1.6.31` |
+
+  Retained `System.Text.Json 10.0.11` and `PolySharp 1.15.0` references
+  are conditional on `netstandard2.0` in projects that now target only
+  `net11.0`; those references are inactive for current builds.
+  C# remains explicitly set to **14.0**; targeting .NET 11 does not
+  change the language-version setting. The FHIR and OpenAPI
+  major-version migrations remain deferred.
 - Tests need the **FHIR package cache** populated — see "Test" below.
+
+Both
+`.github/workflows/build-and-test.yml` and `.github/workflows/docs.yaml`
+set `DOTNET_VERSION: '11'` to build the `net11.0` projects.
 
 ---
 
@@ -115,7 +137,7 @@ check exists.
 
 **xUnit 2.9.3** with **Shouldly 4.3.0** for assertions — *not*
 FluentAssertions. The runner is **VSTest**
-(`Microsoft.NET.Test.Sdk 17.14.1` + `xunit.runner.visualstudio 3.1.5`);
+(`Microsoft.NET.Test.Sdk 18.12.0` + `xunit.runner.visualstudio 4.0.1`);
 there is no `global.json` `"runner"` entry and no `OutputType=Exe` test
 project, so **Microsoft.Testing.Platform is not in use**.
 
@@ -127,10 +149,15 @@ syntax**, supporting `FullyQualifiedName~Substring`,
 ### Full suite
 
 ```powershell
-dotnet test --configuration Release --framework net9.0 --filter "RequiresExternalRepo!=true"
+dotnet test --configuration Release --framework net11.0 --filter "RequiresExternalRepo!=true"
 ```
 
-This is exactly what CI runs. **Always keep the
+This uses the framework and external-repository filter configured in
+`.github/workflows/build-and-test.yml`; that workflow additionally
+restores for the runner architecture and uses `--no-restore`.
+The test workflow intentionally triggers only for pull requests to
+`main-disabled`, not `main`; leave that branch filter unchanged for now.
+**Always keep the
 `RequiresExternalRepo!=true` filter**: tests carrying
 `[Trait("RequiresExternalRepo", "true")]` clone the HL7 cross-version IG
 repositories and are skipped in CI.
@@ -142,8 +169,7 @@ dotnet test src/Fhir.CodeGen.Lib.Tests/Fhir.CodeGen.Lib.Tests.csproj --filter "R
 ```
 
 Test projects: `Fhir.CodeGen.Lib.Tests`,
-`Fhir.CodeGen.MappingLanguage.Tests`, `Fhir.CodeGen.Packages.Tests`,
-`fhir-codegen.Tests`.
+`Fhir.CodeGen.MappingLanguage.Tests`, `fhir-codegen.Tests`.
 
 ### Focused — one class or one test
 
@@ -272,11 +298,19 @@ These are decisions, not preferences. Violating one is a review Blocker.
   `Fhir.CodeGen.Common`. Preserve those branches when editing.
 - **`Fhir.CodeGen.Common` stays dependency-light.** Everything else depends
   on it; adding a heavy dependency there propagates everywhere.
-- **Dependency direction is one-way:** `Common` ← `Packages` /
+- **Dependency direction is one-way:** `Common` ←
   `CrossVersionLoader` / `MappingLanguage` / `LangSQLite` ← `Lib` ← CLI.
   Do not introduce a cycle or make `Common` depend upward.
+- **The package library is quarantined behind a seam.** FHIR package
+  acquisition comes from the `fhir-pkg-lib` NuGet package, and
+  `src/Fhir.CodeGen.Lib/Packaging/` is the **only** place permitted to name a
+  `FhirPkg` type. Everything above it works in the codegen-owned types
+  (`PackageIdentity`, `CodeGenPackage`, `CodeGenPackageManifest`,
+  `CodeGenPackageIndex`, `CodeGenPackageDirective`).
+  `PackageSeamTests.PublicSurfaceExposesNoUpstreamPackageTypes` reflects over
+  the exported surface of `Fhir.CodeGen.Lib` and enforces this.
 - **Tests do not write generated artifacts to disk.**
-  `GenerationTests.WriteGeneratedFiles` is `false`
+  `GenerationTestBase.WriteGeneratedFiles` is `false`
   (`src/Fhir.CodeGen.Lib.Tests/GenerationTests.cs:29`). Toggle it locally
   when debugging; **never commit it as `true`.**
 - For **new** SQLite interaction code the stated preference is the
@@ -284,6 +318,11 @@ These are decisions, not preferences. Violating one is a review Blocker.
   references it today — the existing SQLite backend uses
   `Microsoft.Data.Sqlite` — so introducing it adds a dependency and needs
   the user's go-ahead.
+- **Documentation exploration stays documentation-only.** `dev-explore`
+  may write its own slot artifacts and manifest-listed documentation
+  output, never application code, dependencies, configuration, or git
+  history. Static HTML assets are part of the documentation deliverable.
+  Exploration and implementation slots are separate.
 
 ---
 
@@ -374,6 +413,25 @@ scratch/<MMDD>-<##>/
   analysis.md          # authored by dev-review
 ```
 
+Use a **separate exploration slot** for `dev-explore`:
+
+```text
+scratch\<MMDD>-<##>\
+  request.md           # Workflow: dev-explore; options, state, manifest
+  approaches.md        # competing documentation shapes and selection
+  sources.md           # source inventory and evidence map
+  outline.md           # pages, sections, and question coverage
+  review.md            # review of the current deliverable
+  output\              # default generated documentation directory
+    README.md          # Markdown entry, or index.html for HTML
+```
+
+`dev-explore` owns these artifacts, never calls the implementation or
+publishing loop, and never commits. `output` may explicitly name a
+dedicated documentation directory outside scratch; it must be empty or
+already owned by that exploration. Existing manual edits are protected.
+An exploration carries no `Issue` binding.
+
 - `<MMDD>` is the local date (zero-padded month + day); `<##>` is a
   zero-padded two-digit slot number.
 - `scratch/` is **ignored** — `/scratch` in `.gitignore`. Nothing in it is
@@ -391,7 +449,11 @@ scratch/<MMDD>-<##>/
 - Read this file before proposing any build, test, or lint command. **Never
   invent a command.** If something you need is not documented here, say so
   rather than guessing.
-- Subagents must use the same model configuration as the spawning agent.
+- Subagents follow the **subagent model policy** recorded below.
+- `dev-explore` defaults to automatic decisions and uses the same model
+  policy. Explicit per-run model selections do not rewrite this file.
+  Its concurrency and total-child budgets include rechecks and retries;
+  resuming does not reset cumulative spend.
 - Do not add new linting, building, or testing tooling without being asked.
   In particular, do not add StyleCop.Analyzers or set
   `EnforceCodeStyleInBuild` on your own initiative.
@@ -408,3 +470,29 @@ scratch/<MMDD>-<##>/
 - The `docs/specs/` tree documents the cross-version (`xver`) pipeline step
   by step. Consult it before changing anything under
   `Fhir.CodeGen.CrossVersionLoader` or `Fhir.CodeGen.CrossVersionExporter`.
+
+### Subagent model policy
+
+Every `dev-*` skill that fans out reads this table before it spawns
+anything, and each skill classifies its own roles as **reasoning** or
+**mechanical**. **An absent or unreadable table means `uniform`** — the
+conservative default, and the behavior every repo had before this table
+existed.
+
+| Setting | Value |
+|-|-|
+| Policy | uniform |
+| Mechanical-tier model | n/a |
+
+- **`uniform`** — every sub-agent runs the spawning agent's model
+  configuration, whatever its role.
+- **`tiered`** — a sub-agent in a **reasoning** role runs the spawning
+  agent's configuration; a sub-agent in a **mechanical** role runs the
+  recorded mechanical-tier model.
+
+The role classification lives in the skills, not here: it is a property
+of the loop and does not vary between repositories. Only the policy and
+the model id do, which is why they are the two rows recorded.
+
+A recorded value here is a **resolved answer**. `dev-setup` asks once and
+never re-prompts, exactly as it treats the GitHub integration block.

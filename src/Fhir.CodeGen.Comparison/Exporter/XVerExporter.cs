@@ -41,6 +41,7 @@ public class XVerExporter
 
     internal string _crossDefinitionVersion;
     internal readonly DateTimeOffset _runTime = DateTimeOffset.UtcNow;
+    internal bool ReportOmissions => _config.ReportOmissions;
 
     internal VersionSpecificExtensionBehaviorCodes _versionSpecificExtBehavior = VersionSpecificExtensionBehaviorCodes.ShortVersion;
     internal VersionSpecificExportCodes _versionSpecificExport = VersionSpecificExportCodes.TargetVersion;
@@ -67,6 +68,12 @@ public class XVerExporter
         int? maxStepSize = null,
         HashSet<(FhirReleases.FhirSequenceCodes s, FhirReleases.FhirSequenceCodes t)>? specificPairs = null)
     {
+        RefreshConfiguration();
+        HashSet<(FhirReleases.FhirSequenceCodes, FhirReleases.FhirSequenceCodes)>? invocationPairs =
+            specificPairs is null ? null : [.. specificPairs];
+        using XVerPreparedOperation operation = XVerPreparedOperation.Prepare(_db,
+            new(XVerPreparationKind.ExportContent, maxStepSize: maxStepSize, specificPairs: invocationPairs,
+                processVocabulary: false, includeIgScripts: includeIgScripts, configuration: _config));
         // build the main package structure and supporting files
         IgExporter igExporter = new IgExporter(
             _db,
@@ -76,19 +83,57 @@ public class XVerExporter
             this,
             _config);
 
-        IgExporter.XVerExportTrackingRecord tr = igExporter.CreateInitialXVerIgs(
-            includeIgScripts,
-            maxStepSize: maxStepSize,
-            specificPairs: specificPairs);
+        IgExporter.ExportSchedule schedule = igExporter.BuildExportSchedule(maxStepSize, invocationPairs);
+        if (processStructures)
+        {
+            UnsafeCodeInputStore.RequireExportState(_db, schedule.PackagePairs);
+        }
+        operation.CaptureExportOperands(
+            new(processStructures && schedule.PackagePairs.Count > 0 ? XVerPreparationKind.Export : XVerPreparationKind.ExportContent,
+                XVer.XVerProcessor._exclusionSet, maxStepSize: maxStepSize, specificPairs: invocationPairs,
+                processVocabulary: processVocabulary, includeIgScripts: includeIgScripts, configuration: _config,
+                includeStructurePages: processStructures));
+        if (processStructures)
+        {
+            IReadOnlyList<FhirPackageComparisonPair> verified = UnsafeCodeInputStore.RequireExportReady(_db, schedule.PackagePairs, operation);
+            if (verified.Count != schedule.PackagePairs.Count)
+            {
+                if (ReportOmissions) throw new InvalidOperationException("Cannot export WIP IGs with missing or stale profile decisions.");
+                if (verified.Count == 0) return;
+                schedule = schedule with { PackagePairs = verified, ValidationPackages = [.. schedule.ValidationPackages.Where(
+                    package => verified.Any(pair => pair.TargetPackageKey == package.Key))] };
+            }
+        }
+
+        IgExporter.XVerExportTrackingRecord tr = igExporter.PrepareXVerIgs(schedule);
+        VocabularyFhirExporter vocabularyExporter = new(this, _db, _loggerFactory);
+        IReadOnlyList<VocabularyFhirExporter.BuiltFile> vocabulary = processVocabulary ? vocabularyExporter.Build(tr) : [];
+        StructureFhirExporter? structureExporter = null;
+        List<(IgExporter.XVerIgExportTrackingRecord Tracking, StructureFhirExporter.EmissionPlan Definitions)> structures = [];
+        StructurePageExporter? structurePageExporter = null;
+        if (processStructures)
+        {
+            structureExporter = new(this, _db, _loggerFactory);
+            foreach (IgExporter.XVerIgExportTrackingRecord igTr in tr.XVerIgs)
+            {
+                structures.Add((igTr, structureExporter.BuildDefinitions(igTr, operation).ForEmission()));
+            }
+            structurePageExporter = new(this, _db, _loggerFactory, operation);
+        }
+
+        IReadOnlyList<FhirPackageComparisonPair> audited = UnsafeCodeInputStore.AuditExportReady(_db, processStructures ? schedule.PackagePairs : [], operation);
+        if (processStructures && audited.Count != schedule.PackagePairs.Count)
+        {
+            // The schedule changed after construction; do not publish its stale artifacts.
+            if (ReportOmissions) throw new InvalidOperationException("WIP export inputs changed during construction.");
+            return;
+        }
+        igExporter.MaterializeXVerIgs(tr, includeIgScripts);
 
         // export vocabulary (if requested)
         if (processVocabulary)
         {
-            VocabularyFhirExporter vocabularyExporter = new VocabularyFhirExporter(
-                this,
-                _db,
-                _loggerFactory);
-            vocabularyExporter.Export(tr);
+            vocabularyExporter.Emit(vocabulary);
 
             VocabularyPageExporter vocabularyPageExporter = new VocabularyPageExporter(
                 this,
@@ -98,22 +143,26 @@ public class XVerExporter
         }
 
         // export structures (if requested)
-        if (processStructures)
+        if (structureExporter is not null)
         {
-            StructureFhirExporter structureExporter = new StructureFhirExporter(
-                this,
-                _db,
-                _loggerFactory);
-            structureExporter.Export(tr);
+            foreach ((IgExporter.XVerIgExportTrackingRecord igTr, StructureFhirExporter.EmissionPlan definitions) in structures)
+            {
+                structureExporter.Emit(igTr, definitions, operation);
+            }
 
-            StructurePageExporter structurePageExporter = new StructurePageExporter(
-                this,
-                _db,
-                _loggerFactory);
-            structurePageExporter.Export(tr);
+            structurePageExporter!.Export(tr, operation);
         }
 
         // finalize the IG package
         igExporter.FinalizeXVerIgs(tr);
+    }
+
+    internal ConfigXVer Configuration => _config;
+
+    internal void RefreshConfiguration()
+    {
+        _outputPath = _config.OutputDirectory;
+        _crossVersionSourcePath = string.IsNullOrEmpty(_config.CrossVersionMapSourcePath) ? null : _config.CrossVersionMapSourcePath;
+        _crossDefinitionVersion = string.IsNullOrEmpty(_config.XverArtifactVersion) ? "0.1.0" : _config.XverArtifactVersion;
     }
 }

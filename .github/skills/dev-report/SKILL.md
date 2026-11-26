@@ -90,6 +90,10 @@ evidence they have.
 1. **Resolve the target path.** If it's a number, expand to
    `scratch/<MMDD>-<##>/bugreport.md` using today's date. Echo the
    resolved path.
+   If that directory's `request.md` carries
+   `| Workflow | dev-explore |`, stop and ask for a different slot.
+   Do not convert a documentation exploration into implementation work
+   or overwrite its request, including through a custom target filename.
 2. **Load existing content** if the file is present.
 3. **Triage the new input.** Sort it into Symptoms vs. Environment vs.
    Repro vs. Hypotheses. Don't mix them.

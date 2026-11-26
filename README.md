@@ -2,7 +2,19 @@
 
 [![Docs](https://github.com/FHIR/fhir-codegen/actions/workflows/docs.yaml/badge.svg)](https://github.com/FHIR/fhir-codegen/actions/workflows/docs.yaml)
 
-A .Net application, library, and related utilities to work with FHIR specifications.
+A .NET 11 application, library, and related utilities to work with FHIR specifications.
+
+## Requirements
+
+Running the CLI requires the **.NET 11 runtime**; building from source
+requires the **.NET 11 SDK**. The CLI, libraries,
+and tests target `net11.0`; the SQLite source generator remains on
+`netstandard2.0`. The solution explicitly uses **C# 14.0**, configured
+in [`fhir-codegen.props`](fhir-codegen.props).
+
+See [Contributing](CONTRIBUTING.MD#building-and-testing) for build and test
+commands and [Toolchain pins](AGENTS.md#toolchain-pins) for current
+dependency versions and CI settings.
 
 ## FHIR Foundation Project Statement
 * Maintainers: Gino Canessa
@@ -30,10 +42,12 @@ output languages, the cross-version mapping pipeline, the auto-generated
 command-line reference, and the XMLDoc-driven API reference for the
 `Fhir.CodeGen.*` library set.
 
-The site is rebuilt from `main` on every push by
-[`.github/workflows/docs.yaml`](.github/workflows/docs.yaml). Local docs
-authoring lives under [`docs/`](docs/); the build configuration lives
-under [`docfx/`](docfx/).
+The [docs workflow](.github/workflows/docs.yaml) is configured to build
+for source or documentation changes in pull requests to `main` and
+publish corresponding pushes to `main`. Local docs authoring lives
+under [`docs/`](docs/); the build configuration lives under
+[`docfx/`](docfx/). See the [docs build guide](docs/README.md) for local
+commands and build-pipeline details.
 
 
 # Trademarks

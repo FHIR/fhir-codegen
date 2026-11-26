@@ -23,6 +23,8 @@ namespace Fhir.CodeGen.Comparison.Exporter;
 
 public class VocabularyFhirExporter
 {
+    internal sealed record BuiltFile(string Path, string Json);
+    private List<BuiltFile> _builtFiles = [];
     private readonly XVerExporter _exporter;
     private readonly IDbConnection _db;
 
@@ -42,6 +44,12 @@ public class VocabularyFhirExporter
 
     public void Export(XVerExportTrackingRecord tr)
     {
+        Emit(Build(tr));
+    }
+
+    internal IReadOnlyList<BuiltFile> Build(XVerExportTrackingRecord tr)
+    {
+        _builtFiles = [];
         // iterate over the XVer IGs
         foreach (XVerIgExportTrackingRecord igTr in tr.XVerIgs)
         {
@@ -53,6 +61,17 @@ public class VocabularyFhirExporter
 
             // export concept maps
             exportConceptMaps(igTr);
+        }
+
+        return _builtFiles;
+    }
+
+    internal void Emit(IReadOnlyList<BuiltFile> files)
+    {
+        foreach (BuiltFile file in files)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(file.Path)!);
+            File.WriteAllText(file.Path, file.Json);
         }
     }
 
@@ -74,10 +93,6 @@ public class VocabularyFhirExporter
         }
 
         string dir = igTr.VocabMapDir;
-        if (!Directory.Exists(dir))
-        {
-            Directory.CreateDirectory(dir);
-        }
 
         _logger.LogInformation($"Writing Value Set Concept Maps for `{igTr.PackageId}`...");
 
@@ -156,15 +171,15 @@ public class VocabularyFhirExporter
                 string path = Path.Combine(dir, filename + ".json");
                 if (exporterR3 is not null)
                 {
-                    File.WriteAllText(path, exporterR3.ToJson(vsCm, new SerializerSettings() { Pretty = true }));
+                    _builtFiles.Add(new(path, exporterR3.ToJson(vsCm, new SerializerSettings() { Pretty = true })));
                 }
                 else if (exporterR4 is not null)
                 {
-                    File.WriteAllText(path, exporterR4.ToJson(vsCm, new SerializerSettings() { Pretty = true }));
+                    _builtFiles.Add(new(path, exporterR4.ToJson(vsCm, new SerializerSettings() { Pretty = true })));
                 }
                 else
                 {
-                    File.WriteAllText(path, vsCm.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
+                    _builtFiles.Add(new(path, vsCm.ToJson(new FhirJsonSerializationSettings() { Pretty = true })));
                 }
                 exported.Add(new()
                 {
@@ -379,10 +394,6 @@ public class VocabularyFhirExporter
         }
 
         string dir = igTr.VocabularyDir;
-        if (!Directory.Exists(dir))
-        {
-            Directory.CreateDirectory(dir);
-        }
 
         _logger.LogInformation($"Writing Value Sets for `{igTr.PackageId}`...");
 
@@ -400,7 +411,7 @@ public class VocabularyFhirExporter
             // write the code system to a file
             string filename = $"ValueSet-{inclusion.Id}";
             string path = Path.Combine(dir, filename + ".json");
-            File.WriteAllText(path, inclusion.Json);
+            _builtFiles.Add(new(path, inclusion.Json));
 
             exported.Add(new()
             {
@@ -744,11 +755,11 @@ public class VocabularyFhirExporter
             
             if (exporterR3 is not null)
             {
-                File.WriteAllText(path, exporterR3.ToJson(fhirVs, new SerializerSettings() { Pretty = true }));
+                _builtFiles.Add(new(path, exporterR3.ToJson(fhirVs, new SerializerSettings() { Pretty = true })));
             }
             else
             {
-                File.WriteAllText(path, fhirVs.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
+                _builtFiles.Add(new(path, fhirVs.ToJson(new FhirJsonSerializationSettings() { Pretty = true })));
             }
 
             exported.Add(new()
@@ -777,10 +788,6 @@ public class VocabularyFhirExporter
         }
 
         string dir = igTr.VocabularyDir;
-        if (!Directory.Exists(dir))
-        {
-            Directory.CreateDirectory(dir);
-        }
 
         _logger.LogInformation($"Writing Code Systems for `{igTr.PackageId}`...");
 
@@ -798,7 +805,7 @@ public class VocabularyFhirExporter
             // write the code system to a file
             string filename = $"CodeSystem-{inclusion.Id}";
             string path = Path.Combine(dir, filename + ".json");
-            File.WriteAllText(path, inclusion.Json);
+            _builtFiles.Add(new(path, inclusion.Json));
 
             exported.Add(new()
             {
@@ -1011,7 +1018,7 @@ public class VocabularyFhirExporter
             // write the code system to a file
             string filename = $"CodeSystem-{fhirCs.Id}";
             string path = Path.Combine(dir, filename + ".json");
-            File.WriteAllText(path, fhirCs.ToJson(new FhirJsonSerializationSettings() { Pretty = true }));
+            _builtFiles.Add(new(path, fhirCs.ToJson(new FhirJsonSerializationSettings() { Pretty = true })));
 
             exported.Add(new()
             {

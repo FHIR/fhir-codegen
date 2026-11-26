@@ -359,12 +359,14 @@ public class Program
         {
             if (ex.InnerException != null)
             {
-                Console.WriteLine($"DoXVer <<< caught: {ex.Message}::{ex.InnerException.Message}");
+                Console.Error.WriteLine($"DoXVer <<< caught: {ex.Message}::{ex.InnerException.Message}");
             }
             else
             {
-                Console.WriteLine($"DoXVer <<< caught: {ex.Message}");
+                Console.Error.WriteLine($"DoXVer <<< caught: {ex.Message}");
             }
+
+            return Task.FromResult(1);
         }
 
         return Task.FromResult(0);

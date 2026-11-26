@@ -24,7 +24,6 @@ both as a library set and as a `System.CommandLine`-based CLI.
 | Project | Role |
 |---|---|
 | `Fhir.CodeGen.Common` | Lightweight POCOs / shared models / polyfills. |
-| `Fhir.CodeGen.Packages` | FHIR package cache management (download, resolve, registry lookup). |
 | `Fhir.CodeGen.CrossVersionLoader` | Load and reconcile artifacts across FHIR versions. |
 | `Fhir.CodeGen.MappingLanguage` | FHIR Mapping Language (FML) parser/abstractions. |
 | `Fhir.CodeGen.LangSQLite` | SQLite export backend used by the `Lib` engine. |
